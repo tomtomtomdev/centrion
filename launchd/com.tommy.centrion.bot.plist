@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  centrion's listener: long-polls Telegram forever and starts a Claude Code session on this Mac
+  when the phone asks for one (SPEC.md §8). Unlike every other com.tommy.* job on this box this
+  one is a daemon, not a batch run, and three of the settings below differ from theirs for that
+  reason.
+
+  ProcessType Standard, NOT Background. This is the setting to get wrong. A Background job is
+  throttled by the scheduler, which is correct for the stockwatch and beacon jobs — short, bulk,
+  nobody waiting. Here the listener spawns Claude Code sessions, and a spawned process inherits
+  its parent's ProcessType: every session started from the phone would run throttled, for hours,
+  with no error anywhere. The symptom is "Remote Control feels slow", days later, and nothing in
+  any log connects it to this line. Pinned by test_bot.TestTheLaunchdInstall.
+
+  KeepAlive true, unconditional — not {SuccessfulExit: false}. This daemon has no successful
+  exit. Whatever stops it, it should come back. ThrottleInterval 10 keeps a config error from
+  becoming a hot restart loop; the listener's own §7 backoff handles everything short of that.
+
+  No token here. .telegram.json is 0600 and gitignored, and files in ~/Library/LaunchAgents are
+  world-readable 0644 (SPEC.md §10.5). The listener reads its own config; launchd passes none.
+
+  A LaunchAgent lives in the GUI domain: it runs only while logged in and stops when the Mac
+  sleeps. That is survivable here in a way it was not for the beacon jobs — Remote Control needs
+  this Mac awake regardless, so a sleeping Mac means no session either way. Telegram holds the
+  message for 24h and §7's date guard decides on wake whether it is still worth honouring. Run
+  it under `caffeinate -s` if it should answer with the lid shut, and accept the power cost.
+
+  Every path below must stay outside ~/Documents, ~/Desktop and ~/Downloads. A launchd-spawned
+  process does not inherit the terminal's Full Disk Access grant and dies before its first line,
+  exit 126 — beacon on 2026-09-10, stockwatch on 2026-09-08. StandardOutPath counts: launchd
+  opens it itself, before the script runs. This is also why the bot's whole reachable world is
+  ~/Projects (SPEC.md §9.2), and why var/ must exist before the first bootstrap.
+
+  install:  mkdir -p /Users/tomtomtomtom/Projects/centrion/var
+            cp launchd/com.tommy.centrion.bot.plist ~/Library/LaunchAgents/
+            launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tommy.centrion.bot.plist
+  restart:  launchctl kickstart -k gui/$(id -u)/com.tommy.centrion.bot
+  status:   launchctl print gui/$(id -u)/com.tommy.centrion.bot | head -30
+  remove:   launchctl bootout gui/$(id -u)/com.tommy.centrion.bot
+  logs:     tail -f var/bot.log   — and per SPEC.md §14 this is the first place to look when the
+            phone gets no reply. A silent drop there is §10.3 working as designed, not a bug.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tommy.centrion.bot</string>
+
+  <!-- bot.sh takes the single-instance lock, then execs python. The lock must be held by a
+       shell: `exec 9>>` opens fd 9 without close-on-exec, which is what makes the flock outlive
+       the exec and last for the listener's whole life. See launchd/lock.sh. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>/Users/tomtomtomtom/Projects/centrion/launchd/bot.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/tomtomtomtom/Projects/centrion</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <!-- Standard, not Background. See the note above; this is the one that matters. -->
+  <key>ProcessType</key>
+  <string>Standard</string>
+
+  <key>StandardOutPath</key>
+  <string>/Users/tomtomtomtom/Projects/centrion/var/bot.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/tomtomtomtom/Projects/centrion/var/bot.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Without this, python buffers stderr when it is a file rather than a tty and the log
+         goes quiet for kilobytes at a time — which makes `tail -f var/bot.log`, the one
+         diagnostic §14 offers, useless exactly when it is needed. -->
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+    <!-- launchd provides no useful PATH. This is the listener's own; the environment the
+         spawned session gets is built explicitly by session.py in slice 6 and shares nothing
+         with this (SPEC.md §6). -->
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- launchd's SIGTERM-to-SIGKILL window at logout or shutdown. The listener has nothing to
+       flush, but from slice 6 it has detached runners that should get their own SIGTERM out
+       first. The default is 20s. -->
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+</dict>
+</plist>

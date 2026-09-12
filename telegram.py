@@ -14,8 +14,10 @@ return from getUpdates the reconciliation tick.
 **It never says the token.** Every call is `/bot<token>/<method>`, so the credential is in the
 URL, and `HTTPError` carries the URL in both `.url` and its `str()`. §10 is blunt about what
 that credential is: shell access to this Mac. So nothing built from an exception reaches a log
-line or a Telegram reply without going through `_redact`, errors are raised `from None` so a
-traceback cannot print the original in a `__cause__` chain, and `repr()` shows nothing.
+line or a Telegram reply without going through `redact()` — which bot.py reuses, since §7's
+rule is about everything outbound and not only about this module — errors are raised
+`from None` so a traceback cannot print the original in a `__cause__` chain, and `repr()` shows
+nothing.
 
 **It sends plain text.** notify.py uses HTML parse mode, which suits a report it composes
 itself. Here the payload is often a tail of a PTY transcript full of `<`, `&` and `_`, and one
@@ -84,7 +86,7 @@ class Telegram:
     def __repr__(self):
         return "Telegram(token=<redacted>, offset=%r)" % (self.offset,)
 
-    def _redact(self, text):
+    def redact(self, text):
         """Anything derived from an exception or a response goes through here first."""
         s = str(text)
         if self.token:
@@ -130,7 +132,7 @@ class Telegram:
             detail = self._detail(e)
             raise TelegramError(
                 "%s: HTTP %d %s" % (method, e.code,
-                                    self._redact(detail.get("description") or "no description")),
+                                    self.redact(detail.get("description") or "no description")),
                 code=e.code,
                 retry_after=(detail.get("parameters") or {}).get("retry_after"),
             ) from None
@@ -141,10 +143,10 @@ class Telegram:
             raise TelegramError("%s: socket timeout" % method, timed_out=True) from None
         except urllib.error.URLError as e:
             timed_out = isinstance(e.reason, socket.timeout)
-            raise TelegramError("%s: %s" % (method, self._redact(e.reason)),
+            raise TelegramError("%s: %s" % (method, self.redact(e.reason)),
                                 timed_out=timed_out) from None
         except OSError as e:
-            raise TelegramError("%s: %s" % (method, self._redact(e))) from None
+            raise TelegramError("%s: %s" % (method, self.redact(e))) from None
 
         try:
             body = json.loads(raw)
@@ -153,7 +155,7 @@ class Telegram:
             raise TelegramError("%s: response was not JSON" % method) from None
         if not isinstance(body, dict) or not body.get("ok"):
             description = body.get("description") if isinstance(body, dict) else None
-            raise TelegramError("%s: %s" % (method, self._redact(description or "ok=false")))
+            raise TelegramError("%s: %s" % (method, self.redact(description or "ok=false")))
         return body.get("result")
 
     def _wait(self):
@@ -191,7 +193,7 @@ class Telegram:
                 self.sleep(CONFLICT_BACKOFF)
                 return []
             wait = self._wait()
-            self.log("getUpdates: %s — retrying in %ds" % (self._redact(e), wait))
+            self.log("getUpdates: %s — retrying in %ds" % (self.redact(e), wait))
             self.sleep(wait)
             return []
 
@@ -217,11 +219,11 @@ class Telegram:
                 return True
             except TelegramError as e:
                 if e.code is not None and e.code not in RETRY_CODES:
-                    self.log("%s: giving up — %s" % (method, self._redact(e)))
+                    self.log("%s: giving up — %s" % (method, self.redact(e)))
                     return False
                 if last:
                     self.log("%s: giving up after %d attempts — %s"
-                             % (method, SEND_ATTEMPTS, self._redact(e)))
+                             % (method, SEND_ATTEMPTS, self.redact(e)))
                     return False
                 self.sleep(min(e.retry_after or FIRST_BACKOFF * (attempt + 1), MAX_BACKOFF))
         return False

@@ -264,3 +264,38 @@ def resolve(name, root=None):
         raise ProjectError("that is a file, not a project directory. Send `claude` on its own "
                            "for the list.")
     return path
+
+
+def projects(root=None):
+    """Every name `claude <project>` will accept, sorted for a phone. Never raises.
+
+    The inverse of `resolve()`, and it is built out of `resolve()` rather than beside it. A
+    listing that applied its own copy of §3's rules would drift from the real ones, and the way
+    that drift shows up is the worst kind: a name printed in the reply to bare `claude` that
+    `claude <name>` then refuses, on a phone, with no way to tell which of the two is wrong.
+    Filtering through the boundary itself makes the list true by construction — at the cost of
+    a handful of `realpath` calls on a directory with a dozen entries in it, which is nothing.
+
+    Sorted case-insensitively because §9.9's volume is case-insensitive: `Lab` sorting above
+    `beacon` is ASCII being correct and the list looking broken.
+
+    Empty rather than raising when the root cannot be read. §9.2 is the case that matters —
+    a launchd process that has lost its reach into the root through TCC still has to answer the
+    phone, because that reply is the only way to find out that it has.
+    """
+    if root is None:
+        root = load().projects_root
+    root = os.path.realpath(os.path.expanduser(root))
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return []
+
+    found = []
+    for name in names:
+        try:
+            resolve(name, root)
+        except ProjectError:
+            continue
+        found.append(name)
+    return sorted(found, key=lambda n: (n.lower(), n))
