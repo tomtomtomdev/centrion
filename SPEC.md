@@ -520,6 +520,22 @@ All verified 2026-09-12 unless noted.
    Pinned by
    `test_projects.TestTheHappyCase.test_a_miscased_name_finds_the_directory_but_keeps_the_spelling_it_was_given`.
 
+10. **The pty hangup kills the child, but only after it owns the terminal.** *Verified:*
+    closing the master SIGHUPs the child in ~100ms, which is what §2 relies on and why the
+    runner must sit in a read loop rather than spawn and return. The qualifier is the whole of
+    this entry: SIGHUP travels to a process through its *controlling* terminal, and the child
+    only has one once it has run `setsid()` and `TIOCSCTTY`. Close the master inside the window
+    between the fork and that ioctl and there is nothing to hang up from — the child survives,
+    orphaned, writing to a pty nobody holds, and `ls` never shows it because no record was ever
+    written for it. A `stop` arriving moments after a spawn lands exactly in that window.
+
+    **So `stop` must signal, not hang up** — and must signal the process *group*, since the
+    child leads its own after `setsid()` and whatever the session started (a dev server, a
+    simulator) is in there with it. `killpg(pid)` alone is not enough either: before `setsid()`
+    there is no such group and it fails with `ESRCH`, which looks exactly like success. Both,
+    every time. Pinned by
+    `test_session.TestTheTerminalSize.test_a_child_orphaned_before_it_owns_the_terminal_is_still_killed`.
+
 ---
 
 ## 10. Security
@@ -723,7 +739,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 3 | Telegram client | ☑ | `socket.timeout` is **not** a `TimeoutError` subclass on 3.9 (only from 3.10), so notify.py's `except (URLError, TimeoutError)` misses it entirely — and a 50s long poll produces one whenever a connection is dropped quietly. It would have killed the listener on an idle afternoon. Also: `getUpdates` without an offset does **not** consume the queue; §3 said it did and has been corrected. |
 | 4 | command parsing | ☑ | `str.isdigit()` is True for `²` and `٢` while `int()` raises `ValueError` on the first — so a `stop ²` off a phone keyboard would have crashed the poll loop §7 requires never to die. `isascii()` *and* `isdigit()`. The design note: bare `stop` is `help`, never `stop all` — the one misreading in this grammar that cannot be taken back. |
 | 5 | listener, echoing | ☑ | A corrupt `var/offset` is dangerous in only one direction, and it is the opposite of the obvious one. Too *small* replays a batch, and §7's date guard then drops it; too *large* acknowledges updates that have not arrived, and the bot goes **permanently deaf** — silently, and across restarts, because the bad number is on disk. `read_offset` therefore bounds the value as well as its type. Also, proved live on the first boot: it dropped two messages left queued by slice 3's `--whoami` three hours earlier, which is §3's correction seen from the other side — they were still there to drop. |
-| 6 | PTY runner + URL scrape | ☐ | |
+| 6 | PTY runner + URL scrape | ☑ | The pty hangup that §2 leans on is **racy**: it reaches the child through its controlling terminal, which it does not have until `TIOCSCTTY` has run, so a master closed in that window orphans it instead of killing it. And `killpg(pid)` fails with `ESRCH` there — indistinguishable from success — because there is no group yet. `terminate()` signals group *and* process. See §9.10; slice 8's `stop all` is what would have been quietly leaving sessions behind. Confirmed live: box-drawing rules in a real transcript now measure exactly 200, where §6 recorded 80 before the ioctl. |
 | 7 | `claude` end to end | ☐ | |
 | 8 | fleet control + reconciliation | ☐ | |
 | 9 | hardening | ☐ | |
