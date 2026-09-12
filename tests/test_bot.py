@@ -1116,6 +1116,12 @@ class TestTheLoopIsNeverBlocked(Base):
         self.assertIn(LINK, tg.texts[1])
 
     def test_a_second_session_starts_while_the_first_is_still_starting(self):
+        """Two pending sessions at once, which is the ordinary way to use two hands on a phone.
+
+        Both waiters are released rather than left to run out their deadline: a test that ends
+        by waiting out a timeout is racing `settle()`'s own, which is §9.11's nested graces in
+        miniature — and it costs the whole suite that timeout on every run.
+        """
         gate = threading.Event()
         self.addCleanup(gate.set)
         self.sessions.outcome = session.STARTING
@@ -1123,9 +1129,13 @@ class TestTheLoopIsNeverBlocked(Base):
         tg = FakeTelegram([message("claude beacon", uid=1), message("claude centrion", uid=2)])
         listener = self.listener(tg, timeout=30, poll_every=0.005, sleep=time.sleep)
         listener.tick()
-        self.assertEqual(len(self.sessions.started), 2)
+        self.assertEqual(len(self.sessions.started), 2,
+                         "the second message waited for the first session to come up")
+        for started in self.sessions.started:
+            self.sessions.write(started["sid"], session.LIVE)
         gate.set()
         self.settle(listener)
+        self.assertEqual(len(tg.sent), 2, "one of the two sessions was never answered")
 
     def test_the_waiters_do_not_pile_up(self):
         # One thread per pending session is the design; one thread per message ever received
@@ -1177,9 +1187,13 @@ class TestSpawningForReal(unittest.TestCase):
                      "    lock = 'open'\n"
                      "except OSError:\n"
                      "    lock = 'closed'\n"
-                     "with open(%r, 'w') as fh:\n"
+                     # Written and renamed, not written in place: the poll below waits on the
+                     # path existing, and a file that exists and is still empty is exactly the
+                     # kind of flake that shows up once a fortnight in CI and never by hand.
+                     "with open(%r + '.tmp', 'w') as fh:\n"
                      "    json.dump({'argv': sys.argv[1:], 'lock': lock,\n"
-                     "               'sid': os.getsid(0) == os.getpid()}, fh)\n" % self.out)
+                     "               'sid': os.getsid(0) == os.getpid()}, fh)\n"
+                     "os.replace(%r + '.tmp', %r)\n" % (self.out, self.out, self.out))
 
     def hold_the_lock_fd(self):
         """launchd/bot.sh's `exec 9>>`, reproduced: an fd 9 with no close-on-exec flag."""
