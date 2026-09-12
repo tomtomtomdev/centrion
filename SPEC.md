@@ -721,7 +721,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 1 | config, failing closed | ☑ | `~/.local/bin/claude` is a **version-pinned symlink**; `realpath()` would have frozen the daemon on 2.1.269 and broken every spawn at the next auto-update. `abspath` for the binary, `realpath` for the root. See §9.8. |
 | 2 | project resolution | ☑ | `os.path.realpath` is **lexical** — it follows symlinks and does not case-fold, and this volume is case-insensitive. So `claude BEACON` starts a real session in beacon's directory under a path string no directory has. Harmless for `chdir`, wrong for `==`, and §5's same-directory warning is an `==`. See §9.9. |
 | 3 | Telegram client | ☑ | `socket.timeout` is **not** a `TimeoutError` subclass on 3.9 (only from 3.10), so notify.py's `except (URLError, TimeoutError)` misses it entirely — and a 50s long poll produces one whenever a connection is dropped quietly. It would have killed the listener on an idle afternoon. Also: `getUpdates` without an offset does **not** consume the queue; §3 said it did and has been corrected. |
-| 4 | command parsing | ☐ | |
+| 4 | command parsing | ☑ | `str.isdigit()` is True for `²` and `٢` while `int()` raises `ValueError` on the first — so a `stop ²` off a phone keyboard would have crashed the poll loop §7 requires never to die. `isascii()` *and* `isdigit()`. The design note: bare `stop` is `help`, never `stop all` — the one misreading in this grammar that cannot be taken back. |
 | 5 | listener, echoing | ☐ | |
 | 6 | PTY runner + URL scrape | ☐ | |
 | 7 | `claude` end to end | ☐ | |
