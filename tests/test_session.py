@@ -48,6 +48,14 @@ FIXTURE = os.path.join(ROOT, "tests", "fixtures", "rc_startup.log")
 CAPTURED = "https://claude.ai/code/session_01HJK2Lh42N7JbfMGExJkpTF"
 
 
+def _silently_kill(pid):
+    """Last resort cleanup for a process a test was supposed to have ended."""
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
 def drain(fd, deadline=10.0):
     """Read a pty master until the child hangs up. Returns bytes.
 
@@ -319,6 +327,36 @@ class TestTheTerminalSize(unittest.TestCase):
         drain(master, 3.0)
         self.assertTrue(session.terminate(pid, grace=1.0, log=lambda m: None))
         self.assertTrue(session.terminate(pid, grace=1.0, log=lambda m: None))
+
+    def test_a_runner_that_is_no_longer_our_child_is_still_terminated(self):
+        """Every `stop` from a phone will be this case, and §9.10's rule applies to it too.
+
+        A runner is detached, so the moment the listener that forked it exits — a crash, a
+        logout, a `launchctl kickstart` — it is reparented to launchd and stops being anybody's
+        child. `waitpid()` then answers ECHILD, which means *not mine* and reads exactly like
+        *already gone*: `terminate()` would return True having signalled nothing at all, and
+        the session would live on with permissions bypassed and nobody watching it.
+
+        Found by hand in slice 7, against a runner that had outlived the process that spawned
+        it — which is to say against the ordinary case rather than an edge of it.
+        """
+        code = ("import os, sys, time\n"
+                "pid = os.fork()\n"
+                "if pid:\n"
+                "    sys.stdout.write(str(pid)); sys.stdout.flush(); os._exit(0)\n"
+                "os.setsid()\n"
+                # The pipe is what subprocess.run waits on for EOF, and an orphan holding it
+                # open for two minutes is a test that hangs rather than one that fails.
+                "os.close(1)\n"
+                "time.sleep(120)\n")
+        done = subprocess.run([sys.executable, "-c", code], stdout=subprocess.PIPE, timeout=30)
+        orphan = int(done.stdout.strip())
+        self.addCleanup(lambda: _silently_kill(orphan))
+
+        self.assertFalse(session._reaped(orphan), "a live process read as a dead one")
+        self.assertTrue(session.terminate(orphan, grace=2.0, log=lambda m: None))
+        with self.assertRaises(OSError):
+            os.kill(orphan, 0)
 
 
 class TestTheChildEnvironment(unittest.TestCase):

@@ -255,11 +255,32 @@ def spawn(argv, cwd, env, rows=ROWS, cols=COLS):
 
 
 def _reaped(pid):
-    """True once `pid` is gone. False only while it is genuinely still running."""
+    """True once `pid` is gone. False only while it is genuinely still running.
+
+    Both halves, because neither call answers the question on its own:
+
+    - `waitpid` is the only one that can clear a **zombie**. A child that has exited and not
+      been waited on still answers `kill(pid, 0)`, so asking that alone would wait out the full
+      grace period on a process that died instantly.
+    - `kill(pid, 0)` is the only one that can speak for a process that is **not our child**,
+      which every runner becomes the moment the listener that forked it exits — detached, and
+      reparented to launchd. `waitpid` answers ECHILD there, and ECHILD means *not mine*, which
+      reads exactly like *already gone*. Trusting it made `terminate()` return True having
+      signalled nothing at all, which is §9.10's failure again in a different disguise: the
+      session lives on with permissions bypassed and the reply says it was stopped.
+
+    EPERM is deliberately *not* gone: it means the process is there and belongs to someone else.
+    """
     try:
-        return bool(os.waitpid(pid, os.WNOHANG)[0])
+        if os.waitpid(pid, os.WNOHANG)[0]:
+            return True
     except OSError:
-        return True          # already reaped, or never ours to wait on
+        pass                 # not ours to wait on; kill(0) below is what knows
+    try:
+        os.kill(pid, 0)
+    except OSError as e:
+        return e.errno == errno.ESRCH
+    return False
 
 
 def _signal(pid, sig, log):
@@ -288,6 +309,13 @@ def _signal(pid, sig, log):
 
 def terminate(pid, grace=GRACE, log=_stderr):
     """End the session at `pid` and everything it spawned. Returns True once it is gone.
+
+    **The grace periods nest, and a caller ending a *runner* has to allow for it** (§9.11).
+    This is two kills in sequence, not one: the runner catches SIGTERM, and then spends up to
+    its own `GRACE` ending claude — which takes longer than it looks, over five seconds for a
+    real session on this box. Pass a runner the same `grace` the runner passes claude and this
+    SIGKILLs it in the middle of that, orphaning the session and leaving meta.json saying
+    `live` for something that is on its way out.
 
     Signalled explicitly rather than by hanging up the pty, and that is not belt-and-braces.
     *Verified on this box:* closing the master does SIGHUP the child, in about 100ms — but only

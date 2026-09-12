@@ -9,8 +9,10 @@ servers, your git checkouts, permissions already bypassed.
 The bot is a **launcher**, not a bridge. It does not relay conversation. Once the link comes
 back, Remote Control carries everything; Telegram's job is done.
 
-Status: spec only. Nothing here is built yet. Every claim marked *verified* was tested on this
-box on 2026-09-12 against Claude Code v2.1.269.
+Status: built through slice 7 — messaging the bot `claude <project>` starts a real session and
+sends back its link. Fleet control (`ls`, `stop`), the `max_sessions` cap and the reconciliation
+pass are slice 8; see §12 and the progress table in §13. Every claim marked *verified* was
+tested on this box on 2026-09-12 against Claude Code v2.1.269.
 
 ---
 
@@ -536,6 +538,29 @@ All verified 2026-09-12 unless noted.
     every time. Pinned by
     `test_session.TestTheTerminalSize.test_a_child_orphaned_before_it_owns_the_terminal_is_still_killed`.
 
+11. **`waitpid` cannot say whether a *detached* runner is alive, and `terminate()` believed it
+    anyway.** *Found by hand in slice 7*, against a runner that had outlived the process which
+    spawned it — which is to say against the ordinary case and not an edge of it. A runner is
+    detached, so the moment its listener exits it is reparented to launchd and stops being
+    anybody's child; `os.waitpid(pid, WNOHANG)` then raises `ECHILD`, which means *not mine*
+    and reads exactly like *already gone*. `terminate()` returned True having signalled
+    nothing at all — on precisely the pid `stop` is handed after the first `launchctl
+    kickstart`. §9.10 again in a second disguise: the reply says the session was stopped, and
+    the session is still there with permissions bypassed. Fixed by asking both, in order —
+    `waitpid` first, because only it can clear a zombie, and `kill(pid, 0)` second, because
+    only it speaks for a process that is not ours. `EPERM` is not death. Pinned by
+    `test_session.TestTheTerminalSize.test_a_runner_that_is_no_longer_our_child_is_still_terminated`.
+
+    **And the two grace periods nest.** Ending a runner is not one kill but two in sequence:
+    the runner catches SIGTERM, then spends up to `GRACE` seconds ending claude — which takes
+    longer than it looks. *Verified on this box:* a real Remote Control session was still
+    winding down more than five seconds after its SIGTERM. A caller that allows the runner the
+    same `GRACE` the runner allows claude therefore SIGKILLs the runner in the middle of that,
+    orphaning the session and leaving meta.json saying `live` for a session that is gone.
+    **Slice 8's `stop` must give the runner more time than the runner gives claude** — and the
+    reconciliation pass in §4 is the only reason the stale record is survivable rather than
+    permanent.
+
 ---
 
 ## 10. Security
@@ -742,7 +767,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 4 | command parsing | ☑ | `str.isdigit()` is True for `²` and `٢` while `int()` raises `ValueError` on the first — so a `stop ²` off a phone keyboard would have crashed the poll loop §7 requires never to die. `isascii()` *and* `isdigit()`. The design note: bare `stop` is `help`, never `stop all` — the one misreading in this grammar that cannot be taken back. |
 | 5 | listener, echoing | ☑ | A corrupt `var/offset` is dangerous in only one direction, and it is the opposite of the obvious one. Too *small* replays a batch, and §7's date guard then drops it; too *large* acknowledges updates that have not arrived, and the bot goes **permanently deaf** — silently, and across restarts, because the bad number is on disk. `read_offset` therefore bounds the value as well as its type. Also, proved live on the first boot: it dropped two messages left queued by slice 3's `--whoami` three hours earlier, which is §3's correction seen from the other side — they were still there to drop. |
 | 6 | PTY runner + URL scrape | ☑ | The pty hangup that §2 leans on is **racy**: it reaches the child through its controlling terminal, which it does not have until `TIOCSCTTY` has run, so a master closed in that window orphans it instead of killing it. And `killpg(pid)` fails with `ESRCH` there — indistinguishable from success — because there is no group yet. `terminate()` signals group *and* process. See §9.10; slice 8's `stop all` is what would have been quietly leaving sessions behind. Confirmed live: box-drawing rules in a real transcript now measure exactly 200, where §6 recorded 80 before the ioctl. |
-| 7 | `claude` end to end | ☐ | |
+| 7 | `claude` end to end | ☑ | §4.2's "never blocks" cannot be bought with a smaller poll interval — getUpdates holds for 50s, so a meta poll inside the loop answers the phone a minute late — so the wait is a thread per session and the reply arrives *after* whatever was sent behind it. The finding that mattered came from the run step and not the tests: `terminate()` reported success against a detached runner it had not signalled, because `waitpid` answers ECHILD for a process that is alive but no longer ours. That is the pid `stop` gets after any restart. See §9.11, which also records that the two grace periods nest. Smaller, and nearly shipped: §7's scrub must not be a general "long opaque run" rule, because a session id is 26 characters of exactly that and the scrub would have eaten the one reply that matters. |
 | 8 | fleet control + reconciliation | ☐ | |
 | 9 | hardening | ☐ | |
 
