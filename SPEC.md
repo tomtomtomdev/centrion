@@ -485,10 +485,16 @@ All verified 2026-09-12 unless noted.
    look; the point is that it will look like "the bot broke" and will not be the bot. Fixing it
    means `claude` and `/login` in a terminal here, then message the bot again.
 
-8. **`claude` can move.** The path is `~/.local/bin/claude` today, but `claude install` writes a
-   new native build and the CLI can be relocated. Put it in config with that default and check
-   the file exists (and is executable) at listener startup, so a moved binary is one clear log
-   line rather than every session failing at the 45s timeout.
+8. **`claude` is a version-pinned symlink — never resolve it.** *Verified:*
+   `~/.local/bin/claude` is a symlink to `~/.local/share/claude/versions/2.1.269`. Calling
+   `realpath()` on it, which is the natural thing to do while validating a path, pins the daemon
+   to whichever build was installed the day it last started. Claude Code then updates itself,
+   that version directory goes away, and every spawn fails with `ENOENT` — on a listener that is
+   otherwise healthy, has no reason to restart, and only re-reads config at startup. Following
+   the symlink at exec time is the entire point of the symlink. `abspath`, never `realpath`, for
+   `claude_bin`; `realpath` stays correct for `projects_root`, where §3 needs a resolved path to
+   defeat a symlink escaping the root. Pinned by
+   `test_config.TestClaudeBinary.test_a_symlinked_binary_is_not_resolved`.
 
 ---
 
@@ -688,7 +694,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | # | Slice | Done | Notes |
 |---|---|---|---|
 | 0 | repo + gitignore test | ☑ | `tests/` needs `__init__.py` — 3.9 `unittest discover` cannot import a non-package start dir. Repo had **no `git user.email`**; commits were authored `tommy <>`. Set repo-locally. |
-| 1 | config, failing closed | ☐ | |
+| 1 | config, failing closed | ☑ | `~/.local/bin/claude` is a **version-pinned symlink**; `realpath()` would have frozen the daemon on 2.1.269 and broken every spawn at the next auto-update. `abspath` for the binary, `realpath` for the root. See §9.8. |
 | 2 | project resolution | ☐ | |
 | 3 | Telegram client | ☐ | |
 | 4 | command parsing | ☐ | |
