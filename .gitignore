@@ -1,0 +1,23 @@
+# Credentials. SPEC.md §10: this file is the bot token, and the bot token is shell access to
+# this Mac with permissions bypassed. Committing it once is unrecoverable — it stays in the
+# reflog, and on any remote it is simply public. tests/test_layout.py asserts these rules.
+.telegram.json
+.telegram.json.*
+.telegram.json~
+
+# Runtime state: poll offset, lock, listener log, and per-session PTY transcripts. The
+# transcripts may quote anything the session saw, which is why the whole tree is ignored
+# rather than filtered. SPEC.md §3.
+var/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# Deliberately NOT `*.log`. tests/fixtures/rc_startup.log is a captured Remote Control startup
+# transcript and is what the URL scrape is tested against (SPEC.md §12, slice 6). A blanket log
+# rule would drop it from the repo silently; `var/` above already covers every log that is
+# actually runtime state.
