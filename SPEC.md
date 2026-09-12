@@ -10,7 +10,8 @@ The bot is a **launcher**, not a bridge. It does not relay conversation. Once th
 back, Remote Control carries everything; Telegram's job is done.
 
 Status: built through slice 7 — messaging the bot `claude <project>` starts a real session and
-sends back its link. Fleet control (`ls`, `stop`), the `max_sessions` cap and the reconciliation
+sends back its link, provided the session connects inside 45 seconds; §9.12 is what happens
+when it does not, and is the first thing slice 8 has to answer for. Fleet control (`ls`, `stop`), the `max_sessions` cap and the reconciliation
 pass are slice 8; see §12 and the progress table in §13. Every claim marked *verified* was
 tested on this box on 2026-09-12 against Claude Code v2.1.269.
 
@@ -566,6 +567,30 @@ All verified 2026-09-12 unless noted.
     reconciliation pass in §4 is the only reason the stale record is survivable rather than
     permanent.
 
+12. **Nothing bounds how long Remote Control takes to connect, and 45s is not it.** *Observed
+    on the first real use from a phone, 2026-09-12:* two sessions started three minutes apart
+    both sat at `~/Projects/beacon · /rc connecting…` past the deadline and were answered with
+    the timeout tail. Both then completed **within one second of each other, 68 minutes later**.
+    Memory was at 51% free, both processes were healthy, and the listener polled Telegram
+    throughout. The §4 budget of 10–20s came from one probe on a quiet box: it is a typical
+    case, not a bound. The single-second gap between two sessions three minutes apart says the
+    trigger was external and shared — most likely the network, which is exactly what a laptop
+    does between rooms — and not anything either session was doing.
+
+    **The delay is not the defect. The silence is.** The listener had already given up, so
+    `meta.json` went to `live` with a working link and *nobody was ever told*: the phone held
+    two "no link after 45s" replies for two sessions that were running, reachable, and
+    answering. Raising the timeout does not fix this — no deadline covers 68 minutes — so
+    **slice 8's reconciliation pass must announce a record that reaches `live` after its waiter
+    gave up**, exactly as it announces one that reaches `ended`. Same walk, same push, and
+    `chat_id` is already in the record for it.
+
+    One more thing this made hard to diagnose, worth fixing in slice 9: `telegram.py` returns
+    from a socket timeout **silently**, which is right — it is ordinary under a 50s long poll
+    and logging each one would be noise. But it means an hour of network outage and an hour of
+    nobody messaging leave *identical* traces in `var/bot.log`, and §14 sends you to that log
+    first.
+
 ---
 
 ## 10. Security
@@ -742,8 +767,10 @@ none; `stop 2` signals only that runner; `stop all` signals every one; `stop 9` 
 error; a spawn past `max_sessions` is refused with a count, not a crash. Then the §4
 reconciliation pass: **a `live` record whose pid is gone is marked `ended` and stops counting
 against `max_sessions`**; a record whose pid is alive is left alone; a newly `ended` record
-produces exactly one push to its originating chat, and not a second one on the next tick; an
-`ls` longer than 4096 characters is truncated rather than 400ing.
+produces exactly one push to its originating chat, and not a second one on the next tick; **a
+record that reaches `live` after its waiter gave up produces exactly one push carrying the
+link** (§9.12 — this one happened, on the first real use, to two sessions at once); an `ls`
+longer than 4096 characters is truncated rather than 400ing.
 *Green:* the tier-2 verbs, the cap, and the reconciliation tick.
 *Run:* start three sessions from the phone, `ls`, `stop all`, confirm all three are gone from
 claude.ai/code. Then the one that needs a reboot: leave a session live, restart the Mac, and
@@ -772,7 +799,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 4 | command parsing | ☑ | `str.isdigit()` is True for `²` and `٢` while `int()` raises `ValueError` on the first — so a `stop ²` off a phone keyboard would have crashed the poll loop §7 requires never to die. `isascii()` *and* `isdigit()`. The design note: bare `stop` is `help`, never `stop all` — the one misreading in this grammar that cannot be taken back. |
 | 5 | listener, echoing | ☑ | A corrupt `var/offset` is dangerous in only one direction, and it is the opposite of the obvious one. Too *small* replays a batch, and §7's date guard then drops it; too *large* acknowledges updates that have not arrived, and the bot goes **permanently deaf** — silently, and across restarts, because the bad number is on disk. `read_offset` therefore bounds the value as well as its type. Also, proved live on the first boot: it dropped two messages left queued by slice 3's `--whoami` three hours earlier, which is §3's correction seen from the other side — they were still there to drop. |
 | 6 | PTY runner + URL scrape | ☑ | The pty hangup that §2 leans on is **racy**: it reaches the child through its controlling terminal, which it does not have until `TIOCSCTTY` has run, so a master closed in that window orphans it instead of killing it. And `killpg(pid)` fails with `ESRCH` there — indistinguishable from success — because there is no group yet. `terminate()` signals group *and* process. See §9.10; slice 8's `stop all` is what would have been quietly leaving sessions behind. Confirmed live: box-drawing rules in a real transcript now measure exactly 200, where §6 recorded 80 before the ioctl. |
-| 7 | `claude` end to end | ☑ | §4.2's "never blocks" cannot be bought with a smaller poll interval — getUpdates holds for 50s, so a meta poll inside the loop answers the phone a minute late — so the wait is a thread per session and the reply arrives *after* whatever was sent behind it. The finding that mattered came from the run step and not the tests: `terminate()` reported success against a detached runner it had not signalled, because `waitpid` answers ECHILD for a process that is alive but no longer ours. That is the pid `stop` gets after any restart. See §9.11, which also records that the two grace periods nest. Then §9.11's own lesson turned up *in the tests*: one that ended by waiting out a 30s session deadline was racing `settle()`'s 30s join, which is one failure in ten under load — and was 30 of the suite's 37 seconds. Releasing the waiter instead of outliving it took the suite to 7.5s. Smaller, and nearly shipped: §7's scrub must not be a general "long opaque run" rule, because a session id is 26 characters of exactly that and the scrub would have eaten the one reply that matters. §2's claim is now verified rather than asserted — see the control experiment recorded there. |
+| 7 | `claude` end to end | ☑ | §4.2's "never blocks" cannot be bought with a smaller poll interval — getUpdates holds for 50s, so a meta poll inside the loop answers the phone a minute late — so the wait is a thread per session and the reply arrives *after* whatever was sent behind it. The finding that mattered came from the run step and not the tests: `terminate()` reported success against a detached runner it had not signalled, because `waitpid` answers ECHILD for a process that is alive but no longer ours. That is the pid `stop` gets after any restart. See §9.11, which also records that the two grace periods nest. Then §9.11's own lesson turned up *in the tests*: one that ended by waiting out a 30s session deadline was racing `settle()`'s 30s join, which is one failure in ten under load — and was 30 of the suite's 37 seconds. Releasing the waiter instead of outliving it took the suite to 7.5s. Smaller, and nearly shipped: §7's scrub must not be a general "long opaque run" rule, because a session id is 26 characters of exactly that and the scrub would have eaten the one reply that matters. §2's claim is now verified rather than asserted — see the control experiment recorded there, and then verified again by accident: a session sent `launchctl kickstart -k` as its own prompt, ran it, and both live sessions came through it untouched. The first real use from a phone found what no test could, and it is now §9.12: Remote Control took 68 minutes to connect, the waiter had long since given up, and two working sessions were reported to the phone as failures. |
 | 8 | fleet control + reconciliation | ☐ | |
 | 9 | hardening | ☐ | |
 
