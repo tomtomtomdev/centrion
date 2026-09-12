@@ -278,7 +278,7 @@ Success reply — plain text, link on its own line so Telegram makes it tappable
 ```
 ▶ beacon · beacon-3f2a
 https://claude.ai/code/session_01HJK2Lh42N7JbfMGExJkpTF
-bypass permissions on · 2 of 4 sessions
+bypass permissions on · 2 of 2 sessions
 ```
 
 ---
@@ -559,8 +559,10 @@ Non-negotiable:
    `claude ../../etc` and `claude ~/Documents/Junction` are both just a `help` reply.
 5. `.telegram.json` at `0600`, gitignored, and **never in the plist** — files in
    `~/Library/LaunchAgents` are world-readable `0644`.
-6. **Cap concurrency** (`max_sessions`, default 4). Without it, a held-down `claude` fills RAM
-   with Claude Code processes.
+6. **Cap concurrency.** `max_sessions` — §3 sets the value and §15 records why it is 2 on this
+   box. Deliberately not restated here: this line used to carry its own copy of the number,
+   which drifted to 4. Without a cap at all, a held-down `claude` fills RAM with Claude Code
+   processes.
 
 Worth knowing, in both directions:
 
