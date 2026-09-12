@@ -496,6 +496,23 @@ All verified 2026-09-12 unless noted.
    defeat a symlink escaping the root. Pinned by
    `test_config.TestClaudeBinary.test_a_symlinked_binary_is_not_resolved`.
 
+9. **The volume is case-insensitive and `realpath()` is not.** *Verified:* `os.path.realpath`
+   is a lexical resolver — it expands symlinks and normalises `..`, and it does not consult the
+   directory listing for spelling. On APFS-default macOS, `claude BEACON` therefore passes all
+   four §3 checks, `chdir`s into `~/Projects/beacon`, and starts a perfectly working session
+   whose recorded `cwd` is `.../BEACON` — a path string that no directory on disk has. Every
+   §3 check still holds (it is inside the root, it is a direct child, it is a directory), so
+   this is not a boundary problem; it is a *comparison* problem, and §5 contains exactly one
+   comparison: the `⚠ 2nd session in beacon` warning for a second session in a live directory.
+   Started as `beacon` and `BEACON`, those two are in one directory and would compare unequal,
+   so the warning silently never fires — which is the one case it exists for.
+
+   Normalising inside `resolve()` was rejected: it would mean a directory listing on every
+   resolve and a fifth check at the security boundary, to fix something that is not a security
+   problem. **Slice 8 must compare session directories with `os.path.samefile`, not `==`.**
+   Pinned by
+   `test_projects.TestTheHappyCase.test_a_miscased_name_finds_the_directory_but_keeps_the_spelling_it_was_given`.
+
 ---
 
 ## 10. Security
@@ -695,7 +712,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 |---|---|---|---|
 | 0 | repo + gitignore test | ☑ | `tests/` needs `__init__.py` — 3.9 `unittest discover` cannot import a non-package start dir. Repo had **no `git user.email`**; commits were authored `tommy <>`. Set repo-locally. |
 | 1 | config, failing closed | ☑ | `~/.local/bin/claude` is a **version-pinned symlink**; `realpath()` would have frozen the daemon on 2.1.269 and broken every spawn at the next auto-update. `abspath` for the binary, `realpath` for the root. See §9.8. |
-| 2 | project resolution | ☐ | |
+| 2 | project resolution | ☑ | `os.path.realpath` is **lexical** — it follows symlinks and does not case-fold, and this volume is case-insensitive. So `claude BEACON` starts a real session in beacon's directory under a path string no directory has. Harmless for `chdir`, wrong for `==`, and §5's same-directory warning is an `==`. See §9.9. |
 | 3 | Telegram client | ☐ | |
 | 4 | command parsing | ☐ | |
 | 5 | listener, echoing | ☐ | |

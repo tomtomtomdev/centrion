@@ -187,3 +187,80 @@ def load(path=CONFIG, check_claude=True):
         claude_bin=_binary(path, data, check_claude),
         max_sessions=_cap(path, data),
     )
+
+
+class ProjectError(Exception):
+    """A project name that does not name a directory directly inside `projects_root`.
+
+    Carries no path, by design. The caller turns this into a `help` reply (SPEC.md §3), and
+    that reply goes to Telegram, which per §10 sees every message — so the text says which rule
+    was broken and never which path broke it.
+
+    Inside the root it is free to be specific ("that is a file" rather than "no such project"),
+    because §10.1/§10.3 mean a reply only ever reaches an allowlisted chat: the audience for
+    these is the owner, on a phone, trying to work out why nothing started. What stays
+    deliberately uninformative is the boundary itself — a name that escapes the root is refused
+    before anything asks whether its target exists, so an escape and a typo read the same.
+    """
+
+
+# `/` and `\` are what a path looks like; NUL is what makes realpath() raise instead of return.
+_NOT_IN_A_NAME = ("/", "\\", "\x00")
+
+_NOT_A_NAME = ("`claude <project>` takes the name of a directory in the projects root, not a "
+               "path. Send `claude` on its own for the list.")
+
+
+def resolve(name, root=None):
+    """`name` → the absolute directory it names, or ProjectError. SPEC.md §3, four checks.
+
+    This is the security boundary. The bot starts sessions with `--dangerously-skip-permissions`,
+    so whatever directory comes back from here is the blast radius, and §10.4 is the promise
+    being kept: no message can express a directory outside `projects_root`.
+
+    The four checks run in the order §3 gives them, and the order is load-bearing:
+
+    1. The name is a name. This has to be first because `os.path.join(root, "/etc")` is `/etc` —
+       join drops the root entirely when its second argument is absolute, so a containment check
+       that trusted join alone would end up comparing `/etc` against its own parent and passing.
+    2. Join and `os.path.realpath`. The root is realpath'd too: on this box `projects_root` may
+       be reached through a symlink (`/var` → `/private/var` is the everyday case), and comparing
+       a resolved child against an unresolved root refuses everything.
+    3. The realpath's parent is exactly the realpath'd root — a *direct* child. This is the check
+       a symlink inside the root pointing outside it dies on, and it runs before the existence
+       check so that an escape and a typo are indistinguishable from the outside.
+    4. It is a directory that exists.
+
+    `root` defaults to the configured one, which is what makes the §12 manual check read
+    `config.resolve('beacon')`. Pass it explicitly from the listener, which already holds a
+    Config and should not re-read the file per message.
+
+    Returns a resolved absolute path. Note it is *not* case-normalised — see
+    test_projects.TestTheHappyCase for why that matters to §5's same-directory warning.
+    """
+    if root is None:
+        root = load().projects_root
+    root = os.path.realpath(os.path.expanduser(root))
+
+    # 1. The name is a name.
+    if not isinstance(name, str) or not name:
+        raise ProjectError("that is not a project name. " + _NOT_A_NAME)
+    if name.startswith(".") or any(c in name for c in _NOT_IN_A_NAME):
+        raise ProjectError("that is not a project name. " + _NOT_A_NAME)
+
+    # 2. Resolve it.
+    path = os.path.realpath(os.path.join(root, name))
+
+    # 3. It is a direct child of the root, after resolution.
+    if os.path.dirname(path) != root:
+        raise ProjectError("that is not inside the projects root, and the bot cannot start a "
+                           "session outside it. " + _NOT_A_NAME)
+
+    # 4. It is a directory, and it is there.
+    if not os.path.exists(path):
+        raise ProjectError("no project by that name exists here. Send `claude` on its own for "
+                           "the list.")
+    if not os.path.isdir(path):
+        raise ProjectError("that is a file, not a project directory. Send `claude` on its own "
+                           "for the list.")
+    return path
