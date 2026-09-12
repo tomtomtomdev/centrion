@@ -124,9 +124,16 @@ over.
 ```
 
 **`bot_token` is a bot of its own, not the stock-watch one.** Sharing would break in a way that
-is hard to see: `notify.py --whoami` calls `getUpdates` (notify.py:171), and `getUpdates` without
-an offset *consumes* the queue — so a single `--whoami` run would eat messages centrion was
-waiting on and 409 its poller while it did. The security half matters more: one token would then
+is hard to see: `notify.py --whoami` calls `getUpdates` (notify.py:171), and two consumers on one
+token 409 each other — so a single `--whoami` run would knock centrion's poller off the air for
+as long as it took, and centrion would do the same back.
+
+*Corrected in slice 3:* this paragraph used to say `getUpdates` without an offset *consumes* the
+queue. It does not. An update is confirmed only when `getUpdates` is called with an offset above
+its `update_id`, which is why `--whoami` can be run twice and see the same message both times —
+verified on this box. The 409 stands on its own and is structural; the decision does not change.
+
+The security half matters more: one token would then
 be both a stock notifier and shell access to this Mac, and the notifier is the half that gets
 pasted around. Create a second bot in BotFather and keep the two `.telegram.json` files apart.
 
@@ -713,7 +720,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 0 | repo + gitignore test | ☑ | `tests/` needs `__init__.py` — 3.9 `unittest discover` cannot import a non-package start dir. Repo had **no `git user.email`**; commits were authored `tommy <>`. Set repo-locally. |
 | 1 | config, failing closed | ☑ | `~/.local/bin/claude` is a **version-pinned symlink**; `realpath()` would have frozen the daemon on 2.1.269 and broken every spawn at the next auto-update. `abspath` for the binary, `realpath` for the root. See §9.8. |
 | 2 | project resolution | ☑ | `os.path.realpath` is **lexical** — it follows symlinks and does not case-fold, and this volume is case-insensitive. So `claude BEACON` starts a real session in beacon's directory under a path string no directory has. Harmless for `chdir`, wrong for `==`, and §5's same-directory warning is an `==`. See §9.9. |
-| 3 | Telegram client | ☐ | |
+| 3 | Telegram client | ☑ | `socket.timeout` is **not** a `TimeoutError` subclass on 3.9 (only from 3.10), so notify.py's `except (URLError, TimeoutError)` misses it entirely — and a 50s long poll produces one whenever a connection is dropped quietly. It would have killed the listener on an idle afternoon. Also: `getUpdates` without an offset does **not** consume the queue; §3 said it did and has been corrected. |
 | 4 | command parsing | ☐ | |
 | 5 | listener, echoing | ☐ | |
 | 6 | PTY runner + URL scrape | ☐ | |
