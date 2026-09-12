@@ -687,7 +687,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 
 | # | Slice | Done | Notes |
 |---|---|---|---|
-| 0 | repo + gitignore test | ☐ | |
+| 0 | repo + gitignore test | ☑ | `tests/` needs `__init__.py` — 3.9 `unittest discover` cannot import a non-package start dir. Repo had **no `git user.email`**; commits were authored `tommy <>`. Set repo-locally. |
 | 1 | config, failing closed | ☐ | |
 | 2 | project resolution | ☐ | |
 | 3 | Telegram client | ☐ | |
