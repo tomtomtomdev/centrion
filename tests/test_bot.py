@@ -1510,6 +1510,56 @@ class TestTheLockGuardsTheToken(unittest.TestCase):
         self.assertIn("9", self.lock_sh)
         self.assertIn("close", self.lock_sh.lower())
 
+    def test_a_second_copy_started_by_any_path_is_refused_before_it_polls(self):
+        """§7/§8, and the one property that must survive §8 coming back.
+
+        There are two supported ways to start the listener again — the LaunchAgent, and
+        `bot.sh` from a shell for debugging — so "both were started" stops being a mistake
+        somebody has to remember not to make. A 409 is mutual: the copy that loses the race
+        takes the working one off the air with it, and neither gets the message afterwards.
+        So the second copy has to be refused *before* it reaches getUpdates, not after.
+
+        The test above asserts that ordering in the text of the script. This one runs it, in a
+        throwaway tree with a stand-in listener, and its teeth are the last assertion: the
+        stand-in must have been started exactly once. A refusal that still got as far as
+        starting the listener would satisfy an exit code and not the property.
+        """
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.mkdir(os.path.join(tmp, "launchd"))
+        for name in ("bot.sh", "lock.sh"):
+            shutil.copy(os.path.join(self.dir, name), os.path.join(tmp, "launchd", name))
+
+        # Stands in for the real listener: records that it ran, then holds fd 9 open the way a
+        # polling bot.py would, so the lock stays taken for as long as this copy is alive.
+        ran = os.path.join(tmp, "ran")
+        with open(os.path.join(tmp, "bot.py"), "w") as fh:
+            fh.write("import sys, time\n"
+                     "open(%r, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+                     "time.sleep(60)\n" % ran)
+
+        bot_sh = os.path.join(tmp, "launchd", "bot.sh")
+        first = subprocess.Popen(["/bin/sh", bot_sh],
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(first.stdout.close)
+        self.addCleanup(first.wait)
+        self.addCleanup(first.kill)
+
+        deadline = time.time() + 20
+        while time.time() < deadline and not os.path.exists(ran):
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(ran), "the first copy never started the listener")
+
+        second = subprocess.run(["/bin/sh", bot_sh], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=30)
+
+        said = second.stdout.decode()
+        self.assertEqual(second.returncode, 0, said)
+        self.assertIn("already holds", said)
+        self.assertIsNone(first.poll(), "the refused copy took the working one down with it")
+        self.assertEqual(open(ran).read().count("--serve"), 1,
+                         "the second copy reached the listener: %s" % said)
+
 
 # ===========================================================================================
 # Slice 8 — fleet control and reconciliation. §5 tier 2, §4's pass, §10.6's cap.

@@ -403,6 +403,24 @@ class TestTheChildEnvironment(unittest.TestCase):
                                  "CLAUDE_CODE_SOMETHING_INVENTED_NEXT_VERSION": "1"})
         self.assertEqual([k for k in env if k.startswith("CLAUDE")], [])
 
+    def test_the_hazards_that_miss_the_claude_code_prefix_go_too(self):
+        """§14, and the reason it stopped being a footnote the morning §8 was suspended.
+
+        `CLAUDE_PID` and `CLAUDE_EFFORT` miss the `CLAUDE_CODE` prefix by one underscore, and
+        `AI_AGENT` misses it altogether — so all three walked through a filter written when
+        launchd, which has none of them, was the only way the listener started. Start `bot.sh`
+        from a shell inside a Claude Code session and every session the bot spawns inherits
+        that session's effort setting and a `CLAUDE_PID` naming somebody else's process, which
+        is a launcher quietly downgrading what it launches (§6) by a second route.
+
+        §8 coming back does not retire this. The hand-run path stays supported for debugging,
+        and a shell inside a Claude Code session is exactly where debugging happens.
+        """
+        env = session.child_env({"CLAUDE_PID": "77313", "CLAUDE_EFFORT": "low",
+                                 "AI_AGENT": "1", "CLAUDE_INVENTED_NEXT_VERSION": "1"})
+        self.assertEqual([k for k in env if k.startswith("CLAUDE")], [])
+        self.assertNotIn("AI_AGENT", env)
+
     def test_an_unrelated_variable_is_left_alone(self):
         # Not an allowlist: the session's own Bash tool wants the ordinary environment. Only
         # the named hazards go.

@@ -176,9 +176,20 @@ def child_env(base=None):
 
     A filter and not an allowlist: the session's own Bash tool wants an ordinary environment,
     including things like SSH_AUTH_SOCK that no list here would think to name. What goes is the
-    named hazards — and `CLAUDE_CODE_*` goes by prefix rather than by name, because that list
-    grows between versions and these leak in whenever the listener was started by hand from
-    inside a Claude Code session.
+    named hazards — and everything Claude Code sets about *itself* goes by prefix rather than by
+    name, because that list grows between versions.
+
+    The prefix is `CLAUDE`, not `CLAUDE_CODE`, and that is §14 paid off. `CLAUDE_PID` and
+    `CLAUDE_EFFORT` miss the longer prefix by one underscore and `AI_AGENT` misses it
+    altogether, so all three survived a filter written when launchd — which sets none of them —
+    was the only supported way to start the listener. Started from a shell inside a Claude Code
+    session, the bot was handing that session's effort setting, and a pid naming somebody
+    else's process, to every session it spawned.
+
+    Nothing here is load-bearing for the child: its login is in the keychain, not in the
+    environment (§9.13). `CLAUDE_CONFIG_DIR` would be the one to think twice about, because it
+    moves where the child reads its config from — it is not set on this box, and if it ever is,
+    it should be set deliberately by the runner rather than inherited from whoever started it.
 
     No `--model` and no `--effort` either (see `claude_argv`): a launcher that quietly
     downgrades what it launches is a trap, because the difference shows up only as worse answers
@@ -187,9 +198,9 @@ def child_env(base=None):
     env = dict(os.environ if base is None else base)
 
     for name in list(env):
-        if name.startswith("CLAUDE_CODE") or name == "CLAUDECODE":
+        if name.startswith("CLAUDE"):
             del env[name]
-    for name in ("DISABLE_TELEMETRY", "DO_NOT_TRACK", "DISABLE_GROWTHBOOK",
+    for name in ("AI_AGENT", "DISABLE_TELEMETRY", "DO_NOT_TRACK", "DISABLE_GROWTHBOOK",
                  "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
         env.pop(name, None)
 

@@ -9,18 +9,22 @@ servers, your git checkouts, permissions already bypassed.
 The bot is a **launcher**, not a bridge. It does not relay conversation. Once the link comes
 back, Remote Control carries everything; Telegram's job is done.
 
-Status: **built through slice 8, and blocked.** The command surface is complete and every verb
-of it has been driven from a phone: `claude <project>` starts a session, `ls` lists them,
-`stop <n>` and `stop all` end them, `max_sessions` refuses the one past the cap, and §4's
-reconciliation pass clears the records a reboot orphaned and announces a link that arrives after
-its waiter gave up.
+Status: **built through slice 9, unblocked, one step short of signed off.** The command surface
+is complete and every verb of it has been driven from a phone: `claude <project>` starts a
+session, `ls` lists them, `stop <n>` and `stop all` end them, `max_sessions` refuses the one
+past the cap, and §4's reconciliation pass clears the records a reboot orphaned and announces a
+link that arrives after its waiter gave up.
 
-It could not return a link at all under launchd. **§9.13**: started by a LaunchAgent, Claude
-Code hangs at startup in any directory containing a `.git` — which is every directory this bot
-can reach. Started from a shell it comes up in two seconds, so §8 is suspended, the listener is
-run by hand from `launchd/bot.sh`, and on that path the whole thing works end to end: verified
-2026-09-13, `claude beacon` to a tappable link in three seconds. What is left is that nothing
-restarts a hand-run listener — slice 9 is buying that back. See §12 and the table in §13.
+**§9.13, which blocked the whole thing, stopped happening before slice 9 could diagnose it.**
+For three hours on 2026-09-13 a LaunchAgent-started Claude Code hung at startup in any directory
+containing a `.git` — every directory this bot can reach — and §8 was suspended behind it. By
+13:07 the minimal repro answered 14 times out of 14 and the real runner scraped a link two
+seconds after a launchd spawn. Nothing was changed and nothing was fixed; no reboot, no version
+change. So the LaunchAgent is back and holding the lock, `launchctl kickstart -k` puts it back
+in one second, and §9.13 is kept as a recognition guide rather than a diagnosis.
+
+What is not yet proven is the half of slice 9's run step that needs a login: nobody has yet
+logged out and back in to watch `RunAtLoad` do it unattended. See §12 and the table in §13.
 
 Every claim marked *verified* was tested on this box against Claude Code v2.1.269 (2026-09-12)
 or v2.1.270 (2026-09-13).
@@ -421,21 +425,23 @@ Never put the token in an exception message: it is in the URL, and `HTTPError` c
 
 ## 8. launchd
 
-> **Suspended 2026-09-13, and not yet replaced.** §9.13 makes a LaunchAgent unusable for this
-> bot: under launchd, Claude Code hangs at startup in any directory containing a `.git`, which
-> is every directory this bot can reach. The agent is booted out and the listener is running by
-> hand — `launchd/bot.sh` from a shell, which is what that script's header always said was the
-> supported way to start it, and which the lock makes safe to mix with a loaded agent.
+> **Suspended 2026-09-13 09:56, restored 13:15**, and the plist was never edited in between.
+> §9.13 made a LaunchAgent unusable for about three hours: under launchd, Claude Code hung at
+> startup in any directory containing a `.git`, which is every directory this bot can reach.
+> The agent was booted out and the listener run by hand from `launchd/bot.sh` — which is what
+> that script's header always said was the other supported way to start it, and which the lock
+> makes safe to mix with a loaded agent.
 >
-> Everything below still describes the plist, because it is still on disk and still correct;
-> what is no longer true is that it is what runs. Reload with
-> `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tommy.centrion.bot.plist` once
-> §9.13 has an answer — and stop the hand-run copy first, or it holds the lock and the agent
-> logs a refusal every ThrottleInterval seconds, which is `bot.sh` telling you exactly this.
+> Slice 9 went to name the file that hang was blocked on and found nothing left to name: the
+> minimal repro answered 14 times out of 14, and the real runner — pty, `--remote-control`, a
+> real repository, under launchd — scraped a link two seconds after the spawn. So §8 is back as
+> it was, on the evidence of it working rather than of the cause being fixed. §9.13 keeps the
+> record and §14 keeps the standing check, because nothing here was explained.
 >
-> **What the hand-run path costs**, and what a durable replacement has to buy back: nothing
-> restarts the listener after a crash, a logout or a reboot. That is the whole of what §8 was
-> for.
+> Starting it by hand remains supported and is still the workaround if §9.13 returns. Stop the
+> agent first, or it holds the lock and the hand-run copy exits saying so — and in the other
+> order the agent logs a refusal every ThrottleInterval seconds, which is `bot.sh` telling you
+> exactly this rather than two pollers 409ing each other.
 
 `~/Library/LaunchAgents/com.tommy.centrion.bot.plist`, matching the `com.tommy.*` convention.
 
@@ -646,10 +652,16 @@ All verified 2026-09-12 unless noted.
     within a second of each other is still unexplained, but the *stall* reproduces in
     twenty-five seconds and has nothing to do with the network.
 
-13. **Claude Code hangs at startup under launchd when — and only when — the working directory
-    contains a `.git`.** *Reproduced 2026-09-13.* It costs the bot its entire deliverable:
-    every directory it can reach is a repository, the runner never sees a byte of output, so it
-    never scrapes a URL, and the phone is told the session failed while the session is fine.
+13. **Claude Code hung at startup under launchd when — and only when — the working directory
+    contained a `.git`.** *Reproduced 2026-09-13 10:03. Gone by 13:07, unexplained.* For the
+    three hours it lasted it cost the bot its entire deliverable: every directory it can reach
+    is a repository, the runner never saw a byte of output, so it never scraped a URL, and the
+    phone was told the session had failed while the session was fine.
+
+    **Read the rest of this entry as a description of a failure that is not currently
+    happening.** It is kept in the present tense because it is a recognition guide: if links
+    stop coming back under launchd, this is the shape to match against before diagnosing
+    anything from scratch. What slice 9 established is at the bottom.
 
     The minimal repro needs neither the bot, nor Telegram, nor a pty, nor even a real
     repository — an empty directory named `.git` is enough:
@@ -700,16 +712,44 @@ All verified 2026-09-12 unless noted.
     already parked by the time you can attach to it, so nothing new appears. That is the next
     step and it needs root.
 
-    **The control, and it is now the workaround.** *Verified 2026-09-13 13:02:35–13:02:38*:
-    the LaunchAgent booted out, the listener started from a shell by `launchd/bot.sh`, and
-    otherwise nothing changed — same box, same checkout, same Claude Code 2.1.270, same
-    `~/Projects/beacon`, a repository like every other. The runner saw 3739 bytes where launchd
-    gave it zero in eight minutes, the record reached `live` **two seconds** after the spawn,
-    and the phone had the link one second after that. `ls` then rendered it.
+    **The control, and for three hours it was the workaround.** *Verified 2026-09-13
+    13:02:35–13:02:38*: the LaunchAgent booted out, the listener started from a shell by
+    `launchd/bot.sh`, and otherwise nothing changed — same box, same checkout, same Claude Code
+    2.1.270, same `~/Projects/beacon`, a repository like every other. The runner saw 3739 bytes
+    where launchd gave it zero in eight minutes, the record reached `live` **two seconds** after
+    the spawn, and the phone had the link one second after that. `ls` then rendered it.
 
-    So the launchd/shell split is the whole of it, and the listener cannot stop being one
-    without stopping being a LaunchAgent. Since the projects cannot stop being repositories,
-    that is the choice slice 9 is making.
+    **Then it stopped happening, and that is where slice 9 found it.** Five minutes after the
+    control above, with nothing changed in between and nothing fixed:
+
+    - The minimal repro at the top of this entry — `launchctl submit`, `/tmp/x/.git`,
+      `claude -p "say PONG"` — **answered 14 times out of 14**, every one in about three
+      seconds. Ten of those were consecutive, to settle whether the first four were luck.
+    - The same under launchd in `~/Projects/beacon` and `~/Projects/centrion`, the two real
+      repositories the bot had failed in at 10:03 and 10:04: PONG, three seconds each.
+    - **The real runner**, which is the test that decides it: `session.py` under
+      `launchctl submit`, a pty, `--remote-control`, `~/Projects/beacon`. 3236 bytes of
+      transcript and a scraped link, `state: live`, **two seconds** after the spawn — the
+      thing this entry said launchd could not do.
+
+    **The file was never named, because by then there was nothing left to catch.** `fs_usage`
+    has to be running before an open that never returns, and there was no longer an open that
+    never returned. The probe slice 9 was planned around cannot be run again until the hang
+    comes back.
+
+    **What did not change, each checked rather than assumed.** These matter because any one of
+    them would have been an explanation:
+
+    - *A reboot.* None. The box came up 2026-09-13 06:00:05 and both the failures and the
+      recoveries are after it, on one boot.
+    - *The Claude Code version.* 2.1.270 throughout — installed 09:04, an hour **before** the
+      10:03 and 10:04 failures, and still installed for the 13:07 recoveries.
+    - *The Claude desktop app.* Running since 09:04, also before the failures. Not it either.
+
+    So this was outlived, not fixed, and §8 comes back on the evidence of the bot working rather
+    than of the cause being understood. It could return, and §14 carries the standing check for
+    recognising it in one step instead of a morning: no bytes on the pty, in a repository, under
+    launchd, with a shell-run `launchd/bot.sh` unaffected.
 
 ---
 
@@ -901,10 +941,13 @@ is the same drift §10.6 records — a number restated in a second place and lef
 
 ### Slice 9 — the link comes back, and the bot starts itself again
 
-**The bot now does everything except the thing it is for.** Slice 8's verbs all work from a
-phone; §9.13 means none of the sessions they control ever return a link, and §8 is suspended
-behind it. Nothing below this line is worth building until `claude beacon` answers with a link
-and the listener is still running tomorrow morning.
+*The brief this slice was planned to, kept as written; what actually happened is under
+**Outcome** at the end of it.*
+
+**The bot does everything except the thing it is for.** Slice 8's verbs all work from a phone;
+§9.13 means none of the sessions they control ever return a link, and §8 is suspended behind
+it. Nothing below this line is worth building until `claude beacon` answers with a link and the
+listener is still running tomorrow morning.
 
 The slice starts by finding out which of two endings it has, because they are different work:
 
@@ -930,6 +973,18 @@ property that must survive having two supported ways to start.
 *Green:* the above, and whichever ending the probe chose.
 *Run:* the one that cannot be faked — log out and back in, or reboot. Nobody starts anything by
 hand; the bot answers `ls`, and `claude beacon` comes back with a link.
+
+**Outcome: neither ending, because the blocker went away while the slice was being set up.**
+Step 1 went looking for the file and found no hang left to catch — 14 launchd runs of the
+minimal repro answered, and the real runner scraped a link two seconds after a launchd spawn
+(§9.13 carries the numbers). So §8 came back exactly as it was, which is ending 1 without the
+plist change that ending 1 assumed, and the terminal-at-login of ending 2 was never built.
+
+Of the three red tests, the second dissolved with ending 2: nothing replaced the plist, so
+`TestTheLaunchdInstall` is still the test that asserts the startup artefact and there was
+nothing to write. The other two were written. Half the run step is done — `launchctl kickstart
+-k` restarts the listener in one second and the live session survives it — and the half that
+needs a login is outstanding.
 
 ### Slice 10 — hardening
 
@@ -974,7 +1029,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 6 | PTY runner + URL scrape | ☑ | The pty hangup that §2 leans on is **racy**: it reaches the child through its controlling terminal, which it does not have until `TIOCSCTTY` has run, so a master closed in that window orphans it instead of killing it. And `killpg(pid)` fails with `ESRCH` there — indistinguishable from success — because there is no group yet. `terminate()` signals group *and* process. See §9.10; slice 8's `stop all` is what would have been quietly leaving sessions behind. Confirmed live: box-drawing rules in a real transcript now measure exactly 200, where §6 recorded 80 before the ioctl. |
 | 7 | `claude` end to end | ☑ | §4.2's "never blocks" cannot be bought with a smaller poll interval — getUpdates holds for 50s, so a meta poll inside the loop answers the phone a minute late — so the wait is a thread per session and the reply arrives *after* whatever was sent behind it. The finding that mattered came from the run step and not the tests: `terminate()` reported success against a detached runner it had not signalled, because `waitpid` answers ECHILD for a process that is alive but no longer ours. That is the pid `stop` gets after any restart. See §9.11, which also records that the two grace periods nest. Then §9.11's own lesson turned up *in the tests*: one that ended by waiting out a 30s session deadline was racing `settle()`'s 30s join, which is one failure in ten under load — and was 30 of the suite's 37 seconds. Releasing the waiter instead of outliving it took the suite to 7.5s. Smaller, and nearly shipped: §7's scrub must not be a general "long opaque run" rule, because a session id is 26 characters of exactly that and the scrub would have eaten the one reply that matters. §2's claim is now verified rather than asserted — see the control experiment recorded there, and then verified again by accident: a session sent `launchctl kickstart -k` as its own prompt, ran it, and both live sessions came through it untouched. The first real use from a phone found what no test could, and it is now §9.12: Remote Control took 68 minutes to connect, the waiter had long since given up, and two working sessions were reported to the phone as failures. |
 | 8 | fleet control + reconciliation | ☑ | The pass has to run **before the batch it arrived with**, or the first `claude` after a reboot is refused against a cap held entirely by records whose runners that reboot took — two of them were on disk this morning, which is where the fixture came from. Announcing exactly once is a filesystem problem and not a bookkeeping one: the waiter thread and the tick can both be holding one newly-live record (§4.6's 45s deadline falls *inside* the ≤50s tick), and after a `launchctl kickstart` they are two **processes** — so `O_CREAT|O_EXCL` per (session, kind), with the link and the ending claimed separately so neither spends the other's. §9.12's late link then falls out of the same walk for free, because a waiter that gave up claims nothing. `alive()` refuses a `runner_pid` of `0` or `-1` before `os.kill` ever sees it — those mean *this whole process group* and *every process this user owns*, and the same record is what `stop all` iterates. Two things only the run step could say: the end notice claimed sessions had **run** for 11h when the machine had been switched off for three of them (this pass cannot know when a runner died, only that it is gone, so it now reports when the session *started*), and a restarted daemon takes up to 50s to notice anything at all, because the first tick is the first *return* from a 50s poll. Run step done from the phone at 10:03–10:12: two sessions, a third `claude beacon` refused at the cap, `ls`, `stop 2` taking only the second, `stop all` taking the rest. The links never came back, but for nothing this slice does — see §9.13, which is the failure §9.12 misread as the network. |
-| 9 | the link comes back, and the bot starts itself | ☐ | **The blocker.** §9.13, and §8 suspended behind it. |
+| 9 | the link comes back, and the bot starts itself | ☐ | **The blocker cured itself, and that is the finding.** §9.13 reproduced at 10:03 and was gone by 13:07 with nothing changed between — no reboot, same 2.1.270, same desktop app, 14/14 on its own minimal repro and a real launchd pty run scraping a link in two seconds. So the probe this slice was planned around could not be run at all: `fs_usage` needs an open that never returns and there was no longer one. §8 is back on evidence of working rather than of being understood, which is a weaker warrant than this spec usually accepts and is why §9.13 was kept as a recognition guide instead of being deleted. The code finding was §14's, and it was real: `CLAUDE_PID`, `CLAUDE_EFFORT` and `AI_AGENT` all miss a `CLAUDE_CODE` prefix, so a listener started from a shell inside a Claude Code session was handing that session's effort setting, and a pid belonging to somebody else, to everything it spawned. The lock test the slice asked for was **green the moment it was written** — the property already held, and §11 says that is a test of something that already worked; it was kept anyway, because it executes the two scripts where the existing tests only string-match them, and two supported ways to start is exactly when that stops being theoretical. **Row still unticked: the run step is half done.** `kickstart -k` restarts the listener in a second and the live session survives it; nobody has logged out yet. |
 | 10 | hardening | ☐ | |
 | 11 | new projects from the phone | ☐ | |
 
@@ -991,14 +1046,16 @@ Not slices — things that stay true after the build.
   already does it.
 - `tail -f var/bot.log` is the first thing to look at when the phone gets no reply; a silent
   drop there is §10.3 working as designed, not a bug.
-- **While §8 is suspended, `pgrep -f 'bot.py --serve'` is the only thing that says the bot is
-  up.** There is no `launchctl list` row to check any more, and nothing will have restarted it.
-- **`child_env()` strips `CLAUDE_CODE*` but not `CLAUDE_EFFORT`, `CLAUDE_PID` or `AI_AGENT`.**
-  Harmless while launchd started the listener, because launchd has none of them. It is not
-  harmless now that the supported path is a shell: start `bot.sh` from inside a Claude Code
-  session and every session the bot spawns inherits that session's effort setting and a
-  `CLAUDE_PID` pointing at somebody else's process. Until §6 covers them by prefix, scrub by
-  hand — `env -u CLAUDE_PID -u CLAUDE_EFFORT -u AI_AGENT ... sh launchd/bot.sh`.
+- `launchctl print gui/$(id -u)/com.tommy.centrion.bot | head -30` says whether the bot is up,
+  and §8 is the supported way to start it again. `pgrep -f 'bot.py --serve'` still answers the
+  same question and does not say who started it; between 2026-09-13 09:56 and 13:15 it was the
+  only thing that could, and the plist is back.
+- **If a link ever stops coming back under launchd, §9.13 is the first suspect, and it has to be
+  caught while it is hung.** It was never explained — only outlived. `sample` the parked pid for
+  the stack and get `sudo fs_usage -w -f filesys claude` running *before* the spawn, because the
+  process is already parked by the time you can attach and nothing new appears after that. A
+  shell-run `launchd/bot.sh` is the workaround that is known to work, and §9.13 records the shape
+  of the failure so it is recognised rather than re-diagnosed.
 
 
 ---
