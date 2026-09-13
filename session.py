@@ -96,6 +96,23 @@ TICK = 0.2            # select timeout; also how often the settle timer is check
 #: How long a terminating session gets between SIGTERM and SIGKILL.
 GRACE = 5.0
 
+#: The files in a session directory that both processes name. Spelled once here because the
+#: listener reads all three from the other side of §2's file boundary, and a second spelling
+#: of any of them is a silent failure — a tail that finds nothing, a record never reaped.
+META = "meta.json"
+TRANSCRIPT = "pty.log"
+#: What a rotated transcript is called (§10.7). One suffix, applied in one place, so the name
+#: the runner renames to and the name the listener reads back cannot drift apart.
+ROTATED = ".1"
+PREVIOUS = TRANSCRIPT + ROTATED
+
+#: §10.7: how much transcript is kept before it is rotated, and one predecessor is kept, so a
+#: session costs at most twice this. Four megabytes is minutes of a 200-column terminal
+#: redrawing itself under `dd`, and days of an ordinary session — measured here, a real one
+#: reached 56 KB in an evening. The bound that matters is the product: `max_sessions` × 2 ×
+#: this, plus whatever a day of finished sessions left behind (§4).
+TRANSCRIPT_CAP = 4 * 1024 * 1024
+
 
 def _stderr(message):
     sys.stderr.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), message))
@@ -350,13 +367,13 @@ def terminate(pid, grace=GRACE, log=_stderr):
 
 def write_meta(directory, record):
     """Atomically, per §3 — the listener polls this every 0.25s while a session starts."""
-    tmp = os.path.join(directory, "meta.json.%d.tmp" % os.getpid())
+    tmp = os.path.join(directory, META + ".%d.tmp" % os.getpid())
     with open(tmp, "w") as fh:
         json.dump(record, fh, indent=2, sort_keys=True)
         fh.write("\n")
         fh.flush()
         os.fsync(fh.fileno())
-    os.replace(tmp, os.path.join(directory, "meta.json"))
+    os.replace(tmp, os.path.join(directory, META))
 
 
 def read_meta(directory):
@@ -367,11 +384,84 @@ def read_meta(directory):
     session hides all the good ones.
     """
     try:
-        with open(os.path.join(directory, "meta.json")) as fh:
+        with open(os.path.join(directory, META)) as fh:
             record = json.load(fh)
     except (OSError, ValueError):
         return None
     return record if isinstance(record, dict) else None
+
+
+class Transcript:
+    """pty.log, and the cap that keeps a session off the disk. Slice 10, §10.7.
+
+    §3 called this the full ANSI transcript and meant *full* literally: the runner appended
+    every byte the terminal produced for as long as the session lived, and a session left open
+    on purpose for a week is the thing this bot is for. Nothing trimmed it and nothing watched
+    it, so the only bound on var/ was how long somebody happened to leave a session running.
+
+    **Two files, and the second one is not an archive.** The live transcript is renamed to
+    `pty.log.1` when it passes the cap and a fresh one takes its place, so what is kept is
+    always the most recent `cap` to `2 × cap` bytes. One predecessor rather than none because
+    §4.6's tail is read from the *end* of this file by the other process — and a session that
+    fails a moment after a rotation would otherwise hand the phone the last half-second of a
+    redraw instead of the error that killed it. One rather than five because nobody on a phone
+    is going to read a debugging archive, and the point here is a number var/ cannot exceed.
+
+    The rename is `os.replace`, which is atomic: a listener reading the tail across a rotation
+    sees one file or the other and never a gap.
+    """
+
+    def __init__(self, path, cap=None, log=_stderr):
+        self.path = path
+        self.previous = path + ROTATED
+        self.cap = TRANSCRIPT_CAP if cap is None else cap
+        self.log = log
+        self.fh = None
+        self.open()
+
+    def open(self):
+        # Append, unbuffered — the same handle the runner has always used. The size comes off
+        # the fd rather than from zero, or a runner re-opening a session directory (§12's
+        # hand-run `--foreground` is the ordinary way that happens) gets a fresh cap each time
+        # and the bound is one cap per open rather than one cap.
+        self.fh = open(self.path, "ab", 0)
+        self.size = os.fstat(self.fh.fileno()).st_size
+
+    def write(self, chunk):
+        self.fh.write(chunk)
+        self.size += len(chunk)
+        # Checked after the write and not before it: a chunk is one read() off the pty master
+        # and may be 64 KB, so the file is briefly over the cap either way. Rotating on the
+        # next write is what keeps a single enormous chunk from being the case that escapes.
+        if self.cap and self.size >= self.cap:
+            self.rotate()
+
+    def rotate(self):
+        """Rename the transcript out of the way and start another one."""
+        try:
+            self.fh.close()
+            self.replace(self.path, self.previous)
+        except OSError as e:
+            # The read loop this sits inside is the session's life (§2), so a rotation that
+            # cannot be done gives up on rotating rather than on the session. Switching the
+            # cap off is the important half: without it every subsequent write would retry a
+            # failing rename, which is a spin in the one loop that has to keep reading the
+            # terminal.
+            self.log("could not rotate %s (%s) — the transcript will grow from here"
+                     % (self.path, e.strerror or e))
+            self.cap = None
+        finally:
+            self.open()
+
+    def replace(self, source, target):
+        """`os.replace`, as a method so a test can take it away. See rotate()."""
+        os.replace(source, target)
+
+    def close(self):
+        try:
+            self.fh.close()
+        except OSError:
+            pass
 
 
 def detach():
@@ -473,7 +563,7 @@ class Runner:
         # §12: kill the runner and claude dies with it. Not left to the pty hangup — see
         # terminate() for the window in which that does not happen.
         previous = self._catch_signals()
-        transcript = open(os.path.join(self.dir, "pty.log"), "ab", 0)
+        transcript = Transcript(os.path.join(self.dir, TRANSCRIPT), log=self.log)
         try:
             self.pump(master, transcript)
         finally:

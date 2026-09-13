@@ -51,6 +51,7 @@ import argparse
 import errno
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -96,6 +97,13 @@ TAIL_LINES = 15
 #: How much of the transcript is read to find those lines. A 200-column terminal redrawing
 #: itself fills this within a few seconds of startup, which is the whole of what a tail is for.
 TAIL_BYTES = 65536
+
+#: §10.7: how long a finished session's directory is kept. Nothing ever removed one, and the
+#: directory is not the part that grows — the transcript inside it is capped (§10.7) — but the
+#: *number* of them is unbounded, and every `claude beacon` from a phone makes another. A day
+#: because the transcript is only ever read for a session that has just gone wrong: §14 has you
+#: reading it off disk when the phone got something unhelpful, and that is the same afternoon.
+RETAIN = 86400
 
 #: §4.1: six hex, naming a directory under var/sessions and nothing else. Not a credential
 #: (§10 — even the session link is not one), but random rather than sequential so that a
@@ -202,6 +210,19 @@ def fit(text, limit=telegram.LIMIT):
         return text[:limit]
     head = room // 2
     return text[:head] + (ELISION % (len(text) - room)) + text[len(text) - (room - head):]
+
+
+def _last(path, count):
+    """The last `count` bytes of that file, or b"" if there is no such file. §4.6's tail."""
+    if count <= 0:
+        return b""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - count))
+            return fh.read()
+    except OSError:
+        return b""
 
 
 def scrub(data, redact=None):
@@ -439,6 +460,37 @@ class Sessions:
         if began is None:
             return True              # it answered kill(0) a moment ago; ps losing a race is
         return began <= started + PID_REUSE_SLACK        # not evidence of anything
+
+    def age(self, sid, now=None):
+        """Seconds since that session's record was last written, or None if there is none.
+
+        The record's mtime, deliberately, and not its `started` field: a session left open for
+        a week is not an old *record*, and §10.7 is counting from the moment a session became
+        terminal — which is the last time anything wrote meta.json, whether that was the runner
+        on its way out or the reconciliation pass noticing its runner was gone.
+        """
+        try:
+            mtime = os.path.getmtime(os.path.join(self.directory(sid), session.META))
+        except OSError:
+            return None
+        return (time.time() if now is None else now) - mtime
+
+    def discard(self, sid):
+        """Remove that session's directory, and everything in it. §10.7.
+
+        **Only ever called for a record this process has established is terminal and old.**
+        The directory holds the record `ls` and `stop` are read from and the transcript §4.6
+        sends to the phone; removing one belonging to a live session would leave a
+        bypass-permissions session running with nothing on this machine naming it.
+        """
+        try:
+            shutil.rmtree(self.directory(sid))
+        except OSError as e:
+            # Runs on every tick, so this must cost one line and not the pass. A full disk or a
+            # directory this process cannot write is not a reason to stop answering the phone.
+            self.log("could not remove the directory for session %s: %s" % (sid, e))
+            return False
+        return True
 
     def claim(self, sid, kind):
         """True for whoever gets here first, and False for everybody after. §4, §9.12.
@@ -926,14 +978,14 @@ class Listener:
         go for the same reason — fifteen lines of a cleared panel say nothing, and §4.6 is
         promising the error.
         """
-        path = os.path.join(self.sessions.directory(sid), "pty.log")
-        try:
-            with open(path, "rb") as fh:
-                fh.seek(0, os.SEEK_END)
-                fh.seek(max(0, fh.tell() - TAIL_BYTES))
-                raw = fh.read()
-        except OSError:
-            return ""
+        directory = self.sessions.directory(sid)
+        raw = _last(os.path.join(directory, session.TRANSCRIPT), TAIL_BYTES)
+        if len(raw) < TAIL_BYTES:
+            # §10.7 rotates the transcript, and a session that rotated a moment before it died
+            # leaves a live file holding the last half-second of a redraw. The error that
+            # killed it is in the file that was renamed out of the way, and the tail is the
+            # only place anyone will ever see it.
+            raw = _last(os.path.join(directory, session.PREVIOUS), TAIL_BYTES - len(raw)) + raw
         kept = [line.rstrip() for line in re.split(r"[\r\n]+", scrub(raw, self.tg.redact))]
         return "\n".join([line for line in kept if line.strip()][-lines:])
 
@@ -1019,6 +1071,43 @@ class Listener:
                 # follows one level down.
                 self.log("could not reconcile session %s: %s"
                          % (record.get("sid"), self.tg.redact(e)))
+
+        # After the loop above and not inside it, and that ordering is the whole of §10.7's
+        # correctness: the marker that keeps an ending to exactly one announcement lives
+        # *inside* the directory this is about to remove. Two days of downtime leaves records
+        # that are terminal, old, and never announced — and sweeping first would delete the
+        # evidence that the phone was owed a message before anything sent one.
+        self.forget(records)
+
+    def forget(self, records):
+        """Remove the directories of sessions that finished a day ago. §10.7.
+
+        The transcript inside each one is capped, so no single session is unbounded; the
+        number of them is, and a phone makes another one per `claude`. Terminal, old, and
+        demonstrably not running — all three, because the cost of being wrong here is not disk.
+        """
+        for record in records:
+            sid = record.get("sid")
+            try:
+                if record.get("state") not in (session.ENDED, session.FAILED):
+                    # `live` and `starting` are never removed, however old the record is. A
+                    # session left open for a week is what this bot is for, and a runner that
+                    # has not written since it came up is not an old session.
+                    continue
+                age = self.sessions.age(sid)
+                if age is None or age < RETAIN:
+                    continue
+                # Belt and braces, and one kill(0) on a record that is about to be deleted
+                # anyway: the runner writes its terminal state on its way out, so `ended` with
+                # a pid that still answers should be impossible — and the directory being
+                # written into is the last one to take away.
+                if self.sessions.alive(record):
+                    continue
+                if self.sessions.discard(sid):
+                    self.log("session %s: %s old, directory removed"
+                             % (sid, uptime(time.time() - age)))
+            except Exception as e:
+                self.log("could not sweep session %s: %s" % (sid, self.tg.redact(e)))
 
     def settled(self, record):
         """One record, and whatever has become true about it since anyone last looked."""

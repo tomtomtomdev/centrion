@@ -736,5 +736,136 @@ class TestDetaching(unittest.TestCase):
         self.assertIn(b"OK", r.stdout, r.stderr)
 
 
+class TestTheTranscriptDoesNotGrowForever(unittest.TestCase):
+    """Slice 10. §3 calls pty.log the full ANSI transcript, and it meant *full* literally.
+
+    A session is a 200-column terminal that redraws itself, and the runner appends every byte
+    of it for as long as the session lives — days, for a session left open on purpose. Nothing
+    trimmed it and nothing was watching it: the only bound on var/ was how long somebody
+    happened to leave a session running, which is the one variable this bot exists to make
+    large.
+
+    Two files, not a numbered series. One previous transcript is what the tail has to be able
+    to reach back into (§4.6 sends it when there is no link), and any more is a debugging
+    archive nobody on a phone is going to read.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.path = os.path.join(self.tmp, "pty.log")
+
+    def transcript(self, cap=1024):
+        t = session.Transcript(self.path, cap=cap, log=lambda m: None)
+        self.addCleanup(t.close)
+        return t
+
+    def read(self, name="pty.log"):
+        with open(os.path.join(self.tmp, name), "rb") as fh:
+            return fh.read()
+
+    def test_a_quiet_session_stays_one_file(self):
+        t = self.transcript()
+        t.write(b"x" * 200)
+        self.assertEqual(self.read(), b"x" * 200)
+        self.assertFalse(os.path.exists(self.path + ".1"),
+                         "nothing was rotated and there is nothing to keep")
+
+    def test_it_rotates_once_it_passes_its_cap(self):
+        t = self.transcript(cap=1024)
+        t.write(b"a" * 1000)
+        self.assertFalse(os.path.exists(self.path + ".1"))
+        t.write(b"b" * 100)
+        self.assertTrue(os.path.exists(self.path + ".1"), "the cap was passed and nothing moved")
+
+    def test_the_rotated_file_holds_everything_written_up_to_the_rotation(self):
+        # The rotation is a rename, so the bytes are not rewritten and not lost — which is what
+        # makes the tail able to reach back through it.
+        t = self.transcript(cap=1024)
+        t.write(b"a" * 600)
+        t.write(b"b" * 600)
+        self.assertEqual(self.read("pty.log.1"), b"a" * 600 + b"b" * 600)
+
+    def test_what_is_written_after_a_rotation_goes_to_the_live_file(self):
+        t = self.transcript(cap=1024)
+        t.write(b"a" * 1200)
+        t.write(b"the newest line")
+        self.assertEqual(self.read(), b"the newest line")
+
+    def test_only_one_previous_transcript_is_ever_kept(self):
+        t = self.transcript(cap=1024)
+        for _ in range(10):
+            t.write(b"c" * 1100)
+        self.assertEqual(sorted(os.listdir(self.tmp)), ["pty.log", "pty.log.1"])
+
+    def test_the_two_files_together_stay_inside_twice_the_cap(self):
+        """The bound that makes var/ predictable: two files, each of which is renamed away the
+        moment it passes the cap. §10.7 multiplies this by `max_sessions` and gets a number."""
+        t = self.transcript(cap=1024)
+        for _ in range(50):
+            t.write(b"d" * 300)
+        total = sum(os.path.getsize(os.path.join(self.tmp, n)) for n in os.listdir(self.tmp))
+        self.assertLessEqual(total, 2 * 1024 + 300,
+                             "a chunk may straddle the cap; fifty of them may not")
+
+    def test_a_single_write_larger_than_the_cap_still_rotates(self):
+        # 64 KB is one read() off the master and the cap is measured after the write, not
+        # before it, so the file is briefly over — rotating on the next write is what keeps a
+        # noisy session from being the case the cap does not cover.
+        t = self.transcript(cap=1024)
+        t.write(b"e" * 4096)
+        t.write(b"f")
+        self.assertEqual(self.read(), b"f")
+        self.assertEqual(len(self.read("pty.log.1")), 4096)
+
+    def test_it_picks_up_the_size_of_a_transcript_that_is_already_there(self):
+        """A runner re-opening a session directory — or the `--foreground` hand-run of §12
+        against one that has already been used — must not start counting from zero, or the cap
+        is one cap per open rather than one cap."""
+        with open(self.path, "wb") as fh:
+            fh.write(b"g" * 1000)
+        t = self.transcript(cap=1024)
+        t.write(b"h" * 100)
+        self.assertTrue(os.path.exists(self.path + ".1"))
+
+    def test_a_rotation_that_cannot_be_done_does_not_stop_the_session(self):
+        """The runner's read loop is the session's life: it holds the pty open (§2), and a
+        rotation that raised — or that failed and was retried on every write — would take the
+        session down with it, or peg a core and stop reading the terminal."""
+        t = self.transcript(cap=1024)
+        t.replace = _raises
+        t.write(b"i" * 1100)
+        t.write(b"j" * 1100)
+        t.write(b"k")
+        self.assertIn(b"k", self.read(), "the transcript stopped being written")
+
+    def test_the_runner_caps_a_noisy_session(self):
+        """End to end, through a real pty: the child prints more than the cap and the two
+        files on disk are still bounded when it is over."""
+        sessions = os.path.join(self.tmp, "sessions")
+        root = os.path.join(self.tmp, "Projects")
+        work = os.path.join(root, "beacon")
+        os.makedirs(work)
+        r = session.Runner("3f2a91", work, "beacon-3f2a", root=sessions, project="beacon",
+                           projects_root=root, log=lambda m: None,
+                           argv=["/bin/sh", "-c", "for i in 1 2 3 4 5 6 7 8; do "
+                                                  "dd if=/dev/zero bs=1024 count=8 2>/dev/null "
+                                                  "| tr '\\0' 'z'; done"])
+        cap, session.TRANSCRIPT_CAP = session.TRANSCRIPT_CAP, 8192
+        try:
+            r.run()
+        finally:
+            session.TRANSCRIPT_CAP = cap
+        sizes = {n: os.path.getsize(os.path.join(r.dir, n))
+                 for n in os.listdir(r.dir) if n.startswith("pty.log")}
+        self.assertEqual(sorted(sizes), ["pty.log", "pty.log.1"], sizes)
+        self.assertLessEqual(sum(sizes.values()), 2 * 8192 + session.READ_SIZE, sizes)
+
+
+def _raises(*_args):
+    raise OSError(errno.EACCES, "read-only file system")
+
+
+
 if __name__ == "__main__":
     unittest.main()

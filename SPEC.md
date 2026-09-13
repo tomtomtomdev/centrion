@@ -9,11 +9,13 @@ servers, your git checkouts, permissions already bypassed.
 The bot is a **launcher**, not a bridge. It does not relay conversation. Once the link comes
 back, Remote Control carries everything; Telegram's job is done.
 
-Status: **built through slice 9, unblocked, one step short of signed off.** The command surface
-is complete and every verb of it has been driven from a phone: `claude <project>` starts a
-session, `ls` lists them, `stop <n>` and `stop all` end them, `max_sessions` refuses the one
-past the cap, and §4's reconciliation pass clears the records a reboot orphaned and announces a
-link that arrives after its waiter gave up.
+Status: **built through slice 10, unblocked, one step short of signed off.** The command
+surface is complete and every verb of it has been driven from a phone: `claude <project>`
+starts a session, `ls` lists them, `stop <n>` and `stop all` end them, `max_sessions` refuses
+the one past the cap, and §4's reconciliation pass clears the records a reboot orphaned and
+announces a link that arrives after its waiter gave up. Slice 10 put a bound on what all that
+leaves behind: the transcript is capped and a finished session's directory goes after a day
+(§10.7).
 
 **§9.13, which blocked the whole thing, stopped happening before slice 9 could diagnose it.**
 For three hours on 2026-09-13 a LaunchAgent-started Claude Code hung at startup in any directory
@@ -123,7 +125,8 @@ tmux (not installed; `pty` does the job without a dependency), Docker, any web f
     offset                  last processed getUpdates update_id
     .bot.lock               lockf target
     sessions/<sid>/meta.json
-    sessions/<sid>/pty.log  full ANSI transcript of that session's terminal
+    sessions/<sid>/pty.log    full ANSI transcript of that session's terminal, capped (§10.7)
+    sessions/<sid>/pty.log.1  the transcript before the last rotation; the tail reads both
 ```
 
 `/usr/bin/python3` (3.9.6, system), stdlib only — `urllib`, `json`, `pty`, `select`, `os`,
@@ -779,6 +782,17 @@ Non-negotiable:
    which drifted to 4. Without a cap at all, a held-down `claude` fills RAM with Claude Code
    processes.
 
+7. **Keep nothing for longer than it is useful.** `pty.log` is the complete transcript of a
+   terminal that had permissions bypassed — every file the session printed, every prompt typed
+   into it, and whatever credentials went past on the way. It is capped at 4 MiB with one
+   predecessor kept, and the whole session directory is removed a day after the session ends.
+   The cap is also the only thing that makes `var/` predictable: at most `max_sessions` × 2 ×
+   4 MiB live, plus whatever a day of finished sessions left. Before slice 10 nothing removed
+   any of it and nothing trimmed a transcript, so the bound on both was how long somebody
+   happened to leave a session running — which is the one variable this bot exists to make
+   large. A day, and not an hour, because the transcript is read when a session has just gone
+   wrong (§14) and that is the same afternoon.
+
 Worth knowing, in both directions:
 
 - **The session URL is not a bearer token.** Remote Control sessions appear only in the account
@@ -994,6 +1008,22 @@ a home path.
 *Green:* the above.
 *Run:* leave a session open for an afternoon, confirm `var/` has not grown without bound.
 
+**Outcome: two of the three red tests, and the third had been written in slice 7.** The scrub
+was already there and already tested from five directions — §11 says a test that passes the
+moment you write it was testing something that already worked, so nothing was added for it.
+What the slice did not plan for is the interaction between the other two: capping the
+transcript breaks §4.6's tail, because a session that rotates a moment before it dies leaves a
+live `pty.log` holding the last half-second of a redraw and the error in the file that was
+renamed away. Keeping one predecessor and reading the tail across both is the fix, and it is
+why the cap is two files rather than one.
+
+The run step was done by flood rather than by afternoon: 26 MiB through a real pty in 2.4
+seconds, ending at 5.0 MiB on disk against a 4 MiB cap, and the `/login` line at the end of it
+still reached the tail — both with the error in the live transcript and with it in the rotated
+one. The retention half ran over this box's own five session records on a copy: nothing goes
+today, and with the records backdated two days the four ended ones go and the live one stays.
+What that does not cover is a real day passing in production, which only time can do.
+
 ### Slice 11 — a project that does not exist yet
 
 Starts by settling §9.3, because what that probe finds decides how much of this slice is a
@@ -1030,7 +1060,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 7 | `claude` end to end | ☑ | §4.2's "never blocks" cannot be bought with a smaller poll interval — getUpdates holds for 50s, so a meta poll inside the loop answers the phone a minute late — so the wait is a thread per session and the reply arrives *after* whatever was sent behind it. The finding that mattered came from the run step and not the tests: `terminate()` reported success against a detached runner it had not signalled, because `waitpid` answers ECHILD for a process that is alive but no longer ours. That is the pid `stop` gets after any restart. See §9.11, which also records that the two grace periods nest. Then §9.11's own lesson turned up *in the tests*: one that ended by waiting out a 30s session deadline was racing `settle()`'s 30s join, which is one failure in ten under load — and was 30 of the suite's 37 seconds. Releasing the waiter instead of outliving it took the suite to 7.5s. Smaller, and nearly shipped: §7's scrub must not be a general "long opaque run" rule, because a session id is 26 characters of exactly that and the scrub would have eaten the one reply that matters. §2's claim is now verified rather than asserted — see the control experiment recorded there, and then verified again by accident: a session sent `launchctl kickstart -k` as its own prompt, ran it, and both live sessions came through it untouched. The first real use from a phone found what no test could, and it is now §9.12: Remote Control took 68 minutes to connect, the waiter had long since given up, and two working sessions were reported to the phone as failures. |
 | 8 | fleet control + reconciliation | ☑ | The pass has to run **before the batch it arrived with**, or the first `claude` after a reboot is refused against a cap held entirely by records whose runners that reboot took — two of them were on disk this morning, which is where the fixture came from. Announcing exactly once is a filesystem problem and not a bookkeeping one: the waiter thread and the tick can both be holding one newly-live record (§4.6's 45s deadline falls *inside* the ≤50s tick), and after a `launchctl kickstart` they are two **processes** — so `O_CREAT|O_EXCL` per (session, kind), with the link and the ending claimed separately so neither spends the other's. §9.12's late link then falls out of the same walk for free, because a waiter that gave up claims nothing. `alive()` refuses a `runner_pid` of `0` or `-1` before `os.kill` ever sees it — those mean *this whole process group* and *every process this user owns*, and the same record is what `stop all` iterates. Two things only the run step could say: the end notice claimed sessions had **run** for 11h when the machine had been switched off for three of them (this pass cannot know when a runner died, only that it is gone, so it now reports when the session *started*), and a restarted daemon takes up to 50s to notice anything at all, because the first tick is the first *return* from a 50s poll. Run step done from the phone at 10:03–10:12: two sessions, a third `claude beacon` refused at the cap, `ls`, `stop 2` taking only the second, `stop all` taking the rest. The links never came back, but for nothing this slice does — see §9.13, which is the failure §9.12 misread as the network. |
 | 9 | the link comes back, and the bot starts itself | ☐ | **The blocker cured itself, and that is the finding.** §9.13 reproduced at 10:03 and was gone by 13:07 with nothing changed between — no reboot, same 2.1.270, same desktop app, 14/14 on its own minimal repro and a real launchd pty run scraping a link in two seconds. So the probe this slice was planned around could not be run at all: `fs_usage` needs an open that never returns and there was no longer one. §8 is back on evidence of working rather than of being understood, which is a weaker warrant than this spec usually accepts and is why §9.13 was kept as a recognition guide instead of being deleted. The code finding was §14's, and it was real: `CLAUDE_PID`, `CLAUDE_EFFORT` and `AI_AGENT` all miss a `CLAUDE_CODE` prefix, so a listener started from a shell inside a Claude Code session was handing that session's effort setting, and a pid belonging to somebody else, to everything it spawned. The lock test the slice asked for was **green the moment it was written** — the property already held, and §11 says that is a test of something that already worked; it was kept anyway, because it executes the two scripts where the existing tests only string-match them, and two supported ways to start is exactly when that stops being theoretical. **Row still unticked: the run step is half done.** `kickstart -k` restarts the listener in a second and the live session survives it; nobody has logged out yet. |
-| 10 | hardening | ☐ | |
+| 10 | hardening | ☑ | **The cap and the tail are the same file read from two ends, and only one of them was in the brief.** §4.6 reads the last 64 KB of `pty.log` to explain a session that never came up; rotating that file at 4 MiB means a session which fails just after a rotation hands the phone a cleared panel instead of the error — and §9.7's expired login, the likeliest failure after week one, is exactly a session that prints something and dies. Hence two files and a tail that reads back through the older one; a one-file cap would have been a silent regression in the reply that matters most. The third red test was already green from slice 7 and nothing was written for it (§11). Two smaller things, both in the rotation rather than the retention: the cap is checked *after* the write, because a chunk is one 64 KB read off the master and the file is briefly over either way — and a rotation that fails switches the cap off rather than retrying, because the loop it sits in is the session's life (§2) and a failing rename retried per write is a spin in the one place that has to keep reading the terminal. Retention counts from the record's mtime and not from `started`: a session left open for a week is not an old record, and the pass that finishes a reboot's orphan rewrites the record, so the day starts when the session ends rather than when it began. The sweep runs *after* the announcing loop and not inside it, because the marker that keeps an ending to one announcement lives inside the directory being removed — two days of downtime is a record that is terminal, old, and never announced. Run step by flood rather than by afternoon: 26 MiB through a real pty in 2.4s, 5.0 MiB left on disk, the `/login` line still in the tail from either file; the sweep over this box's own records, backdated, kept the live session and took the four ended ones. Nobody has yet watched a real day pass. |
 | 11 | new projects from the phone | ☐ | |
 
 ---
@@ -1050,6 +1080,10 @@ Not slices — things that stay true after the build.
   and §8 is the supported way to start it again. `pgrep -f 'bot.py --serve'` still answers the
   same question and does not say who started it; between 2026-09-13 09:56 and 13:15 it was the
   only thing that could, and the plist is back.
+- `du -sh var` is the whole of §10.7's audit. A session costs at most 8 MB while it runs and
+  its directory goes a day after it ends, so anything past a few tens of megabytes means the
+  sweep is not running — look for `directory removed` lines in `var/bot.log`, and remember
+  that a session already running when a cap changes keeps the runner it started with.
 - **If a link ever stops coming back under launchd, §9.13 is the first suspect, and it has to be
   caught while it is hung.** It was never explained — only outlived. `sample` the parked pid for
   the stack and get `sudo fs_usage -w -f filesys claude` running *before* the spawn, because the

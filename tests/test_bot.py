@@ -193,11 +193,16 @@ class FakeSessions(bot.Sessions):
     is what lets `TestTheLoopIsNeverBlocked` assert on the poll loop while one is pending.
     """
 
-    def __init__(self, root, outcome=session.LIVE, url=LINK, transcript=None):
+    def __init__(self, root, outcome=session.LIVE, url=LINK, transcript=None, previous=None):
         bot.Sessions.__init__(self, root=root, log=lambda m: None)
         self.outcome = outcome
         self.url = url
         self.transcript = transcript
+        # Slice 10: what the cap renamed out of the way a moment before the session died.
+        # The tail has to be able to reach back into it, so the fake has to be able to leave
+        # one behind — a session that fails just after a rotation is the ordinary case, not a
+        # contrived one, because a rotation is what a session printing an error does.
+        self.previous = previous
         self.started = []
         self.fail = None          # raised by start() instead of spawning
         self.boom = None          # raised by read(), to break a waiter mid-wait
@@ -222,6 +227,8 @@ class FakeSessions(bot.Sessions):
         self.write(sid, self.outcome, cwd=cwd, project=project, name=name, chat_id=chat_id)
         if self.transcript is not None:
             self.transcribe(sid, self.transcript)
+        if self.previous is not None:
+            self.transcribe(sid, self.previous, name=session.PREVIOUS)
         return 44213
 
     def write(self, sid, state, url=UNSET, **fields):
@@ -256,9 +263,9 @@ class FakeSessions(bot.Sessions):
         self.dead.add(record.get("runner_pid"))
         return True
 
-    def transcribe(self, sid, data):
+    def transcribe(self, sid, data, name=None):
         os.makedirs(self.directory(sid), exist_ok=True)
-        with open(os.path.join(self.directory(sid), "pty.log"), "wb") as fh:
+        with open(os.path.join(self.directory(sid), name or session.TRANSCRIPT), "wb") as fh:
             fh.write(data if isinstance(data, bytes) else data.encode("utf-8"))
 
     def read(self, sid):
@@ -287,6 +294,11 @@ class Base(unittest.TestCase):
         self.tg = FakeTelegram()
         self.logged = []
         self.slept = []
+        # Sessions has a log of its own — §14 has both halves landing in var/bot.log, because
+        # a claim that could not be written or a directory that could not be removed is read
+        # off the same `tail -f` as everything else. The fake silenced it; the tests that are
+        # about those lines have to be able to see them.
+        self.sessions.log = self.logged.append
 
     def listener(self, tg=None, **kw):
         kw.setdefault("started", START)
@@ -330,6 +342,15 @@ class Base(unittest.TestCase):
         if announced and state == session.LIVE:
             self.sessions.claim(sid, bot.LINK_SENT)
         return record
+
+    def aged(self, sid, seconds):
+        """Backdate that session's record. Slice 10's clock, and it is the record's mtime
+        rather than a field: `started` is when a session began and a session left open for a
+        week is not an old *record*. meta.json is last written when the state becomes terminal,
+        which is the moment retention is counting from."""
+        path = os.path.join(self.sessions.directory(sid), session.META)
+        when = time.time() - seconds
+        os.utime(path, (when, when))
 
     def assertSilent(self, update, because):
         tg = self.deliver(update)
@@ -1093,6 +1114,31 @@ class TestWhenNothingComesUp(Base):
         got = self.failing("goodbye\r\n", outcome=session.ENDED)
         self.assertIn("beacon", got)
         self.assertIn("goodbye", got)
+
+    def test_the_tail_reaches_back_into_a_rotated_transcript(self):
+        """Slice 10's cap and §4.6's tail are the same file read from two ends.
+
+        A session that rotated a moment before it died leaves a pty.log of a few hundred
+        bytes, and a tail that read only that would answer the phone with the last half-second
+        of a redraw instead of the error that killed it — which is the failure §9.7 is about,
+        arriving through the fix for something else entirely.
+        """
+        self.sessions.previous = "Invalid API key · Please run /login\r\n"
+        got = self.failing("\r\n")
+        self.assertIn("/login", got)
+
+    def test_the_rotated_transcript_is_not_dredged_up_when_there_is_newer_output(self):
+        self.sessions.previous = "ancient news\r\n"
+        got = self.failing("".join("line %d\r\n" % i for i in range(20000)))
+        self.assertNotIn("ancient news", got)
+        self.assertIn("line 19999", got)
+
+    def test_the_two_transcripts_join_up_in_the_order_they_were_written(self):
+        # A tail spliced the wrong way round reads as an error that happened before the thing
+        # that caused it.
+        self.sessions.previous = "before the rotation\r\n"
+        got = self.failing("after the rotation\r\n")
+        self.assertLess(got.index("before the rotation"), got.index("after the rotation"))
 
 
 class TestGivingUpAtFortyFiveSeconds(Base):
@@ -2323,6 +2369,155 @@ class TestALateLinkIsStillAnnounced(Base):
         self.place("aa11aa", announced=False)
         self.assertTrue(self.sessions.claim("aa11aa", bot.LINK_SENT))
         self.assertTrue(self.sessions.claim("aa11aa", bot.END_SENT))
+
+
+class TestOldSessionsAreForgotten(Base):
+    """Slice 10: `ended` session directories are reaped after a day but a `live` one never is.
+
+    Nothing ever removed one. A session directory is a record and a transcript capped at two
+    files, so each is bounded — but the *number* of them is not, and every `claude beacon`
+    from a phone makes another one that stays there forever. This box had five within a day of
+    the first real use.
+
+    The day is counted from the record's last write, which is when it became terminal. The two
+    ways to get this wrong are not symmetrical: keeping a directory too long costs disk, and
+    removing one too early destroys the transcript of a session that may still be running.
+    """
+
+    def ticked(self, *batches):
+        tg = FakeTelegram(*(batches or ([],)))
+        listener = self.listener(tg)
+        listener.tick()
+        return tg, listener
+
+    def gone(self, sid):
+        return not os.path.exists(self.sessions.directory(sid))
+
+    def test_a_session_that_ended_a_day_ago_is_removed(self):
+        self.place("aa11aa", session.ENDED, runner_pid=4001)
+        self.sessions.dead.add(4001)
+        self.sessions.claim("aa11aa", bot.END_SENT)
+        self.aged("aa11aa", bot.RETAIN + 60)
+        self.ticked()
+        self.assertTrue(self.gone("aa11aa"))
+
+    def test_a_failed_session_is_forgotten_on_the_same_clock(self):
+        # §9.7's expired login leaves `failed`, and the tail that explained it went to the
+        # phone the moment it happened. There is nothing in it a day later that is worth a
+        # directory.
+        self.place("aa11aa", session.FAILED, runner_pid=4001)
+        self.sessions.dead.add(4001)
+        self.sessions.claim("aa11aa", bot.END_SENT)
+        self.aged("aa11aa", bot.RETAIN + 60)
+        self.ticked()
+        self.assertTrue(self.gone("aa11aa"))
+
+    def test_the_whole_directory_goes_and_not_just_the_record(self):
+        # The transcript is the part with the size, and after a rotation there are two of them.
+        self.place("aa11aa", session.ENDED, runner_pid=4001)
+        self.sessions.transcribe("aa11aa", "z" * 4096)
+        self.sessions.transcribe("aa11aa", "y" * 4096, name=session.PREVIOUS)
+        self.sessions.dead.add(4001)
+        self.sessions.claim("aa11aa", bot.END_SENT)
+        self.aged("aa11aa", bot.RETAIN + 60)
+        self.ticked()
+        self.assertTrue(self.gone("aa11aa"))
+
+    def test_a_session_that_ended_an_hour_ago_is_kept(self):
+        """The tail of a session that failed this afternoon is the only evidence of why, and
+        §14 has you reading it off disk when the phone got something unhelpful."""
+        self.place("aa11aa", session.ENDED, runner_pid=4001)
+        self.sessions.dead.add(4001)
+        self.aged("aa11aa", 3600)
+        self.ticked()
+        self.assertFalse(self.gone("aa11aa"))
+
+    def test_a_live_session_is_never_forgotten_however_old(self):
+        """The one that must not happen. A session left open on purpose for a week is the
+        thing this bot is *for* — §9.4 has them reattachable for hours — and deleting the
+        directory underneath a running runner would take the record `ls` and `stop` are read
+        from, while the pty stays open and the session keeps running with nothing naming it.
+        """
+        self.place("bb22bb", session.LIVE, runner_pid=4002)
+        self.aged("bb22bb", 7 * bot.RETAIN)
+        self.ticked()
+        self.assertFalse(self.gone("bb22bb"))
+        self.assertEqual(self.sessions.read("bb22bb")["state"], session.LIVE)
+
+    def test_a_starting_session_is_never_forgotten_however_old(self):
+        # `starting` counts as existing everywhere else in this file (fleet(), the cap), and a
+        # record whose mtime is old only because the runner has not written since is not an
+        # old session.
+        self.place("cc33cc", session.STARTING, runner_pid=4003, url=None)
+        self.aged("cc33cc", 7 * bot.RETAIN)
+        self.ticked()
+        self.assertFalse(self.gone("cc33cc"))
+
+    def test_a_terminal_record_whose_runner_is_still_there_is_left_alone(self):
+        """Belt and braces, and cheap: the runner writes its terminal state on its way out, so
+        a record that says `ended` while its pid still answers should be impossible. If it ever
+        is not, the directory being written into is the last one to remove."""
+        self.place("dd44dd", session.ENDED, runner_pid=4004)
+        self.sessions.claim("dd44dd", bot.END_SENT)
+        self.aged("dd44dd", bot.RETAIN + 60)
+        self.ticked()
+        self.assertFalse(self.gone("dd44dd"))
+
+    def test_an_old_ending_is_announced_before_its_directory_goes(self):
+        """Two days of downtime, and the record was already terminal when the listener came
+        back. The announcement and the removal are the same pass over the same records, so the
+        order they run in decides whether the phone is ever told — and the claim marker that
+        makes it once-only is *inside* the directory being removed.
+        """
+        self.place("aa11aa", session.ENDED, runner_pid=4001, name="beacon-aa11", chat_id=ME)
+        self.sessions.dead.add(4001)
+        self.aged("aa11aa", 2 * bot.RETAIN)
+        tg, _ = self.ticked()
+        self.assertEqual(len(tg.sent), 1, "the ending was never announced")
+        self.assertIn("beacon-aa11", tg.texts[0])
+        self.assertTrue(self.gone("aa11aa"))
+
+    def test_a_session_this_pass_has_just_ended_is_kept(self):
+        """A live record whose runner a reboot took is finished by this same pass (§4), and its
+        record may have been written days ago. It has just become terminal; the day starts
+        now, and the transcript is there to be read while it is still interesting."""
+        self.place("aa11aa", session.LIVE, runner_pid=4001)
+        self.sessions.dead.add(4001)
+        self.aged("aa11aa", 3 * bot.RETAIN)
+        self.ticked()
+        self.assertFalse(self.gone("aa11aa"))
+        self.assertEqual(self.sessions.read("aa11aa")["state"], session.ENDED)
+
+    def test_a_removal_that_fails_does_not_stop_the_pass(self):
+        """§7: the loop does not die, and this runs on every tick. A directory that cannot be
+        removed — a full disk, a permission this process does not have — must cost one line in
+        the log and nothing else."""
+        self.place("aa11aa", session.ENDED, runner_pid=4001)
+        self.place("bb22bb", session.ENDED, runner_pid=4002)
+        self.sessions.dead.update([4001, 4002])
+        for sid in ("aa11aa", "bb22bb"):
+            self.sessions.claim(sid, bot.END_SENT)
+            self.aged(sid, bot.RETAIN + 60)
+        stuck = self.sessions.directory("aa11aa")
+        os.chmod(stuck, 0o500)
+        self.addCleanup(os.chmod, stuck, 0o700)
+        self.ticked()
+        self.assertFalse(self.gone("aa11aa"))
+        self.assertTrue(self.gone("bb22bb"), "one stuck directory hid the rest of the pass")
+        self.assertTrue([line for line in self.logged if "aa11aa" in line],
+                        "a directory that could not be removed left nothing in bot.log (§14)")
+
+    def test_it_keeps_answering_the_phone_while_it_sweeps(self):
+        self.place("aa11aa", session.ENDED, runner_pid=4001)
+        self.sessions.dead.add(4001)
+        self.sessions.claim("aa11aa", bot.END_SENT)
+        self.aged("aa11aa", bot.RETAIN + 60)
+        tg, _ = self.ticked([message("ls")])
+        self.assertTrue(self.gone("aa11aa"))
+        self.assertEqual(tg.texts[-1], "No live sessions.")
+
+    def test_the_day_is_the_number_the_spec_names(self):
+        self.assertEqual(bot.RETAIN, 86400)
 
 
 if __name__ == "__main__":
