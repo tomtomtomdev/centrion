@@ -39,11 +39,16 @@ ThrottleInterval is a worse failure mode than a patient retry. telegram.py alrea
 at the poll; everything above it here is wrapped too, per update, per tick and per waiter, so
 neither a malformed message nor a session that goes strange can take the loop down with it.
 
-Two gaps this commit leaves, both slice 8's: nothing yet enforces `max_sessions` (§10.6), and a
-listener killed between a spawn and its reply leaves a session running that nobody has been
-told about — §4's reconciliation pass is what finds it again, and `ls` is what asks.
+**And it reconciles.** Slice 8 closed the two gaps slice 7 left — nothing enforced
+`max_sessions`, and a listener killed between a spawn and its reply left a session running
+that nobody had been told about. Both are the same shape: the listener only ever acted on
+messages, so anything that happened to a session while nobody was messaging happened
+unobserved. §4's pass runs on every *return* from getUpdates instead, message or not, and it
+is the only thing here that sends without being asked — a session whose runner is gone, and
+(§9.12) a session whose link turned up an hour after anyone was still waiting for it.
 """
 import argparse
+import errno
 import os
 import re
 import subprocess
@@ -115,6 +120,37 @@ TOKENISH = re.compile(r"\d{5,}:[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{12,}")
 #: What replaces the middle of a reply too long to send. See fit().
 ELISION = "\n… %d characters elided …\n"
 
+#: §9.11: **the two grace periods nest.** Ending a runner is two kills in sequence, not one —
+#: the runner catches SIGTERM and then spends up to its own `session.GRACE` ending claude,
+#: which was measured at over five seconds for a real session on this box. A caller that
+#: allowed it the same budget would SIGKILL it in the middle of that, orphaning the session
+#: and leaving meta.json saying `live` for something already gone. Three times over, so the
+#: multiple is visible rather than a number that looks arbitrary a year from now.
+STOP_GRACE = session.GRACE * 3
+
+#: §4: `pid reuse is theoretically possible between reboots; started is in the record, so
+#: compare it against the process start time.` The runner writes its record within a moment of
+#: starting, so a genuine runner's process is always *older* than its record; this slack is
+#: for clock skew and a slow spawn, not for the reuse it is guarding against — which after a
+#: reboot is hours out, not minutes.
+PID_REUSE_SLACK = 120
+
+#: The two things the bot ever says about a session unprompted (§4, §9.12), and the two
+#: separate claims that keep each to exactly once. A session announces its link when it
+#: arrives and its ending when it ends; one must never spend the other's claim.
+LINK_SENT, END_SENT = "link", "end"
+
+#: One marker file per claim, written by the listener and by nobody else. The record beside it
+#: belongs to the runner (§3), and there is no lock between the two processes.
+ANNOUNCED = "announced-%s"
+
+#: §9.4: killing the PTY leaves the remote session registered but offline — it stays in the
+#: claude.ai/code list without the green dot, and `claude --continue` in that directory
+#: reattaches within roughly four hours. §9.4 asks `stop` to say so, because the alternative
+#: is assuming the work went with it.
+REATTACH = ("It stays in claude.ai/code, offline. `claude --continue` in that directory "
+            "picks it up for about four hours.")
+
 
 def log(message):
     """One line to stderr, which launchd routes to var/bot.log (§8). §14 starts here."""
@@ -181,6 +217,80 @@ def scrub(data, redact=None):
         text = redact(text)
     text = TOKENISH.sub("<redacted>", text)
     return HOME_RE.sub("~", text)
+
+
+def uptime(started, now=None):
+    """How long ago `started` was, short enough for a phone. §5's `ls` column.
+
+    Total, like commands.parse(): §4 walks every directory under var/sessions and reads
+    whatever is in it, so a record half-written by a kill at logout, or left by an older build
+    of this bot, has to render as a line in a listing rather than as a traceback that hides
+    every session behind it.
+
+    Clamped at zero because `started` is a *wall clock* timestamp and this one is not
+    monotonic — §4.6 uses a monotonic clock for the session deadline for exactly this reason.
+    A laptop that has been asleep, or an NTP correction, routinely leaves a record dated a few
+    seconds into the future, and "-3s" in a listing reads as a bug in the bot.
+    """
+    now = time.time() if now is None else now
+    try:
+        seconds = int(now - started)
+    except (TypeError, ValueError, OverflowError):
+        return "?"
+    if seconds < 0:
+        return "0s"
+    if seconds < 60:
+        return "%ds" % seconds
+    if seconds < 3600:
+        return "%dm" % (seconds // 60)
+    if seconds < 86400:
+        hours, minutes = divmod(seconds // 60, 60)
+        return "%dh %dm" % (hours, minutes) if minutes else "%dh" % hours
+    days, hours = divmod(seconds // 3600, 24)
+    return "%dd %dh" % (days, hours) if hours else "%dd" % days
+
+
+def _seconds(value):
+    """A record's `started` as a number to sort on. Anything unusable sorts first."""
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) \
+        else 0.0
+
+
+def ordinal(n):
+    """2 → `2nd`. §5 spells the same-directory warning `⚠ 2nd session in beacon`."""
+    if 10 <= n % 100 <= 20:
+        return "%dth" % n
+    return "%d%s" % (n, {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th"))
+
+
+def process_started(pid):
+    """When that pid's process started, in epoch seconds, or None if there is no such process.
+
+    §4 asks for this by name: `pid reuse is theoretically possible between reboots; started is
+    in the record, so compare it against the process start time before trusting a pid that is
+    alive.` It is not an exotic case here — pids after a reboot are four-digit numbers handed
+    out within a minute of login, and every record on disk names one.
+
+    `ps` because macOS has no /proc and the alternative is a ctypes sysctl against a
+    kinfo_proc layout, which is a great deal of fragile arithmetic to avoid one subprocess on
+    a pass that runs at most a handful of times every fifty seconds. §9.6 also applies: this
+    box has no third-party packages and is not getting one for this.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    try:
+        out = subprocess.check_output(["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                                      stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    text = out.decode("ascii", "replace").strip()
+    try:
+        # `Sun Sep 13 09:10:27 2026`, in the C locale ps always answers in.
+        return time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y"))
+    except (ValueError, OverflowError):
+        return None
 
 
 class Sessions:
@@ -254,6 +364,137 @@ class Sessions:
             if child.poll() is not None:
                 self.children.remove(child)
 
+    # -- the fleet, as it is on disk (§4, §5) --------------------------------------------
+
+    def records(self):
+        """Every session's record, oldest first. The walk §4's reconciliation pass is.
+
+        Ordered by `started` because §5 numbers the listing and `stop 2` takes that number:
+        readdir order is arbitrary and changes underneath you, so an index built on it would
+        mean a different session a minute after the `ls` that printed it. The sid breaks ties,
+        so two sessions started in the same second still order the same way twice running.
+
+        The directory name wins over the record's own `sid` field — it is what names the
+        directory `claim()` and `finish()` are about to write into, and a record that
+        disagrees with the directory it is in is a record that has been tampered with or
+        truncated.
+        """
+        try:
+            names = sorted(os.listdir(self.root))
+        except OSError:
+            return []                # no var/sessions yet: no sessions, not an error
+        found = []
+        for sid in names:
+            # read_meta and not self.read(): that one is the waiter's per-session poll (§4.6),
+            # and this is the walk that has to see every session there is. Keeping them
+            # separate is what stops one session being slow to answer from stalling the pass
+            # whose whole job is to notice the others.
+            record = session.read_meta(self.directory(sid))
+            if record is None:
+                # §4 is explicit that read_meta returns None rather than raising, and this is
+                # the consequence it protects: one truncated record must not be able to hide a
+                # live bypass-permissions session from the only listing anybody has.
+                continue
+            record["sid"] = sid
+            found.append(record)
+        found.sort(key=lambda r: (_seconds(r.get("started")), r.get("sid") or ""))
+        return found
+
+    def alive(self, record):
+        """Is that session's runner still there? §4's check, and then the guard on it.
+
+        Two questions, and the second is the one that catches a reboot. `kill(pid, 0)` says
+        whether *something* answers to the pid; it cannot say whether that something is the
+        runner this record was written about. After a reboot every pid in every record on
+        disk is either free or somebody else's, and four-digit pids are handed out within a
+        minute of login — so a bot that trusted the first question alone would come back from
+        a restart reporting phantom sessions it could neither stop nor replace.
+
+        The type check is not defensive padding. `kill(0, sig)` signals this process's entire
+        group and `kill(-1, sig)` signals every process this user owns, so a record corrupted
+        into either would turn this pass — and then `stop all` — into something that takes the
+        daemon and the desktop with it. `True` is an int in Python and would be pid 1.
+        """
+        pid = record.get("runner_pid")
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
+            return False
+        try:
+            os.kill(pid, 0)
+        except OverflowError:
+            return False
+        except OSError as e:
+            # EPERM is not death: it means the process is there and belongs to someone else.
+            # session.py's _reaped() draws the same line for the same reason (§9.11).
+            if e.errno != errno.EPERM:
+                return False
+
+        started = record.get("started")
+        if isinstance(started, bool) or not isinstance(started, (int, float)):
+            # A corrupt record, since §3 always writes `started`. Of the two ways to be wrong
+            # about it, showing a session that may not exist is recoverable and hiding one
+            # that does is not: `ls` is the only view of a bypass-permissions session this
+            # machine offers, and `stop` can only reach what `ls` can see.
+            return True
+        began = process_started(pid)
+        if began is None:
+            return True              # it answered kill(0) a moment ago; ps losing a race is
+        return began <= started + PID_REUSE_SLACK        # not evidence of anything
+
+    def claim(self, sid, kind):
+        """True for whoever gets here first, and False for everybody after. §4, §9.12.
+
+        The arbitration between §4.6's waiter thread and §4's tick, both of which can be
+        looking at one newly-live record at the same moment — the 45s deadline falls inside
+        the ≤50s tick interval, so that window is not a narrow one. It has to be the
+        filesystem's decision rather than a set in memory: the two claimants are two threads
+        today and two *processes* after a `launchctl kickstart`, and a marker that did not
+        survive a restart would mean every session that ever ended announcing itself again at
+        every login.
+
+        O_CREAT|O_EXCL is the whole mechanism — one atomic syscall, no read-then-write window.
+        """
+        path = os.path.join(self.directory(sid), ANNOUNCED % kind)
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        except FileExistsError:
+            return False
+        except OSError as e:
+            # Claiming is what stops a message being sent twice, so a claim that cannot be
+            # written has to read as "somebody else has it". The alternative is a full disk
+            # turning into the same message every fifty seconds until it is noticed.
+            self.log("could not claim the %s announcement for session %s: %s" % (kind, sid, e))
+            return False
+        return True
+
+    def finish(self, record):
+        """Write that record as `ended`, and hand back what is now on disk. §4.
+
+        **Only ever called for a runner this process has established is gone.** meta.json
+        belongs to the runner — §3 has it written atomically so that a listener reading
+        mid-write never sees half a record — and there is no lock between the two processes,
+        so the listener writing a record whose runner is still running would be a
+        read-modify-write race that silently drops whatever the runner wrote in between.
+        """
+        sid = record.get("sid")
+        ended = dict(record, state=session.ENDED)
+        try:
+            session.write_meta(self.directory(sid), ended)
+        except OSError as e:
+            self.log("could not mark session %s ended: %s" % (sid, e))
+            return record
+        return ended
+
+    def stop(self, record, grace=STOP_GRACE):
+        """SIGTERM the runner, which SIGTERMs claude. §5's `stop`, §9.10's signalling.
+
+        Thin on purpose: session.terminate() is where the two hard-won details live — signal
+        the process *group* as well as the process, and ask both `waitpid` and `kill(pid, 0)`
+        whether it worked — and slice 7 shipped bugs against both of them.
+        """
+        if not self.alive(record):
+            return True              # already gone is the outcome `stop` was asking for
+        return session.terminate(record.get("runner_pid"), grace=grace, log=self.log)
+
 
 def read_offset(path=OFFSET):
     """The last acknowledged update_id + 1, or None if there is not a usable one.
@@ -307,6 +548,12 @@ class Listener:
         self.poll_every = poll_every
         # One thread per session still coming up. Pruned as they finish, in watch().
         self.waiters = []
+        # Sids forked and not yet on disk. §4.2 has this process returning to the poll the
+        # instant it has forked, so for the first fraction of a second a session exists as a
+        # process and as nothing else — and §10.6's held-down `claude` is precisely a second
+        # message arriving inside that window. A count taken off the filesystem alone would
+        # wave every one of them through.
+        self.pending = set()
 
         # Pick up where the last listener left off. Doing it here rather than in serve() means
         # a test can restart a listener by building a second one, which is exactly what a
@@ -402,12 +649,122 @@ class Listener:
             return self.project_list() + "\n\nSend `claude <project>` to start one there."
 
         if intent.verb == commands.LIST:
-            return "No live sessions."
+            return self.listing()
 
         if intent.verb == commands.STOP:
-            return "Nothing to stop — no sessions yet."
+            return self.halt(intent.target)
 
         return self.help()
+
+    # -- the fleet -------------------------------------------------------------------------
+
+    def fleet(self):
+        """The sessions that still exist, in the order §5 numbers them.
+
+        `starting` counts as existing. It has already paid for a Claude Code process, `stop`
+        has to be able to reach it — §9.10's orphan is exactly a session nobody could see —
+        and §4.1 checks the count before it mints rather than after a link comes back.
+        """
+        return [r for r in self.sessions.records()
+                if r.get("state") not in (session.ENDED, session.FAILED)]
+
+    def listing(self, fleet=None):
+        """§5's `ls`: index, project, name, uptime, link.
+
+        The only view of this machine a phone gets, and the numbers in it are the ones `stop`
+        is about to be handed — so this and halt() read the same fleet in the same order, and
+        neither builds its own.
+        """
+        fleet = self.fleet() if fleet is None else fleet
+        if not fleet:
+            return "No live sessions."
+        lines = []
+        for index, record in enumerate(fleet, 1):
+            line = "%d. %s · %s · %s" % (index, record.get("project") or "?",
+                                         record.get("name") or "?",
+                                         uptime(record.get("started")))
+            url = record.get("url")
+            if record.get("state") == session.LIVE and isinstance(url, str) and url:
+                lines.append(line)
+                # §5 again: on its own line, or Telegram will not make it tappable.
+                lines.append(url)
+            else:
+                lines.append(line + " · starting…")
+        return "\n".join(lines)
+
+    def halt(self, target):
+        """§5's `stop <n>` and `stop all`.
+
+        The one place the listener deliberately blocks. §4.2's rule is about *starting* a
+        session — forty-five seconds of polling meta.json would be forty-five seconds of a
+        deaf bot — and this is the opposite case: somebody is holding a phone waiting to hear
+        that a session with permissions bypassed is gone, and the wait is bounded by
+        STOP_GRACE rather than by a session that may never come up. A runner that dies when
+        asked, which is all of them, returns this in well under a second.
+        """
+        fleet = self.fleet()
+        if not fleet:
+            return "No live sessions to stop."
+
+        if target == commands.ALL:
+            chosen = fleet
+        elif isinstance(target, int) and 1 <= target <= len(fleet):
+            chosen = [fleet[target - 1]]
+        else:
+            return "There is no session %s. %d running:\n\n%s" % (
+                target, len(fleet), self.listing(fleet))
+
+        stopped, left = [], []
+        for record in chosen:
+            if self.sessions.stop(record, STOP_GRACE):
+                # Claimed before the record is written, so that §4's pass — which is about to
+                # see a newly-ended record — does not announce an ending the reply below has
+                # already reported. Only on success: a session that would not die is one this
+                # bot still owes an announcement for, whenever it does.
+                self.sessions.claim(record.get("sid"), END_SENT)
+                self.sessions.finish(record)
+                stopped.append(record)
+            else:
+                left.append(record)
+            self.log("stop %s: session %s" % (record.get("sid"),
+                                              "stopped" if record in stopped else "WOULD NOT DIE"))
+
+        lines = ["■ %s · %s stopped." % (r.get("project"), r.get("name")) for r in stopped]
+        lines += ["✗ %s · %s did not stop and is still running." % (r.get("project"),
+                                                                   r.get("name"))
+                  for r in left]
+        if stopped:
+            lines.append("")
+            lines.append(REATTACH)
+        return "\n".join(lines)
+
+    def crowded(self, record, sid):
+        """§5's `⚠ 2nd session in beacon`, or None. The one comparison in the whole spec.
+
+        `samefile` and not `==`, per §9.9: this volume is case-insensitive and realpath() is
+        lexical, so `claude beacon` and `claude BEACON` start two sessions in one directory
+        under two path strings that compare unequal. A string comparison here would leave the
+        warning silently never firing in the one case it exists for — two sessions editing the
+        same files underneath each other, which is the entire hazard it is about.
+        """
+        cwd = record.get("cwd") if record else None
+        if not isinstance(cwd, str) or not cwd:
+            return None
+        others = 0
+        for other in self.fleet():
+            if other.get("sid") == sid:
+                continue
+            try:
+                if os.path.samefile(cwd, other.get("cwd")):
+                    others += 1
+            except (OSError, TypeError, ValueError):
+                # A record naming a directory since renamed or deleted, which is an ordinary
+                # thing to find in var/sessions after a week. samefile raises rather than
+                # answering False, and a comparison that cannot be made is not a match.
+                continue
+        if not others:
+            return None
+        return "⚠ %s session in %s" % (ordinal(others + 1), record.get("project") or "one directory")
 
     # -- starting one ----------------------------------------------------------------------
 
@@ -440,13 +797,24 @@ class Listener:
             self.say(chat_id, "%s\n\n%s" % (e, self.help()))
             return "refused, not a project"
 
+        # §10.6: without a cap at all, a held-down `claude` fills RAM with Claude Code
+        # processes. The union is the point — see self.pending.
+        running = set(r.get("sid") for r in self.fleet()) | self.pending
+        if len(running) >= self.cfg.max_sessions:
+            self.say(chat_id, "%d of %d sessions already running. `ls` to see them, "
+                              "`stop <n>` or `stop all` to make room."
+                     % (len(running), self.cfg.max_sessions))
+            return "refused, at the cap"
+
         sid = self.mint()
         # §3's meta.json: sid 3f2a91 gives the name centrion-3f2a. The spelling is the one that
         # was sent, not the one on disk (§9.9) — it is a label in the Claude app, not a path.
         name = "%s-%s" % (intent.project, sid[:4])
+        self.pending.add(sid)
         try:
             pid = self.sessions.start(sid, name, cwd, intent.project, chat_id, intent.prompt)
         except Exception as e:
+            self.pending.discard(sid)
             # The one failure with no transcript behind it: nothing was spawned, so nothing
             # will ever write a record, and if the reply is not composed here the phone simply
             # never hears back.
@@ -473,6 +841,14 @@ class Listener:
         """One waiter, start to finish. Runs on its own thread and swallows everything."""
         try:
             record, state = self.wait(sid)
+            # Claimed before the send, not after: §4's tick can be looking at this same
+            # record right now, and at-most-once is the side to err on — the same side the
+            # offset errs on, for the same reason. A deadline that expired claims *nothing*,
+            # which is what leaves §9.12's late link for the tick to announce an hour later.
+            if state == session.LIVE:
+                self.sessions.claim(sid, LINK_SENT)
+            elif state in (session.FAILED, session.ENDED):
+                self.sessions.claim(sid, END_SENT)
             sent = self.say(chat_id, self.outcome(record, state, sid, project, name))
             self.log("session %s: %s — %s" % (sid, state or "no link in %ds" % self.timeout,
                                               "replied" if sent else "reply NOT delivered"))
@@ -482,6 +858,10 @@ class Listener:
             # §14's log is the only place that could ever say so.
             self.log("session %s: waiting failed (%s: %s)"
                      % (sid, type(e).__name__, self.tg.redact(e)))
+        finally:
+            # Its record is on disk by now, or it never will be; either way the fleet is a
+            # better count of this session than this set is.
+            self.pending.discard(sid)
 
     def wait(self, sid):
         """Poll meta.json until it says something, or the deadline passes. §4.6.
@@ -509,7 +889,18 @@ class Listener:
             # tappable. The third line is not decoration either — what has just started is a
             # session on this Mac that will not ask before it acts, and this is the only moment
             # that fact is in front of the person who caused it.
-            return "▶ %s · %s\n%s\nbypass permissions on" % (project, name, record["url"])
+            fleet = self.fleet()
+            lines = ["▶ %s · %s" % (project, name)]
+            # §5: allowed, and flagged. Refusing would be wrong — two sessions on one repo is
+            # a normal way to work — and one line is the whole mitigation; anything more
+            # belongs to git rather than to this bot.
+            warning = self.crowded(record, sid)
+            if warning:
+                lines.append(warning)
+            lines.append(record["url"])
+            lines.append("bypass permissions on · %d of %d sessions"
+                         % (len(fleet), self.cfg.max_sessions))
+            return "\n".join(lines)
 
         if state == session.FAILED:
             head = "✗ %s · the session did not start." % project
@@ -598,6 +989,98 @@ class Listener:
             return
         self.saved = self.tg.offset
 
+    # -- the sessions nobody is waiting for any more (§4) ------------------------------------
+
+    def reconcile(self):
+        """§4's reconciliation pass. Every return from getUpdates, message or not.
+
+        The listener is otherwise purely reactive — it blocks in getUpdates and acts only on
+        messages — so without this it never notices a session ending, a runner dying, or a
+        link arriving after its waiter gave up. This box has already produced all three.
+
+        It announces *arrivals* as well as departures, which §4 did not originally ask for and
+        §9.12 does: two sessions reached `live` sixty-eight minutes after their waiters timed
+        out, with working links in meta.json that nobody was ever told about. The delay is not
+        the defect and no deadline covers it; the silence is, and this is the same walk.
+        """
+        try:
+            records = self.sessions.records()
+        except Exception as e:
+            # Runs on every tick, so a bug in here is a bot that stops answering the phone
+            # altogether. §7: the loop does not die.
+            self.log("could not read the session records: %s" % self.tg.redact(e))
+            return
+
+        for record in records:
+            try:
+                self.settled(record)
+            except Exception as e:
+                # One strange session must not hide the rest, which is the same rule read_meta
+                # follows one level down.
+                self.log("could not reconcile session %s: %s"
+                         % (record.get("sid"), self.tg.redact(e)))
+
+    def settled(self, record):
+        """One record, and whatever has become true about it since anyone last looked."""
+        state = record.get("state")
+        if state in (session.ENDED, session.FAILED):
+            # Terminal already — the runner wrote it on its way out, or a previous listener
+            # did. Nothing to mark; the announcement may still be owed.
+            self.ended(record)
+            return
+
+        if self.sessions.alive(record):
+            url = record.get("url")
+            if state == session.LIVE and isinstance(url, str) and url:
+                self.arrived(record)
+            return
+
+        # §4: `A live record whose process is gone — reboot, force quit, OOM — is stale.`
+        # Without this the record accumulates against max_sessions until the bot refuses to
+        # start anything and `ls` lists sessions that do not exist. A reboot alone does it,
+        # and did: two of them were sitting in var/ this morning.
+        self.ended(self.sessions.finish(record))
+
+    def arrived(self, record):
+        """§9.12: a session that reached `live` after its waiter had given up."""
+        chat_id = record.get("chat_id")
+        if not isinstance(chat_id, int) or isinstance(chat_id, bool):
+            return
+        sid = record.get("sid")
+        if not self.sessions.claim(sid, LINK_SENT):
+            return
+        age = uptime(record.get("started"))
+        # It says how long it took because the phone is holding a message from forty-five
+        # seconds in that says this session failed, and nothing else distinguishes the two.
+        sent = self.say(chat_id, "▶ %s · %s came up after %s.\n%s\nbypass permissions on"
+                        % (record.get("project"), record.get("name"), age, record["url"]))
+        self.log("session %s: link arrived late after %s — %s"
+                 % (sid, age, "announced" if sent else "announcement NOT delivered"))
+
+    def ended(self, record):
+        """§4's one unprompted message: this session is over.
+
+        To the chat that started it, which `chat_id` is in the record for and which is not
+        necessarily the chat that is messaging now. Sent at most once, and not retried if it
+        does not land — the same side of that trade bot.py takes for the offset, because the
+        alternative is an afternoon of network trouble arriving later as forty copies.
+        """
+        chat_id = record.get("chat_id")
+        if not isinstance(chat_id, int) or isinstance(chat_id, bool):
+            return
+        sid = record.get("sid")
+        if not self.sessions.claim(sid, END_SENT):
+            return
+        # `started ... ago` and not `ran for ...`: this pass is the only thing that notices a
+        # session whose runner a reboot took, and it cannot know *when* it went — only that it
+        # is gone now. Against the two records this box had on disk the difference was three
+        # hours of runtime the bot would otherwise have claimed to have watched.
+        sent = self.say(chat_id, "■ %s · %s ended (started %s ago).\n%s"
+                        % (record.get("project"), record.get("name"),
+                           uptime(record.get("started")), REATTACH))
+        self.log("session %s: ended — %s"
+                 % (sid, "announced" if sent else "announcement NOT delivered"))
+
     def tick(self):
         """One return from getUpdates, and everything that follows from it.
 
@@ -612,6 +1095,10 @@ class Listener:
         # place for anything that has to happen at a ≤50s cadence whether or not the phone is
         # doing anything. Slice 8 hangs §4's reconciliation pass off the same line.
         self.sessions.reap()
+        # Before the batch, not after. The first `claude` following a reboot is answered
+        # against a fleet that reboot emptied, and reconciling afterwards would refuse it at a
+        # cap held entirely by sessions that no longer exist.
+        self.reconcile()
         for update in updates:
             try:
                 self.handle(update)

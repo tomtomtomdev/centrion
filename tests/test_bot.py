@@ -36,6 +36,16 @@ session still with an Event while a second message is answered around it.
 What slice 5 asserted as "nothing dangerous is reachable yet" therefore changes shape rather
 than disappearing: see `TestWhatTheListenerMayReach`.
 
+**Slice 8 is about the sessions nobody is waiting for any more.** Everything above answers a
+message; the reconciliation pass answers a fifty-second timer, and the three things it has to
+get right are all things this box has already done wrong. A record whose runner a reboot took
+still says `live` and holds a slot against `max_sessions` (§4) — that state was sitting in
+`var/` this morning. A `stop` that reports success without having signalled anything leaves a
+bypass-permissions session running (§9.10, §9.11) — slice 7 shipped that twice. And a session
+that reaches `live` an hour after its waiter gave up is never mentioned to anyone (§9.12) —
+which is the one entry in §9 that no test could have found, and the reason the pass announces
+arrivals as well as departures.
+
 Stdlib only, no network: `/usr/bin/python3 -m unittest discover -s tests -t . -v`.
 """
 import ast
@@ -70,6 +80,11 @@ STRANGER = 5550001234    # someone who found the bot
 GROUP = -1001234567890   # a supergroup someone added it to
 
 START = 1789198400       # the daemon's start time in every test, so staleness is arithmetic
+
+#: Distinguishes "no url given" from "explicitly no url". A `live` record with no link in it
+#: should be impossible — §3 writes the state and the url in one atomic record — which is
+#: exactly why both the waiter and the tick are tested against one.
+UNSET = object()
 
 #: What a session comes up with. ULID-shaped and not a UUID (§9.5); the same link
 #: test_session.py reads out of the captured transcript, so the two files agree on the shape.
@@ -188,27 +203,58 @@ class FakeSessions(bot.Sessions):
         self.boom = None          # raised by read(), to break a waiter mid-wait
         self.gate = None          # an Event every read() waits on first
         self.reads = 0
+        # Slice 8. Whether a runner is still there is a set here rather than a process on
+        # this box: §4's reconciliation asks the question of pids this test never forked, and
+        # the real answer involves `ps`. Empty by default, so every slice-7 test above sees
+        # the fleet it always saw — one where nothing has died.
+        self.dead = set()
+        self.unstoppable = set()  # runner pids that outlive a SIGKILL, per §9.11
+        self.stopped = []         # (sid, grace) per stop(), so §9.11's nesting is assertable
 
     def start(self, sid, name, cwd, project, chat_id, prompt=None):
         self.started.append({"sid": sid, "name": name, "cwd": cwd, "project": project,
                              "chat_id": chat_id, "prompt": prompt})
         if self.fail is not None:
             raise self.fail
-        self.write(sid, self.outcome)
+        # The record says what this session was actually asked for. It used to say `beacon`
+        # in a directory nobody named, which made §5's same-directory warning untestable
+        # against a session the listener itself had started — the only way it ever happens.
+        self.write(sid, self.outcome, cwd=cwd, project=project, name=name, chat_id=chat_id)
         if self.transcript is not None:
             self.transcribe(sid, self.transcript)
         return 44213
 
-    def write(self, sid, state, url=None):
-        """The record the runner writes. §3's shape, down to the keys the listener reads."""
+    def write(self, sid, state, url=UNSET, **fields):
+        """The record the runner writes. §3's shape, down to the keys the listener reads.
+
+        `fields` overrides any of them, which is how slice 8 puts a fleet on disk: a session
+        that started an hour ago, one belonging to another chat, one whose runner is a pid
+        nothing on this box has. The defaults are slice 7's, so nothing above notices.
+        """
         if state is None:
             return
         os.makedirs(self.directory(sid), exist_ok=True)
-        session.write_meta(self.directory(sid), {
+        record = {
             "sid": sid, "state": state, "project": "beacon",
             "cwd": "/Users/nobody/Projects/beacon", "name": "beacon-" + sid[:4],
             "runner_pid": os.getpid(), "claude_pid": 44215, "started": START, "chat_id": ME,
-            "url": url or (self.url if state == session.LIVE else None)})
+            "url": (self.url if state == session.LIVE else None) if url is UNSET else url}
+        record.update(fields)
+        session.write_meta(self.directory(sid), record)
+        return record
+
+    # -- slice 8's two process-shaped seams. Everything else it adds reads and writes real
+    # files under the temporary var/, because that is §2's claim and the point of this fake.
+
+    def alive(self, record):
+        return record.get("runner_pid") not in self.dead
+
+    def stop(self, record, grace=None):
+        self.stopped.append((record.get("sid"), grace))
+        if record.get("runner_pid") in self.unstoppable:
+            return False
+        self.dead.add(record.get("runner_pid"))
+        return True
 
     def transcribe(self, sid, data):
         os.makedirs(self.directory(sid), exist_ok=True)
@@ -267,6 +313,23 @@ class Base(unittest.TestCase):
         for waiter in list(listener.waiters):
             waiter.join(timeout)
             self.assertFalse(waiter.is_alive(), "a session waiter never finished")
+
+    def place(self, sid, state=session.LIVE, announced=True, **fields):
+        """A session already on disk, as a previous listener or a previous boot left it.
+
+        Slice 8's whole subject: every record the reconciliation pass walks got there before
+        this listener existed, which is what makes it a *reconciliation* rather than
+        bookkeeping.
+
+        `announced` is the ordinary case and it is why it defaults to True — a live session's
+        waiter sent its link the moment the record said so (§4.6), leaving the tick nothing to
+        say about it. §9.12's tests are the ones that pass False, because that is the case
+        where the waiter had already given up before the link existed.
+        """
+        record = self.sessions.write(sid, state, **fields)
+        if announced and state == session.LIVE:
+            self.sessions.claim(sid, bot.LINK_SENT)
+        return record
 
     def assertSilent(self, update, because):
         tg = self.deliver(update)
@@ -1140,6 +1203,10 @@ class TestTheLoopIsNeverBlocked(Base):
     def test_the_waiters_do_not_pile_up(self):
         # One thread per pending session is the design; one thread per message ever received
         # is a leak that takes a week to show up on a daemon that never exits.
+        #
+        # Room for all five deliberately: what is under test is whether finished waiters are
+        # dropped, and slice 8's cap would otherwise refuse three of them and prove nothing.
+        self.cfg = config.Config(TOKEN, frozenset([ME]), self.projects, "/bin/echo", 5)
         tg = FakeTelegram(*[[message("claude beacon", uid=i)] for i in range(5)])
         listener = self.listener(tg, timeout=30, poll_every=0.005, sleep=time.sleep)
         for _ in range(5):
@@ -1442,6 +1509,770 @@ class TestTheLockGuardsTheToken(unittest.TestCase):
         """
         self.assertIn("9", self.lock_sh)
         self.assertIn("close", self.lock_sh.lower())
+
+
+# ===========================================================================================
+# Slice 8 — fleet control and reconciliation. §5 tier 2, §4's pass, §10.6's cap.
+# ===========================================================================================
+
+
+class TestHowLongASessionHasBeenUp(unittest.TestCase):
+    """§5: `ls` shows uptime, which is arithmetic on a clock that does not only go forwards."""
+
+    NOW = 1789265427
+
+    def up(self, seconds):
+        return bot.uptime(self.NOW - seconds, self.NOW)
+
+    def test_it_reads_as_a_duration_at_every_scale_a_session_reaches(self):
+        self.assertEqual(self.up(9), "9s")
+        self.assertEqual(self.up(90), "1m")
+        self.assertEqual(self.up(3600), "1h")
+        self.assertEqual(self.up(3600 * 3 + 60 * 12), "3h 12m")
+        self.assertEqual(self.up(86400 * 2 + 3600 * 5), "2d 5h")
+
+    def test_a_session_that_started_in_the_future_does_not_read_as_negative(self):
+        """Not hypothetical, and §4.6 already knows it: the wait loop uses a monotonic clock
+        precisely because this box's wall clock moves backwards at every NTP correction and
+        every wake from sleep. `started` is a wall clock timestamp, so a record from the
+        future is an ordinary thing to find after a laptop has been asleep."""
+        self.assertEqual(bot.uptime(self.NOW + 30, self.NOW), "0s")
+
+    def test_a_record_with_no_usable_start_time_is_not_a_crash(self):
+        # §4 walks every directory under var/sessions, including whatever a half-written
+        # record or an older build of this bot left behind there.
+        for value in (None, "", "soon", [1], {}):
+            self.assertIsInstance(bot.uptime(value, self.NOW), str, repr(value))
+
+
+class TestTheFleetIsListed(Base):
+    """§5 tier 2: `ls` → index, project, name, uptime, link.
+
+    The only view of this machine a phone gets, and §12's run step for this slice ends in
+    `stop all` — so the index printed here is the index `stop` is about to be given. A listing
+    that is merely approximately right is a `stop` aimed at the wrong session.
+    """
+
+    def ls(self):
+        return self.listener().answer(commands.parse("ls"))
+
+    def test_it_says_so_when_there_is_nothing_to_list(self):
+        self.assertIn("no live sessions", self.ls().lower())
+        self.place("aa11aa", session.ENDED)
+        self.assertIn("no live sessions", self.ls().lower(),
+                      "a session that has ended is not a live session")
+        self.place("bb22bb", session.LIVE)
+        self.assertNotIn("no live sessions", self.ls().lower())
+
+    def test_it_lists_the_index_project_name_uptime_and_link(self):
+        self.place("aa11aa", project="beacon", name="beacon-aa11",
+                   started=int(time.time()) - 3600, url=LINK)
+        text = self.ls()
+        first = text.splitlines()[0]
+        self.assertTrue(first.startswith("1."),
+                        "§5 numbers them, and `stop 1` takes that number: %r" % first)
+        self.assertIn("beacon", first)
+        self.assertIn("beacon-aa11", first)
+        self.assertIn("1h", first)
+        self.assertIn(LINK, text.splitlines(),
+                      "§5: the link on a line of its own, or a thumb cannot take it")
+
+    def test_the_index_follows_the_order_the_sessions_started(self):
+        # Not the order the directory happens to be read in, which is arbitrary and changes
+        # under you: `stop 2` a minute after an `ls` has to mean the same session it meant.
+        now = int(time.time())
+        self.place("bb22bb", project="centrion", name="centrion-bb22", started=now - 60)
+        self.place("aa11aa", project="beacon", name="beacon-aa11", started=now - 3600)
+        lines = [line for line in self.ls().splitlines() if line[:2] in ("1.", "2.")]
+        self.assertEqual(len(lines), 2, "two sessions, two numbered lines")
+        self.assertIn("beacon-aa11", lines[0], "the oldest session is 1")
+        self.assertIn("centrion-bb22", lines[1])
+
+    def test_a_session_still_starting_is_listed_without_a_link_it_does_not_have(self):
+        # It is real, it is holding a slot against the cap, and `stop` must be able to reach
+        # it — §9.10's orphan is exactly a session nobody could see.
+        self.place("aa11aa", session.STARTING, name="beacon-aa11", url=None)
+        text = self.ls()
+        self.assertIn("beacon-aa11", text)
+        self.assertNotIn("None", text)
+        self.assertNotIn("claude.ai/code", text)
+
+    def test_a_session_that_has_ended_or_failed_is_not_listed(self):
+        self.place("aa11aa", session.ENDED, name="beacon-aa11")
+        self.place("bb22bb", session.FAILED, name="beacon-bb22")
+        self.place("cc33cc", session.LIVE, name="beacon-cc33")
+        text = self.ls()
+        self.assertIn("beacon-cc33", text)
+        self.assertNotIn("beacon-aa11", text)
+        self.assertNotIn("beacon-bb22", text)
+
+    def test_an_unreadable_record_does_not_hide_the_ones_beside_it(self):
+        """§4 has read_meta returning None rather than raising for exactly this reason, and
+        this is the consequence it was protecting: one truncated record must not be able to
+        hide a live bypass-permissions session from the only listing anybody has."""
+        self.place("aa11aa", name="beacon-aa11")
+        broken = self.sessions.directory("bad999")
+        os.makedirs(broken)
+        with open(os.path.join(broken, "meta.json"), "w") as fh:
+            fh.write("{not json at a")
+        os.makedirs(self.sessions.directory("none00"))       # no record in it at all
+        text = self.ls()
+        self.assertIn("beacon-aa11", text)
+        self.assertTrue(text.startswith("1."), text)
+
+    def test_a_listing_too_long_for_telegram_is_truncated_rather_than_rejected(self):
+        """§7: 4096 is a 400 from the API and not a truncation, and it would arrive precisely
+        on the tick where there was most to say."""
+        for i in range(60):
+            self.place("%04dff" % i, name="beacon-%04d" % i,
+                       project="a-project-with-a-name-long-enough-to-matter-%d" % i)
+        tg = self.deliver(message("ls"))
+        self.assertEqual(len(tg.sent), 1)
+        self.assertLessEqual(len(tg.texts[0]), telegram.LIMIT)
+
+    def test_the_listing_carries_no_path_from_this_machine(self):
+        # §7/§10: Telegram is not end-to-end encrypted, and `cwd` is right there in every
+        # record this listing is built from.
+        self.place("aa11aa", cwd=os.path.join(bot.HOME, "Projects", "beacon"))
+        self.assertNotIn(bot.HOME, self.ls())
+
+
+class TestStopping(Base):
+    """§5 tier 2, and §9.10/§9.11 are why it has this many tests.
+
+    `stop` exists so that a session cannot outlive your attention, which makes "reported
+    stopped, still running" the one failure it must never have — and slice 7 shipped exactly
+    that, twice, in two disguises, both of which reported success.
+    """
+
+    def stop(self, text, **kw):
+        tg = FakeTelegram([message(text)])
+        listener = self.listener(tg, **kw)
+        listener.tick()
+        self.settle(listener)
+        return tg
+
+    def two(self):
+        now = int(time.time())
+        self.place("aa11aa", name="beacon-aa11", runner_pid=4001, started=now - 3600)
+        self.place("bb22bb", name="centrion-bb22", project="centrion", runner_pid=4002,
+                   started=now - 60)
+        return "aa11aa", "bb22bb"
+
+    def stopped(self):
+        return [sid for sid, _ in self.sessions.stopped]
+
+    def test_an_index_signals_only_that_runner(self):
+        _, second = self.two()
+        self.stop("stop 2")
+        self.assertEqual(self.stopped(), [second])
+
+    def test_stop_all_signals_every_one(self):
+        first, second = self.two()
+        self.stop("stop all")
+        self.assertEqual(sorted(self.stopped()), sorted([first, second]))
+
+    def test_the_index_is_the_one_the_listing_showed(self):
+        first, _ = self.two()
+        listing = self.listener().answer(commands.parse("ls"))
+        self.stop("stop 1")
+        self.assertIn(self.sessions.read(first)["name"], listing.splitlines()[0])
+        self.assertEqual(self.stopped(), [first])
+
+    def test_an_index_past_the_end_is_a_clean_error(self):
+        self.two()
+        tg = self.stop("stop 9")
+        self.assertEqual(self.sessions.stopped, [], "a miss must signal nothing at all")
+        self.assertEqual(len(tg.sent), 1)
+        self.assertIn("2", tg.texts[0], "say how many there are, so the next message is right")
+
+    def test_stopping_when_there_is_nothing_to_stop_is_an_answer_and_not_a_crash(self):
+        empty = {}
+        for text in ("stop 1", "stop all"):
+            tg = self.stop(text)
+            self.assertEqual(len(tg.sent), 1, text)
+            self.assertTrue(tg.texts[0].strip(), text)
+            self.assertEqual(self.sessions.stopped, [], text)
+            empty[text] = tg.texts[0]
+        self.two()
+        self.assertNotEqual(self.stop("stop all").texts[0], empty["stop all"],
+                            "an empty fleet and a stopped one cannot get the same answer")
+
+    def test_the_runner_is_given_more_time_than_the_runner_gives_claude(self):
+        """§9.11, and the subtlest thing in the spec: ending a runner is two kills in
+        sequence, not one. The runner catches SIGTERM and then spends up to its own GRACE
+        ending claude — over five seconds for a real session on this box. A caller that allows
+        it the same GRACE SIGKILLs it in the middle of that, orphaning the session and leaving
+        meta.json saying `live` for something that is already on its way out.
+        """
+        self.two()
+        self.stop("stop 1")
+        (_, grace), = self.sessions.stopped
+        self.assertIsNotNone(grace, "stop must say how long it is prepared to wait")
+        self.assertGreater(grace, session.GRACE)
+
+    def test_a_stopped_session_is_recorded_as_ended(self):
+        first, _ = self.two()
+        self.stop("stop 1")
+        self.assertEqual(self.sessions.read(first)["state"], session.ENDED)
+
+    def test_a_stopped_session_does_not_come_back_as_an_unprompted_notice(self):
+        """§4's pass pushes a record that has newly ended, which is right for a session that
+        died on its own and wrong for one the phone just asked to stop: the answer has already
+        been sent, and a second message a minute later reads like it came back."""
+        self.two()
+        tg = self.stop("stop 1")
+        self.assertEqual(len(tg.sent), 1)
+        after = FakeTelegram([])
+        self.listener(after).tick()
+        self.assertEqual(after.sent, [], "the stop was the answer; the tick must not repeat it")
+
+    def test_a_runner_that_will_not_die_is_not_recorded_as_stopped(self):
+        """§9.10 and §9.11 are one failure in two disguises, and both reported success: the
+        reply says stopped and the session is still there with permissions bypassed."""
+        first, second = self.two()
+        self.sessions.unstoppable.add(4001)
+        tg = self.stop("stop all")
+        self.assertEqual(self.sessions.read(first)["state"], session.LIVE,
+                         "a session that would not die must not be recorded as ended")
+        self.assertEqual(self.sessions.read(second)["state"], session.ENDED,
+                         "and the one that did die must still be stopped")
+        self.assertIn("beacon-aa11", tg.texts[0])
+        self.assertIn("centrion-bb22", tg.texts[0])
+
+    def test_a_session_that_would_not_die_is_still_listed(self):
+        first, _ = self.two()
+        self.sessions.unstoppable.add(4001)
+        self.stop("stop 1")
+        self.assertIn("beacon-aa11", self.listener().answer(commands.parse("ls")))
+
+    def test_the_reply_says_the_session_can_be_reattached(self):
+        """§9.4: killing the PTY leaves the remote session registered but offline — it stays
+        in the claude.ai/code list without the green dot, and `claude --continue` in that
+        directory picks it up for about four hours. §9.4 says `stop` should say so, because
+        the alternative is assuming the work went with it."""
+        self.two()
+        self.assertIn("--continue", self.stop("stop 1").texts[0])
+
+    def test_a_session_that_has_already_ended_is_not_signalled_again(self):
+        self.place("cc33cc", session.ENDED, runner_pid=4003)
+        self.place("dd44dd", session.LIVE, runner_pid=4004)
+        self.stop("stop all")
+        self.assertEqual(self.stopped(), ["dd44dd"],
+                         "`stop all` signals what is running, and only what is running")
+
+
+class TestTheCap(Base):
+    """§10.6: `Without a cap at all, a held-down claude fills RAM with Claude Code processes.`
+
+    §3 owns the number and §15 records why it is 2 on this box. Nothing here restates it:
+    §10.6 used to carry its own copy and it drifted to 4.
+    """
+
+    def capped(self, n):
+        self.cfg = config.Config(TOKEN, frozenset([ME]), self.projects, "/bin/echo", n)
+
+    def start(self, text="claude beacon", **kw):
+        tg = FakeTelegram([message(text)])
+        kw.setdefault("timeout", 0.05)
+        kw.setdefault("poll_every", 0.01)
+        kw.setdefault("sleep", time.sleep)
+        listener = self.listener(tg, **kw)
+        listener.tick()
+        self.settle(listener)
+        return tg
+
+    def full(self):
+        self.place("aa11aa", name="beacon-aa11", runner_pid=4001)
+        self.place("bb22bb", name="beacon-bb22", runner_pid=4002)
+
+    def test_a_spawn_past_the_cap_is_refused_with_a_count(self):
+        self.full()
+        tg = self.start()
+        self.assertEqual(self.sessions.started, [], "the cap is not a warning")
+        self.assertEqual(len(tg.sent), 1)
+        self.assertIn("2", tg.texts[0])
+
+    def test_the_refusal_says_what_to_do_about_it(self):
+        # A number on its own is a dead end on a phone, and the reply is the only place `ls`
+        # and `stop` are ever mentioned to somebody who is not reading §5.
+        self.full()
+        self.assertIn("stop", self.start().texts[0].lower())
+
+    def test_the_cap_is_the_configured_one(self):
+        self.capped(1)
+        self.place("aa11aa", runner_pid=4001)
+        tg = self.start()
+        self.assertEqual(self.sessions.started, [])
+        self.assertIn("1", tg.texts[0])
+
+    def test_a_session_that_is_still_starting_counts_against_it(self):
+        """The cap is about memory, and a session that is starting has already paid for its
+        Claude Code process. §4.1 checks the count before it mints, not after it connects."""
+        self.capped(1)
+        self.place("aa11aa", session.STARTING, runner_pid=4001, url=None)
+        self.start()
+        self.assertEqual(self.sessions.started, [])
+
+    def test_a_session_that_has_ended_does_not_count_against_it(self):
+        self.capped(1)
+        self.place("aa11aa", session.ENDED, runner_pid=4001)
+        self.start()
+        self.assertEqual(len(self.sessions.started), 1,
+                         "an ended session must not hold a slot")
+        self.start()
+        self.assertEqual(len(self.sessions.started), 1,
+                         "but the one just started does hold one")
+
+    def test_a_spawn_the_runner_has_not_recorded_yet_still_counts(self):
+        """The hole a count taken off the filesystem alone would leave, and §10.6 names the
+        message that finds it: a held-down `claude`. §4.2 has the listener returning to the
+        poll the moment it has forked, so for the first fraction of a second a session exists
+        as a process and as nothing else — and the next message in the same batch counts a
+        fleet that does not include it yet."""
+        self.capped(1)
+        self.sessions.outcome = None          # the runner has not written its record yet
+        tg = FakeTelegram([message("claude beacon", uid=1),
+                           message("claude centrion", uid=2)])
+        listener = self.listener(tg, timeout=0.05, poll_every=0.01, sleep=time.sleep)
+        listener.tick()
+        self.settle(listener)
+        self.assertEqual(len(self.sessions.started), 1,
+                         "two sessions were started against a cap of one")
+
+    def test_the_reply_that_starts_one_says_how_many_are_running(self):
+        """§5's third line, in full: `bypass permissions on · 2 of 2 sessions`. On a phone it
+        is the only warning that the next `claude` will be refused."""
+        self.place("aa11aa", runner_pid=4001)
+        self.assertIn("2 of 2", self.start().texts[-1])
+
+
+class TestASecondSessionInTheSameDirectory(Base):
+    """§5 allows it and flags it. §9.9 is why the flag is harder than it looks.
+
+    `os.path.realpath` is lexical and this volume is case-insensitive, so `beacon` and
+    `BEACON` are one directory reached through two strings that compare unequal — and §5
+    contains exactly one comparison, this one. Compared with `==` the warning silently never
+    fires in the one case it exists for.
+    """
+
+    def setUp(self):
+        Base.setUp(self)
+        # Room to reach the case under test: this is about §9.9's comparison, and §10.6's cap
+        # would otherwise refuse the third session before the warning could be composed.
+        self.cfg = config.Config(TOKEN, frozenset([ME]), self.projects, "/bin/echo", 5)
+
+    def start(self, text, **kw):
+        tg = FakeTelegram([message(text)])
+        kw.setdefault("timeout", 0.05)
+        kw.setdefault("poll_every", 0.01)
+        kw.setdefault("sleep", time.sleep)
+        listener = self.listener(tg, **kw)
+        listener.tick()
+        self.settle(listener)
+        return tg
+
+    def beacon(self, **fields):
+        self.place("aa11aa", cwd=os.path.join(self.projects, "beacon"), runner_pid=4001,
+                   **fields)
+
+    def test_the_second_session_in_a_directory_is_flagged(self):
+        self.beacon()
+        self.assertIn("⚠", self.start("claude beacon").texts[-1])
+
+    def test_the_first_session_in_a_directory_is_not(self):
+        """Started through the listener rather than placed, because that is the sequence this
+        warning actually has to survive: one `claude beacon`, then another."""
+        self.assertNotIn("⚠", self.start("claude beacon").texts[-1])
+        self.assertIn("⚠", self.start("claude beacon").texts[-1],
+                      "the second session in that directory is the one to flag")
+
+    def test_a_differently_cased_name_is_still_the_same_directory(self):
+        """§9.9 pinned from the other end. `claude BEACON` starts a real session in beacon's
+        directory under a path string no directory on disk has; both sessions are in one
+        repository and will happily edit the same files underneath each other, which is the
+        entire thing the warning is for."""
+        if not os.path.exists(os.path.join(self.projects, "BEACON")):
+            self.skipTest("this volume is case-sensitive, so §9.9 does not arise on it")
+        self.beacon()
+        self.assertIn("⚠", self.start("claude BEACON").texts[-1])
+
+    def test_the_warning_does_not_refuse_the_session(self):
+        """§5: refusing would be wrong — two sessions on one repo is a normal way to work,
+        and anything more than the one line belongs to git rather than to this bot."""
+        self.beacon()
+        tg = self.start("claude beacon")
+        self.assertEqual(len(self.sessions.started), 1)
+        self.assertIn(LINK, tg.texts[-1])
+
+    def test_a_directory_whose_session_has_ended_is_not_a_second_session(self):
+        self.beacon(state=session.ENDED)
+        self.assertNotIn("⚠", self.start("claude beacon").texts[-1])
+        self.place("bb22bb", cwd=os.path.join(self.projects, "beacon"), runner_pid=4002)
+        self.assertIn("⚠", self.start("claude beacon").texts[-1],
+                      "a live one in the same directory still is")
+
+    def test_a_record_naming_a_directory_that_has_gone_does_not_break_the_comparison(self):
+        """`os.path.samefile` raises rather than returning False when a path is not there,
+        and a record naming a directory since renamed or deleted is an ordinary thing to find
+        in var/sessions after a week."""
+        self.place("aa11aa", cwd=os.path.join(self.projects, "renamed-last-tuesday"),
+                   runner_pid=4001)
+        self.assertIn(LINK, self.start("claude beacon").texts[-1])
+
+
+class TestWhetherARunnerIsStillThere(unittest.TestCase):
+    """§4: `Verify the runner pid with os.kill(pid, 0)` — and then do not trust it alone.
+
+    `pid reuse is theoretically possible between reboots; started is in the record, so compare
+    it against the process start time before trusting a pid that is alive.` Not hypothetical
+    here: two records survived a reboot on this box still saying `live`, and the pids they
+    name are ordinary four-digit numbers that a fresh boot hands out inside a minute.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.sessions = bot.Sessions(root=os.path.join(self.tmp, "sessions"),
+                                     log=lambda m: None)
+
+    def child(self):
+        p = subprocess.Popen(["/bin/sleep", "30"])
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)
+        return p
+
+    def test_a_running_process_is_alive(self):
+        p = self.child()
+        self.assertTrue(self.sessions.alive({"runner_pid": p.pid,
+                                             "started": int(time.time())}))
+
+    def test_a_process_that_has_exited_is_not(self):
+        p = subprocess.Popen(["/usr/bin/true"])
+        p.wait()
+        self.assertFalse(self.sessions.alive({"runner_pid": p.pid,
+                                              "started": int(time.time())}))
+
+    def test_a_pid_that_has_been_reused_is_not_the_runner(self):
+        """The record predates the process, so whatever answers to that pid now is somebody
+        else. After a reboot that is true of every pid in every record."""
+        p = self.child()
+        self.assertFalse(self.sessions.alive({"runner_pid": p.pid, "started": 1}))
+
+    def test_a_process_that_belongs_to_somebody_else_is_still_a_process(self):
+        # EPERM is not death. session.py's _reaped() makes the same distinction for the same
+        # reason: "not permitted" means it is there.
+        self.assertTrue(self.sessions.alive({"runner_pid": 1, "started": int(time.time())}))
+
+    def test_a_record_with_no_usable_pid_is_not_alive(self):
+        """0 and -1 are the two that matter, and not because they are unlikely: `kill(0, sig)`
+        signals this process's whole group and `kill(-1, sig)` signals every process this user
+        owns. A record corrupted into either one turns the reconciliation pass — and then
+        `stop all` — into something that takes the daemon and the desktop with it."""
+        for value in (None, 0, -1, "4001", True, 2 ** 62, 1.5):
+            self.assertFalse(self.sessions.alive({"runner_pid": value,
+                                                  "started": int(time.time())}), repr(value))
+
+    def test_a_record_with_no_start_time_falls_back_to_the_pid_alone(self):
+        """Every record §3 writes has `started`, so this is a corrupt one — and of the two
+        ways to be wrong about it, showing a session that may not exist is recoverable and
+        hiding one that does is not. `ls` is the only view of a bypass-permissions session
+        this machine offers."""
+        p = self.child()
+        self.assertTrue(self.sessions.alive({"runner_pid": p.pid}))
+
+    def test_the_start_time_is_read_from_the_process_table(self):
+        before = time.time()
+        p = self.child()
+        started = bot.process_started(p.pid)
+        self.assertIsNotNone(started)
+        # `ps` reports whole seconds, hence the slack at both ends.
+        self.assertGreaterEqual(started, before - 2)
+        self.assertLessEqual(started, time.time() + 2)
+
+    def test_a_pid_that_is_not_there_has_no_start_time(self):
+        p = subprocess.Popen(["/usr/bin/true"])
+        p.wait()
+        self.assertIsNone(bot.process_started(p.pid))
+
+
+class TestReconciliation(Base):
+    """§4: `Every return from getUpdates, message or not, is the tick.`
+
+    The listener is otherwise purely reactive — it sits in getUpdates and acts only on
+    messages — so without this pass it never notices a session ending or a runner dying. This
+    box has already shown what that costs: two records still saying `live` this morning for
+    processes a reboot took three hours earlier, holding the whole of `max_sessions` against a
+    bot that had no idea either had happened.
+    """
+
+    def ticked(self, *batches):
+        tg = FakeTelegram(*(batches or ([],)))
+        listener = self.listener(tg)
+        listener.tick()
+        return tg, listener
+
+    def test_a_live_record_whose_runner_is_gone_is_marked_ended(self):
+        self.place("aa11aa", runner_pid=4001)
+        self.sessions.dead.add(4001)
+        self.ticked()
+        self.assertEqual(self.sessions.read("aa11aa")["state"], session.ENDED)
+
+    def test_a_record_whose_runner_is_alive_is_left_exactly_as_it_was(self):
+        before = self.place("bb22bb", runner_pid=4002)
+        self.ticked()
+        self.assertEqual(self.sessions.read("bb22bb"), before)
+
+    def test_the_pass_runs_on_a_tick_that_carried_no_message(self):
+        """§4 says the tick is every *return* from getUpdates, and an idle bot returns from
+        one every fifty seconds forever. A pass that ran only when somebody messaged would
+        mean a session that ended at midnight is announced when you say good morning."""
+        self.place("aa11aa", runner_pid=4001)
+        self.sessions.dead.add(4001)
+        tg, _ = self.ticked([])
+        self.assertEqual(self.sessions.read("aa11aa")["state"], session.ENDED)
+        self.assertEqual(len(tg.sent), 1)
+
+    def test_a_newly_ended_record_is_pushed_to_the_chat_that_started_it(self):
+        """§4: `This is the only message the bot sends unprompted.` `chat_id` is in the record
+        for exactly this, and it is not necessarily the chat that is messaging now."""
+        self.place("aa11aa", runner_pid=4001, chat_id=ME, name="beacon-aa11")
+        self.sessions.dead.add(4001)
+        tg, _ = self.ticked()
+        self.assertEqual(len(tg.sent), 1)
+        chat, text = tg.sent[0]
+        self.assertEqual(chat, ME)
+        self.assertIn("beacon-aa11", text)
+        # It says when the session *started*, not how long it ran. This pass is the only thing
+        # that notices a session a reboot took, and it cannot know when that happened — the
+        # two records on this box would have been reported as eleven hours of work watched,
+        # three of which the machine spent switched off.
+        self.assertIn("started", text)
+
+    def test_it_is_not_pushed_again_on_the_next_tick(self):
+        self.place("aa11aa", runner_pid=4001)
+        self.sessions.dead.add(4001)
+        tg = FakeTelegram([], [])
+        listener = self.listener(tg)
+        listener.tick()
+        listener.tick()
+        self.assertEqual(len(tg.sent), 1)
+
+    def test_it_is_not_pushed_again_after_a_restart(self):
+        """A marker held in memory passes the test above and fails this one, and the failure
+        arrives as every session that ever ended announcing itself again — at every login,
+        because launchd restarts this daemon at boot."""
+        self.place("aa11aa", runner_pid=4001)
+        self.sessions.dead.add(4001)
+        self.listener(FakeTelegram([])).tick()
+        tg = FakeTelegram([])
+        self.listener(tg).tick()
+        self.assertEqual(tg.sent, [])
+
+    def test_a_session_that_ended_on_its_own_is_pushed_too(self):
+        """The runner writes `ended` itself when claude exits, so this record arrives already
+        terminal with nothing left to mark — the push is still owed."""
+        self.place("aa11aa", session.ENDED, runner_pid=4001, name="beacon-aa11")
+        self.sessions.dead.add(4001)
+        tg, _ = self.ticked()
+        self.assertEqual(len(tg.sent), 1)
+        self.assertIn("beacon-aa11", tg.texts[0])
+
+    def test_a_reboot_leaves_no_phantoms_and_gives_the_cap_back(self):
+        """The exact state this box was in on the morning of 2026-09-13: two records saying
+        `live`, both runners taken by a reboot three hours earlier, `max_sessions` entirely
+        consumed by sessions that did not exist. Without the cap it was invisible; with the
+        cap and without this pass it is a bot that refuses to start anything, permanently,
+        and says `2 of 2` while doing it.
+
+        Note what this also pins: the pass runs *before* the batch is dispatched. Reconciling
+        after would answer this message against the fleet that a reboot already emptied.
+        """
+        self.place("aa11aa", runner_pid=4001, chat_id=ME, name="beacon-aa11")
+        self.place("bb22bb", runner_pid=4002, chat_id=ME, name="beacon-bb22")
+        self.sessions.dead.update({4001, 4002})
+        tg = FakeTelegram([message("claude beacon")])
+        listener = self.listener(tg, timeout=0.05, poll_every=0.01, sleep=time.sleep)
+        listener.tick()
+        self.settle(listener)
+        self.assertEqual(len(self.sessions.started), 1, "the cap was never given back")
+        self.assertNotIn("beacon-aa11", self.listener().answer(commands.parse("ls")))
+
+    def test_an_unreadable_record_does_not_stop_the_pass(self):
+        broken = self.sessions.directory("bad999")
+        os.makedirs(broken)
+        with open(os.path.join(broken, "meta.json"), "w") as fh:
+            fh.write("{")
+        self.place("aa11aa", runner_pid=4001)
+        self.sessions.dead.add(4001)
+        self.ticked()
+        self.assertEqual(self.sessions.read("aa11aa")["state"], session.ENDED)
+
+    def test_a_record_with_no_chat_to_tell_is_still_marked_ended(self):
+        self.place("aa11aa", runner_pid=4001, chat_id=None)
+        self.sessions.dead.add(4001)
+        tg, _ = self.ticked()
+        self.assertEqual(self.sessions.read("aa11aa")["state"], session.ENDED)
+        self.assertEqual(tg.sent, [])
+
+    def test_a_push_that_does_not_land_is_not_retried_forever(self):
+        """At-most-once, the same side bot.py errs on for the offset: a send that failed is a
+        line in §14's log, not a message that arrives forty times over an afternoon because
+        the network happened to be down when it was first tried."""
+        self.place("aa11aa", runner_pid=4001)
+        self.sessions.dead.add(4001)
+        tg = FakeTelegram([], [])
+        tg.results = [False]
+        listener = self.listener(tg)
+        listener.tick()
+        listener.tick()
+        self.assertEqual(len(tg.sent), 1)
+        self.assertTrue(self.logged, "§14 has to be able to say the push was lost")
+
+    def test_a_reconciliation_that_raises_does_not_take_the_tick_down(self):
+        """§7: the loop never dies — and this pass now runs on every tick, so a bug in it is
+        a bot that stops answering the phone at all."""
+        def boom(*_a, **_kw):
+            raise RuntimeError("var is on fire")
+        self.sessions.records = boom
+        tg = FakeTelegram([message("help")])
+        listener = self.listener(tg)
+        listener.tick()
+        self.assertEqual(len(tg.sent), 1,
+                         "the message in the same batch must still be answered")
+        self.assertTrue(any("var is on fire" in line for line in self.logged),
+                        "swallowed silently, §14 sends you to a log that says nothing")
+
+    def test_the_listener_writes_no_record_it_does_not_own(self):
+        """The runner owns meta.json — §3 has it writing atomically so that a listener reading
+        mid-write never sees half a record — and there is no lock between the two processes.
+        The listener may write one only once it has established there is nobody on the other
+        side, which is precisely what this pass establishes. Anything else is a
+        read-modify-write race against a process that is still running."""
+        before = self.place("aa11aa", session.STARTING, runner_pid=4001, url=None)
+        gone = self.place("bb22bb", session.STARTING, runner_pid=4002, url=None)
+        self.sessions.dead.add(4002)
+        self.ticked()
+        self.assertEqual(self.sessions.read("aa11aa"), before,
+                         "its runner is alive, so the record is not the listener's to write")
+        self.assertNotEqual(self.sessions.read("bb22bb"), gone,
+                            "and once the runner is gone, it is")
+
+
+class TestALateLinkIsStillAnnounced(Base):
+    """§9.12 — the only entry in §9 that no test could have found.
+
+    Two sessions started three minutes apart both sat past the 45s deadline and were answered
+    with the timeout tail; both then reached `live` within one second of each other,
+    sixty-eight minutes later. meta.json had a working link in it and nobody was ever told.
+    **The delay is not the defect. The silence is** — no deadline covers 68 minutes, so the
+    same pass that announces a session which has ended announces one that has finally arrived.
+    """
+
+    def test_a_session_that_came_up_after_its_waiter_gave_up_is_announced(self):
+        self.place("aa11aa", announced=False, runner_pid=4001, name="beacon-aa11",
+                   chat_id=ME, url=LINK)
+        tg = FakeTelegram([])
+        self.listener(tg).tick()
+        self.assertEqual(len(tg.sent), 1)
+        chat, text = tg.sent[0]
+        self.assertEqual(chat, ME)
+        self.assertIn(LINK, text.splitlines())
+        self.assertIn("beacon-aa11", text)
+
+    def test_two_that_come_up_together_are_both_announced(self):
+        # What actually happened: one external trigger, most likely the network, released both
+        # within a second of each other.
+        self.place("aa11aa", announced=False, runner_pid=4001, name="beacon-aa11")
+        self.place("bb22bb", announced=False, runner_pid=4002, name="beacon-bb22")
+        tg = FakeTelegram([])
+        self.listener(tg).tick()
+        self.assertEqual(len(tg.sent), 2)
+
+    def test_it_is_announced_once_and_not_on_every_tick(self):
+        """A `live` record stays `live` for hours, so unlike an ended one its state is not its
+        own marker. This is the announcement that needs something written down."""
+        self.place("aa11aa", announced=False, runner_pid=4001)
+        tg = FakeTelegram([], [], [])
+        listener = self.listener(tg)
+        for _ in range(3):
+            listener.tick()
+        self.assertEqual(len(tg.sent), 1)
+
+    def test_it_is_not_announced_again_after_a_restart(self):
+        self.place("aa11aa", announced=False, runner_pid=4001)
+        first = FakeTelegram([])
+        self.listener(first).tick()
+        self.assertEqual(len(first.sent), 1, "it is announced once")
+        tg = FakeTelegram([])
+        self.listener(tg).tick()
+        self.assertEqual(tg.sent, [], "and a restarted listener does not announce it again")
+
+    def test_a_session_its_waiter_answered_is_not_announced_again(self):
+        """The ordinary case, and the one this must not break: §4.6's waiter sent the link
+        three seconds after the spawn and the tick behind it has nothing to add."""
+        tg = FakeTelegram([message("claude beacon")], [], [])
+        listener = self.listener(tg, timeout=0.05, poll_every=0.01, sleep=time.sleep)
+        listener.tick()
+        self.settle(listener)
+        listener.tick()
+        self.assertEqual(len(tg.sent), 1, "the waiter answered; the tick has nothing to add")
+        # And the distinction being drawn is a real one: the same record, unclaimed, is
+        # exactly what §9.12 says must be announced.
+        self.place("bb22bb", announced=False, runner_pid=4002, name="beacon-bb22")
+        listener.tick()
+        self.assertEqual(len(tg.sent), 2)
+
+    def test_a_session_that_is_still_starting_is_not_announced(self):
+        # The ten to twenty seconds §4 budgets, during which its waiter is still watching and
+        # there is nothing to say. The tick speaks only once the record does.
+        self.place("aa11aa", session.STARTING, announced=False, runner_pid=4001, url=None)
+        tg = FakeTelegram([], [])
+        listener = self.listener(tg)
+        listener.tick()
+        self.assertEqual(tg.sent, [])
+        self.place("aa11aa", session.LIVE, announced=False, runner_pid=4001, url=LINK)
+        listener.tick()
+        self.assertEqual(len(tg.sent), 1, "and once it says live, it is announced")
+
+    def test_a_live_record_with_no_link_in_it_is_not_announced(self):
+        # §3 writes the state and the url in one atomic record, so this should be impossible —
+        # which is why it should not be trusted to be. Slice 7 has the same test on the waiter.
+        self.place("aa11aa", session.LIVE, announced=False, runner_pid=4001, url=None)
+        tg = FakeTelegram([], [])
+        listener = self.listener(tg)
+        listener.tick()
+        self.assertEqual(tg.sent, [], "a link that is not there cannot be sent")
+        self.place("aa11aa", session.LIVE, announced=False, runner_pid=4001, url=LINK)
+        listener.tick()
+        self.assertEqual(len(tg.sent), 1, "and one that is there must be")
+
+    def test_the_announcement_says_how_long_it_took(self):
+        """Sixty-eight minutes after a message saying it had failed. An announcement that read
+        like a fresh `▶` would leave the phone holding two contradictory messages about one
+        session and no way to tell which one is current."""
+        self.place("aa11aa", announced=False, runner_pid=4001,
+                   started=int(time.time()) - 68 * 60)
+        tg = FakeTelegram([])
+        self.listener(tg).tick()
+        self.assertIn("1h", tg.texts[0])
+
+    def test_only_one_of_the_waiter_and_the_tick_can_claim_a_session(self):
+        """Both run at once — §4.2 put the waiter on its own thread precisely so it would —
+        and the 45s deadline falls inside the ≤50s tick interval, so the window in which both
+        are looking at the same live record is not a narrow one. The claim is the arbitration
+        and it has to be the filesystem's to make: two threads now, two processes after a
+        restart, and no lock anywhere between them."""
+        self.place("aa11aa", announced=False)
+        self.assertTrue(self.sessions.claim("aa11aa", bot.LINK_SENT))
+        self.assertFalse(self.sessions.claim("aa11aa", bot.LINK_SENT))
+
+    def test_the_link_and_the_ending_are_claimed_separately(self):
+        # A session announces its link when it arrives and its ending when it ends. One must
+        # never spend the other's claim.
+        self.place("aa11aa", announced=False)
+        self.assertTrue(self.sessions.claim("aa11aa", bot.LINK_SENT))
+        self.assertTrue(self.sessions.claim("aa11aa", bot.END_SENT))
 
 
 if __name__ == "__main__":
