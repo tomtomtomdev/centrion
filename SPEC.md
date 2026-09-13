@@ -15,11 +15,12 @@ of it has been driven from a phone: `claude <project>` starts a session, `ls` li
 reconciliation pass clears the records a reboot orphaned and announces a link that arrives after
 its waiter gave up.
 
-What it cannot currently do is return a link at all. **§9.13**: under launchd, Claude Code hangs
-at startup in any directory containing a `.git` — which is every directory this bot can reach.
-§8 is suspended behind it, the listener is being run by hand from a shell, and slice 9 is that
-blocker. Nothing after it is worth building until it lifts; see §12 and the progress table in
-§13.
+It could not return a link at all under launchd. **§9.13**: started by a LaunchAgent, Claude
+Code hangs at startup in any directory containing a `.git` — which is every directory this bot
+can reach. Started from a shell it comes up in two seconds, so §8 is suspended, the listener is
+run by hand from `launchd/bot.sh`, and on that path the whole thing works end to end: verified
+2026-09-13, `claude beacon` to a tappable link in three seconds. What is left is that nothing
+restarts a hand-run listener — slice 9 is buying that back. See §12 and the table in §13.
 
 Every claim marked *verified* was tested on this box against Claude Code v2.1.269 (2026-09-12)
 or v2.1.270 (2026-09-13).
@@ -699,9 +700,16 @@ All verified 2026-09-12 unless noted.
     already parked by the time you can attach to it, so nothing new appears. That is the next
     step and it needs root.
 
-    Until it is known there is no fix here, only the shape of one: whatever the runner does
-    about this has to be done by the *runner*, because the listener cannot stop being a
-    LaunchAgent and the projects cannot stop being repositories.
+    **The control, and it is now the workaround.** *Verified 2026-09-13 13:02:35–13:02:38*:
+    the LaunchAgent booted out, the listener started from a shell by `launchd/bot.sh`, and
+    otherwise nothing changed — same box, same checkout, same Claude Code 2.1.270, same
+    `~/Projects/beacon`, a repository like every other. The runner saw 3739 bytes where launchd
+    gave it zero in eight minutes, the record reached `live` **two seconds** after the spawn,
+    and the phone had the link one second after that. `ls` then rendered it.
+
+    So the launchd/shell split is the whole of it, and the listener cannot stop being one
+    without stopping being a LaunchAgent. Since the projects cannot stop being repositories,
+    that is the choice slice 9 is making.
 
 ---
 
@@ -908,8 +916,9 @@ The slice starts by finding out which of two endings it has, because they are di
    job has to be done by something that is not a LaunchAgent — and on this box every candidate
    is a launchd job wearing a hat, login items included. The one that is not is a terminal
    application set to open at login with a tab running `launchd/bot.sh`. Ugly, visible, and
-   the only thing here with evidence behind it: every probe started from a shell came up in
-   under three seconds.
+   the only thing here with evidence behind it — and since 13:02 on 2026-09-13 that evidence
+   is the bot itself and not a probe: hand-run, `claude beacon` returned a link in three
+   seconds.
 
 *Red:* `child_env()` drops `CLAUDE_*` and `AI_AGENT` wholesale rather than only the
 `CLAUDE_CODE*` prefix — a listener started from inside a Claude Code session must not hand its
