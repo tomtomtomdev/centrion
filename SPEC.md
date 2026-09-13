@@ -9,11 +9,20 @@ servers, your git checkouts, permissions already bypassed.
 The bot is a **launcher**, not a bridge. It does not relay conversation. Once the link comes
 back, Remote Control carries everything; Telegram's job is done.
 
-Status: built through slice 7 — messaging the bot `claude <project>` starts a real session and
-sends back its link, provided the session connects inside 45 seconds; §9.12 is what happens
-when it does not, and is the first thing slice 8 has to answer for. Fleet control (`ls`, `stop`), the `max_sessions` cap and the reconciliation
-pass are slice 8; see §12 and the progress table in §13. Every claim marked *verified* was
-tested on this box on 2026-09-12 against Claude Code v2.1.269.
+Status: **built through slice 8, and blocked.** The command surface is complete and every verb
+of it has been driven from a phone: `claude <project>` starts a session, `ls` lists them,
+`stop <n>` and `stop all` end them, `max_sessions` refuses the one past the cap, and §4's
+reconciliation pass clears the records a reboot orphaned and announces a link that arrives after
+its waiter gave up.
+
+What it cannot currently do is return a link at all. **§9.13**: under launchd, Claude Code hangs
+at startup in any directory containing a `.git` — which is every directory this bot can reach.
+§8 is suspended behind it, the listener is being run by hand from a shell, and slice 9 is that
+blocker. Nothing after it is worth building until it lifts; see §12 and the progress table in
+§13.
+
+Every claim marked *verified* was tested on this box against Claude Code v2.1.269 (2026-09-12)
+or v2.1.270 (2026-09-13).
 
 ---
 
@@ -284,7 +293,7 @@ project" default wearing different clothes: the target becomes invisible at exac
 it matters. Saying `new` is the one extra word that keeps a directory from coming into existence
 by accident. The name goes through §3's checks 1-3 unchanged — only the existence check (4) is
 relaxed, and it is relaxed into its opposite, because `new` on a name that is already there is
-not a new project. See §12 slice 10, and §9.3 for the part of it that is not a `mkdir`.
+not a new project. See §12 slice 11, and §9.3 for the part of it that is not a `mkdir`.
 
 **A second session in a directory that already has one is allowed, and the reply says so.**
 Refusing would be wrong — two sessions on one repo is a normal way to work — but they will
@@ -509,7 +518,7 @@ All verified 2026-09-12 unless noted.
    **A directory created in `~/Projects` later must be opened by hand with `claude` once
    first.** The trust dialog under a PTY with nobody watching just hangs until the 45s timeout.
 
-   **Slice 10 is what stops that being true, and this entry is the first thing it has to
+   **Slice 11 is what stops that being true, and this entry is the first thing it has to
    settle.** The hang is *inferred* here — from the flag being set on all 46 project entries in
    `~/.claude.json`, never from watching a fresh directory come up — and it has never been
    observed under `--dangerously-skip-permissions`, which is the only way this bot ever starts
@@ -882,7 +891,38 @@ restart the Mac, and confirm the bot comes back reporting zero sessions rather t
 (This step used to say *three* sessions and predates §15 settling `max_sessions` at 2, which
 is the same drift §10.6 records — a number restated in a second place and left behind.)
 
-### Slice 9 — hardening
+### Slice 9 — the link comes back, and the bot starts itself again
+
+**The bot now does everything except the thing it is for.** Slice 8's verbs all work from a
+phone; §9.13 means none of the sessions they control ever return a link, and §8 is suspended
+behind it. Nothing below this line is worth building until `claude beacon` answers with a link
+and the listener is still running tomorrow morning.
+
+The slice starts by finding out which of two endings it has, because they are different work:
+
+1. **Name the file.** `sudo fs_usage -w -f filesys claude`, started *before* the open — the
+   process is parked by the time you can attach, so nothing new appears — against §9.13's
+   two-line repro. If it turns out to be a path a LaunchAgent can be granted, §8 comes back
+   exactly as it was and this slice is a plist change and a test.
+2. **Or accept the hand-run listener and make it durable.** If the path cannot be granted, §8's
+   job has to be done by something that is not a LaunchAgent — and on this box every candidate
+   is a launchd job wearing a hat, login items included. The one that is not is a terminal
+   application set to open at login with a tab running `launchd/bot.sh`. Ugly, visible, and
+   the only thing here with evidence behind it: every probe started from a shell came up in
+   under three seconds.
+
+*Red:* `child_env()` drops `CLAUDE_*` and `AI_AGENT` wholesale rather than only the
+`CLAUDE_CODE*` prefix — a listener started from inside a Claude Code session must not hand its
+own effort setting, and a `CLAUDE_PID` naming somebody else's process, to every session it
+spawns (§14); whatever startup artefact replaces the plist names *this* checkout and carries no
+token, asserted the way `TestTheLaunchdInstall` asserts the plist; and a second copy started by
+any path finds the lock held and exits rather than 409ing the holder (§7), which is the one
+property that must survive having two supported ways to start.
+*Green:* the above, and whichever ending the probe chose.
+*Run:* the one that cannot be faked — log out and back in, or reboot. Nobody starts anything by
+hand; the bot answers `ls`, and `claude beacon` comes back with a link.
+
+### Slice 10 — hardening
 
 *Red:* `pty.log` rotates past its cap; `ended` session directories are reaped after a day but a
 `live` one never is; the error tail sent to Telegram is scrubbed of anything matching a token or
@@ -890,7 +930,7 @@ a home path.
 *Green:* the above.
 *Run:* leave a session open for an afternoon, confirm `var/` has not grown without bound.
 
-### Slice 10 — a project that does not exist yet
+### Slice 11 — a project that does not exist yet
 
 Starts by settling §9.3, because what that probe finds decides how much of this slice is a
 `mkdir` and how much is a runner that answers a dialog.
@@ -925,8 +965,9 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 6 | PTY runner + URL scrape | ☑ | The pty hangup that §2 leans on is **racy**: it reaches the child through its controlling terminal, which it does not have until `TIOCSCTTY` has run, so a master closed in that window orphans it instead of killing it. And `killpg(pid)` fails with `ESRCH` there — indistinguishable from success — because there is no group yet. `terminate()` signals group *and* process. See §9.10; slice 8's `stop all` is what would have been quietly leaving sessions behind. Confirmed live: box-drawing rules in a real transcript now measure exactly 200, where §6 recorded 80 before the ioctl. |
 | 7 | `claude` end to end | ☑ | §4.2's "never blocks" cannot be bought with a smaller poll interval — getUpdates holds for 50s, so a meta poll inside the loop answers the phone a minute late — so the wait is a thread per session and the reply arrives *after* whatever was sent behind it. The finding that mattered came from the run step and not the tests: `terminate()` reported success against a detached runner it had not signalled, because `waitpid` answers ECHILD for a process that is alive but no longer ours. That is the pid `stop` gets after any restart. See §9.11, which also records that the two grace periods nest. Then §9.11's own lesson turned up *in the tests*: one that ended by waiting out a 30s session deadline was racing `settle()`'s 30s join, which is one failure in ten under load — and was 30 of the suite's 37 seconds. Releasing the waiter instead of outliving it took the suite to 7.5s. Smaller, and nearly shipped: §7's scrub must not be a general "long opaque run" rule, because a session id is 26 characters of exactly that and the scrub would have eaten the one reply that matters. §2's claim is now verified rather than asserted — see the control experiment recorded there, and then verified again by accident: a session sent `launchctl kickstart -k` as its own prompt, ran it, and both live sessions came through it untouched. The first real use from a phone found what no test could, and it is now §9.12: Remote Control took 68 minutes to connect, the waiter had long since given up, and two working sessions were reported to the phone as failures. |
 | 8 | fleet control + reconciliation | ☑ | The pass has to run **before the batch it arrived with**, or the first `claude` after a reboot is refused against a cap held entirely by records whose runners that reboot took — two of them were on disk this morning, which is where the fixture came from. Announcing exactly once is a filesystem problem and not a bookkeeping one: the waiter thread and the tick can both be holding one newly-live record (§4.6's 45s deadline falls *inside* the ≤50s tick), and after a `launchctl kickstart` they are two **processes** — so `O_CREAT|O_EXCL` per (session, kind), with the link and the ending claimed separately so neither spends the other's. §9.12's late link then falls out of the same walk for free, because a waiter that gave up claims nothing. `alive()` refuses a `runner_pid` of `0` or `-1` before `os.kill` ever sees it — those mean *this whole process group* and *every process this user owns*, and the same record is what `stop all` iterates. Two things only the run step could say: the end notice claimed sessions had **run** for 11h when the machine had been switched off for three of them (this pass cannot know when a runner died, only that it is gone, so it now reports when the session *started*), and a restarted daemon takes up to 50s to notice anything at all, because the first tick is the first *return* from a 50s poll. Run step done from the phone at 10:03–10:12: two sessions, a third `claude beacon` refused at the cap, `ls`, `stop 2` taking only the second, `stop all` taking the rest. The links never came back, but for nothing this slice does — see §9.13, which is the failure §9.12 misread as the network. |
-| 9 | hardening | ☐ | |
-| 10 | new projects from the phone | ☐ | |
+| 9 | the link comes back, and the bot starts itself | ☐ | **The blocker.** §9.13, and §8 suspended behind it. |
+| 10 | hardening | ☐ | |
+| 11 | new projects from the phone | ☐ | |
 
 ---
 
@@ -967,5 +1008,5 @@ what would have to change to reopen it.
 | Concurrency | `max_sessions: 2` on 8 GB | You watch memory during two real sessions and find headroom. |
 | Bare `claude` | Answers with the project list; starts nothing (§5) | The extra tap outweighs starting in the wrong repo, which it will not. |
 | Same-directory sessions | Allowed, flagged in the reply (§5) | Two sessions actually clobber each other's edits — then `--worktree` per session. |
-| Creating projects from the phone | A separate `new <name>` verb; `claude <unknown>` stays a typo (§5, §12 slice 10) | A mistyped name creating an empty repository turns out to be harmless, which it is not while every session bypasses permissions. |
+| Creating projects from the phone | A separate `new <name>` verb; `claude <unknown>` stays a typo (§5, §12 slice 11) | A mistyped name creating an empty repository turns out to be harmless, which it is not while every session bypasses permissions. |
 | Runtime | System `/usr/bin/python3`, stdlib only (§3) | Something here genuinely needs a third-party package, which nothing does yet. |
