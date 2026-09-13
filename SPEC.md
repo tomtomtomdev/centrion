@@ -1122,6 +1122,49 @@ against a 45s deadline that the same message would have spent in full the day be
 recorded `hasTrustDialogAccepted` for it, so the next `claude scratchpad` skips the dialog
 entirely. Nothing here was run by hand: the message went to a listener launchd had started.
 
+### Slice 12 — the failure that explains itself
+
+*Planned, not built.*
+
+**The one thing this file admits it does not know.** §8 stands restored on the evidence of
+working rather than of the cause being fixed, which §9.13 records as a weaker warrant than the
+rest of this spec accepts. §14 says what to do if it returns: `sample` the parked pid for the
+stack, and have `fs_usage` running *before* the spawn, because the process is already parked by
+the time you can attach and nothing new appears after that.
+
+That is an instruction a person cannot follow. The failure announces itself as a 45-second
+timeout on a phone, and by the time anyone is at the machine the session has been stopped or the
+box has moved on — which is exactly how three hours of §9.13 produced no stack. **The bot is the
+only thing present at the moment it matters**, and what it sends today is §4.6's `pty.log` tail,
+which for this particular failure is empty: the hang is before any output. So the slice is
+narrow — make the deadline take the capture that nobody can be there to take.
+
+It does not explain §9.13 and must not claim to. It buys the evidence an explanation would need,
+on the one path that has already failed, and only if the failure ever comes back.
+
+*Red:* a session that reaches §4.6's 45s deadline with no link writes a stack capture into its
+session directory before the reply is composed, and the reply names it; the capture goes through
+§10's scrubber before any of it is sent, because a stack is wall-to-wall home paths and a token
+in somebody's argv would go out with it; a capture that cannot be taken — no `sample` on PATH,
+permission refused, the pid already reaped — leaves today's reply exactly as it is rather than
+taking the waiter with it, since §4.6's failure reply is the one that has to survive everything;
+nothing is captured for a session that came up fine, and nothing for one that ended on its own;
+the capture is claimed once per session as a third `O_CREAT|O_EXCL` kind beside the link and the
+ending, because §8 proved the waiter and the tick can hold one record from two processes; and
+the capture is bounded, counts against §10.7's budget, and does not keep a session directory
+from being reaped at retention.
+*Green:* a bounded helper called from the deadline in the waiter, choosing the parked pid —
+claude's, falling back to the runner's if claude never got far enough to have one — and giving
+the `sample` its own timeout, because the thing being sampled is by hypothesis stuck.
+*Run:* park slice 11's fake `claude` past the deadline and confirm the phone gets a stack
+instead of an empty panel; then `du -sh var` against §10.7 with a capture on disk; then let one
+real session come up normally and confirm nothing was captured at all.
+
+Deliberately not in here: §14's other standing check, where a Claude Code upgrade moves a panel
+and the field failure is a silent 45s timeout. Stamping `claude --version` into `meta.json` at
+spawn and saying when it changed since the last successful scrape is the neighbouring half-slice,
+and it has its own tests coming (§11 step 2).
+
 ---
 
 ## 13. Progress
@@ -1142,6 +1185,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 9 | the link comes back, and the bot starts itself | ☑ | **The blocker cured itself, and that is the finding.** §9.13 reproduced at 10:03 and was gone by 13:07 with nothing changed between — no reboot, same 2.1.270, same desktop app, 14/14 on its own minimal repro and a real launchd pty run scraping a link in two seconds. So the probe this slice was planned around could not be run at all: `fs_usage` needs an open that never returns and there was no longer one. §8 is back on evidence of working rather than of being understood, which is a weaker warrant than this spec usually accepts and is why §9.13 was kept as a recognition guide instead of being deleted. The code finding was §14's, and it was real: `CLAUDE_PID`, `CLAUDE_EFFORT` and `AI_AGENT` all miss a `CLAUDE_CODE` prefix, so a listener started from a shell inside a Claude Code session was handing that session's effort setting, and a pid belonging to somebody else, to everything it spawned. The lock test the slice asked for was **green the moment it was written** — the property already held, and §11 says that is a test of something that already worked; it was kept anyway, because it executes the two scripts where the existing tests only string-match them, and two supported ways to start is exactly when that stops being theoretical. **The run step finished at 16:31 against a real logout, and it tested §8 more than launchd.** The listener was back 25 seconds after the login with nothing started by hand and the offset intact; the beacon session live since 13:02 came through as the *same* pids, because slice 6's `TIOCSCTTY` leaves the runner a session leader with `ppid 1` and the gui teardown had nothing of its to kill. So a brand-new listener process met a live record it had never spawned — the case the `O_CREAT|O_EXCL` markers exist for — and left it alone: still `live`, no `announced-end`, no false ending sent to the phone. Every earlier test of that path was a `kickstart`, which leaves the process tree standing. A login after a reboot is still untested. |
 | 10 | hardening | ☑ | **The cap and the tail are the same file read from two ends, and only one of them was in the brief.** §4.6 reads the last 64 KB of `pty.log` to explain a session that never came up; rotating that file at 4 MiB means a session which fails just after a rotation hands the phone a cleared panel instead of the error — and §9.7's expired login, the likeliest failure after week one, is exactly a session that prints something and dies. Hence two files and a tail that reads back through the older one; a one-file cap would have been a silent regression in the reply that matters most. The third red test was already green from slice 7 and nothing was written for it (§11). Two smaller things, both in the rotation rather than the retention: the cap is checked *after* the write, because a chunk is one 64 KB read off the master and the file is briefly over either way — and a rotation that fails switches the cap off rather than retrying, because the loop it sits in is the session's life (§2) and a failing rename retried per write is a spin in the one place that has to keep reading the terminal. Retention counts from the record's mtime and not from `started`: a session left open for a week is not an old record, and the pass that finishes a reboot's orphan rewrites the record, so the day starts when the session ends rather than when it began. The sweep runs *after* the announcing loop and not inside it, because the marker that keeps an ending to one announcement lives inside the directory being removed — two days of downtime is a record that is terminal, old, and never announced. Run step by flood rather than by afternoon: 26 MiB through a real pty in 2.4s, 5.0 MiB left on disk, the `/login` line still in the tail from either file; the sweep over this box's own records, backdated, kept the live session and took the four ended ones. Nobody has yet watched a real day pass. |
 | 11 | new projects from the phone | ☑ | **§9.3 was true, and the detail that decides the code is the one nobody could have guessed: the trust dialog's default selection is `No, exit`.** The obvious answer — press Enter, it is a confirmation — ends the session. So the runner sends Down, then checks that the marker moved onto `Yes, I trust this folder`, and only then confirms; a reworded or reordered dialog is left hanging, which is the old behaviour and honest, rather than confirmed blind. The matching had its own trap, the same shape as §9.5's: the panel renders words with `CSI <n> G` cursor jumps instead of spaces, so the stripped transcript reads `yes,itrustthisfolder` and any matcher written against what a human sees matches nothing. Answering is one-time — Claude Code writes `hasTrustDialogAccepted` for that path, verified by a second session coming straight up — which is what makes `new x` then `claude x` work tomorrow. The permission to answer it is deliberately split across both processes: the listener passes `--trust` only for `new`, the runner answers only if the directory is empty when it starts, and `new beacon` on an existing repository therefore behaves exactly like `claude beacon`. Two findings from `new` being the first verb that writes rather than reads: a control character in a name is now refused by *both* verbs (there is no delete verb here, so a directory called `red<ESC>[31m` is one nobody can remove from a phone), and the cap is now checked *before* the project is resolved, because a directory created for a session that is then refused is precisely the empty repository §5 gives this verb its own word to prevent. The fake `claude` the pty tests run against cost an hour to the oldest trap in this file: it mixed `select()` with a buffered reader, so it took all three bytes of an arrow key off the kernel to return one, then waited out its idle timeout on a terminal that had already answered it. Run step done twice: below the wire first, then **from the phone at 16:24** — `new scratchpad`, dialog answered one second after the spawn, link on the phone four seconds after the message, `ls`, `stop`, and the directory still there and still empty afterwards. The trust flag is now recorded for it, which is the property that makes tomorrow's `claude scratchpad` ordinary. |
+| 12 | the failure that explains itself | ☐ | **Planned.** §8 stands on evidence of working rather than of being understood, and §14's way to change that — `sample` the parked pid while it is still hung — is an instruction no person can follow: the failure is a 45s timeout on a phone, and the process is killed or gone by the time anyone reaches the machine. The slice does not explain §9.13; it makes the bot take the capture an explanation would need, on the one path that has already failed. |
 
 ---
 
@@ -1176,6 +1220,13 @@ Not slices — things that stay true after the build.
   process is already parked by the time you can attach and nothing new appears after that. A
   shell-run `launchd/bot.sh` is the workaround that is known to work, and §9.13 records the shape
   of the failure so it is recognised rather than re-diagnosed.
+- **Two claims here are settled only by time, and both are still open.** The logout at
+  2026-09-13 16:30 proved launchd brings the listener back at login and that a live session
+  outlives the login session it was started from (§12 slice 9) — but a cold *boot* is a
+  different path and nobody has watched one. And no real day has yet passed under §10's
+  retention: the oldest ended records are this morning's, so the first sweep that has anything
+  to take falls around 09:57 on 2026-09-14. `ls` from the phone, `du -sh var`, and `directory
+  removed` lines in `var/bot.log` are the whole of both checks.
 
 
 ---
