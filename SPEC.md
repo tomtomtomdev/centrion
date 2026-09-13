@@ -9,7 +9,7 @@ servers, your git checkouts, permissions already bypassed.
 The bot is a **launcher**, not a bridge. It does not relay conversation. Once the link comes
 back, Remote Control carries everything; Telegram's job is done.
 
-Status: **all eleven slices built, and every verb has now been driven from a phone.** `claude
+Status: **slices 0-11 built, and every verb has now been driven from a phone.** `claude
 <project>` starts a session, `new <name>` creates the project first and answers §9.3's trust
 dialog for it, `ls` lists them, `stop <n>` and `stop all` end them, `max_sessions` refuses the
 one past the cap, and §4's reconciliation pass clears the records a reboot orphaned and
@@ -24,9 +24,17 @@ seconds after a launchd spawn. Nothing was changed and nothing was fixed; no reb
 change. So the LaunchAgent is back and holding the lock, `launchctl kickstart -k` puts it back
 in one second, and §9.13 is kept as a recognition guide rather than a diagnosis.
 
-**One run step is outstanding, and it needs a logout.** Nobody has yet logged out and back in
-to watch `RunAtLoad` start the bot unattended; every start so far has been `launchctl kickstart`
-or a hand-run shell. That is the last thing between slice 9 and signed off. See §12 and §13.
+**The last run step closed on 2026-09-13 at 16:31, and it was a real logout.** `RunAtLoad`
+brought the listener back 25 seconds after the login with nothing started by hand — and the
+beacon session live since 13:02 came through as the *same* processes, because slice 6's
+`TIOCSCTTY` leaves the runner a session leader with `ppid 1` and the gui teardown had nothing of
+its to kill. So a brand-new listener process met a live record it had never spawned and left it
+alone, which tested §8's reconciliation rather than launchd. A login after a cold *boot* is
+still unwatched. See §12 slice 9 and §14.
+
+**What is left is one planned slice and two things only time can close.** Slice 12 makes the 45s
+deadline capture a stack, so §9.13 cannot come back unwitnessed a second time; §14 carries the
+cold boot and the first real day under §10's retention. See §13.
 
 Every claim marked *verified* was tested on this box against Claude Code v2.1.269 (2026-09-12)
 or v2.1.270 (2026-09-13).
