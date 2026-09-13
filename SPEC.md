@@ -620,48 +620,63 @@ All verified 2026-09-12 unless noted.
     within a second of each other is still unexplained, but the *stall* reproduces in
     twenty-five seconds and has nothing to do with the network.
 
-13. **A session started under launchd produces no terminal output at all; the same session
-    started from a shell comes up in under a second.** *Reproduced 2026-09-13*, and it costs
-    the bot its entire deliverable: a runner that never sees output never scrapes a URL, so
-    the phone is told the session failed while the session is running perfectly well.
+13. **Claude Code hangs at startup under launchd when — and only when — the working directory
+    contains a `.git`.** *Reproduced 2026-09-13.* It costs the bot its entire deliverable:
+    every directory it can reach is a repository, the runner never sees a byte of output, so it
+    never scrapes a URL, and the phone is told the session failed while the session is fine.
 
-    The repro needs neither the bot nor Telegram. Spawn `claude --remote-control <name>
-    --dangerously-skip-permissions` through `session.spawn()` and read the master for 25s:
+    The minimal repro needs neither the bot, nor Telegram, nor a pty, nor even a real
+    repository — an empty directory named `.git` is enough:
 
-    | started from | bytes on the pty | url |
-    |---|---|---|
-    | a shell | 3806 | found at ~0.3s |
-    | `launchctl submit` | **0** | none |
+    ```
+    mkdir -p /tmp/x/.git
+    launchctl submit -l p -- /bin/sh -c 'cd /tmp/x; ~/.local/bin/claude -p "say PONG"'   # hangs
+    rmdir /tmp/x/.git
+    launchctl submit -l q -- /bin/sh -c 'cd /tmp/x; ~/.local/bin/claude -p "say PONG"'   # PONG, 3.4s
+    ```
 
-    **Ruled out, each by experiment and not by reasoning:**
+    The same command from a shell answers in about a second in either directory. `sample` shows
+    the main thread parked in `openat$NOCANCEL` for every sample it takes — one file open that
+    never returns.
 
-    - *The Claude Code version.* 2.1.269 and 2.1.270 both work from a shell and both produce
-      zero bytes under launchd. The upgrade to 2.1.270 landed at 09:04 on the morning this was
-      found and looked like the obvious culprit. It is not one — §14's standing check still
-      stands, but this is not it.
-    - *The environment.* `child_env()` is a filter over `os.environ`, so a probe from a
-      terminal inherits a far richer environment than the daemon's. Rebuilt from the running
-      daemon's own — 19 variables, no `COLORTERM`, no `TERM_PROGRAM` — it still comes up in
-      0.3s from a shell.
-    - *The spawn path.* A detached runner forked through `Sessions.start()`, exactly as the
-      listener forks it, reached `live` in 2.5 seconds from a shell.
-    - *Credentials.* Claude Code keeps them in the login keychain (`Claude Code-credentials`;
-      there is no `~/.claude/.credentials.json`) and a LaunchAgent has no `SECURITYSESSIONID`,
-      which looked decisive. It is not: `security find-generic-password -w` returns 0 from
-      inside a `launchctl submit` job.
-    - *File descriptors.* launchd allows 256 against a shell's 1,048,576. A shell probe under
-      `ulimit -n 256` comes up normally.
+    **Ruled out, each by experiment rather than by reasoning.** Listed because every one of
+    them looked obvious at the time and cost a probe to kill:
 
-    The binary is fine under launchd — `claude --version` exits 0 there. It is specifically
-    the interactive startup that goes silent.
+    - *The Claude Code version.* 2.1.270 landed at 09:04 the same morning. 2.1.269 hangs too,
+      and both are fine from a shell. §14's standing check stands, but this is not it.
+    - *The environment.* `child_env()` filters `os.environ`, so a terminal probe inherits far
+      more than the daemon does. Rebuilt from the daemon's own 19 variables, it still comes up
+      in 0.3s from a shell.
+    - *The spawn path.* A detached runner forked through `Sessions.start()` reaches `live` in
+      2.5s from a shell.
+    - *Credentials.* They live in the login keychain (`Claude Code-credentials`; there is no
+      `~/.claude/.credentials.json`) and a LaunchAgent has no `SECURITYSESSIONID` — which
+      looked decisive. `security find-generic-password -w` returns 0 from inside a
+      `launchctl submit` job anyway.
+    - *File descriptors.* 256 under launchd against a shell's 1,048,576; a shell probe at
+      `ulimit -n 256` is fine.
+    - *Scheduling.* The stalled process shows `PRI 20` against a shell's `PRI 31`, which looked
+      like an inherited QoS clamp. `taskpolicy -B` on the live pid moved neither the priority
+      nor the process: it was never in `PRIO_DARWIN_BG`. PRI 20 is just what a blocked process
+      looks like.
+    - *TCC and the location.* §9.2 makes this the natural suspect, but a **non**-git directory
+      inside `~/Projects` answers in 3.7s and a git directory in `/private/tmp` hangs. The
+      location is irrelevant; the `.git` is everything.
+    - *`git` itself.* `git --version` and `git rev-parse --show-toplevel` both return rc=0
+      under launchd, in the very repository that hangs.
+    - *Subprocess spawning in general.* Under launchd, in a non-git directory,
+      `claude -p --dangerously-skip-permissions "run the bash command echo HELLO"` shells out
+      and answers correctly in 4.8s. So it is not that Claude Code cannot spawn under launchd —
+      it is something on the path it takes only when it has decided it is in a repository.
 
-    **The open lead is scheduling.** The stalled `claude` under launchd showed `PRI 20`
-    against `PRI 31` for the identical process from a shell, which fits a QoS clamp inherited
-    from the job throttling Bun's startup to a crawl — and fits §9.12's sessions completing
-    68 minutes later rather than never. `ProcessType` is already `Standard`, so if this is the
-    cause the fix belongs on the child (`taskpolicy`, or an explicit QoS) rather than on the
-    job. Unconfirmed: `taskpolicy -c` rejected the clamp name tried, and the experiment was
-    not repeated.
+    **What is not yet known is which file.** The main thread blocks in `openat`, and naming the
+    path needs `sudo fs_usage -w -f filesys claude` running *before* the open — the process is
+    already parked by the time you can attach to it, so nothing new appears. That is the next
+    step and it needs root.
+
+    Until it is known there is no fix here, only the shape of one: whatever the runner does
+    about this has to be done by the *runner*, because the listener cannot stop being a
+    LaunchAgent and the projects cannot stop being repositories.
 
 ---
 
