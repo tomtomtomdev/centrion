@@ -256,6 +256,7 @@ menu will send.
 | `claude` | replies with the directories in `~/Projects` and waits — it never picks a target for you |
 | `claude beacon` | session in the `beacon` project |
 | `claude beacon fix the failing probe test` | same, then types that prompt and hits Enter |
+| `new scratchpad` | creates `~/Projects/scratchpad`, then starts a session there as above |
 
 **Tier 2 — enough to not need a laptop to clean up**
 
@@ -274,6 +275,16 @@ start in a repository you did not name. A "most recent project" default would be
 convenient and would make the target invisible at exactly the moment it matters — you are on a
 phone, half-attending, and the first visible confirmation arrives after the session already
 exists.
+
+**Creating a project is its own verb, and that is the whole of its safety.** `claude beacn` is
+a typo, and it stays one — the project list comes back and nothing is created. Folding creation
+into `claude <name>` would mean every mistyped project name silently becomes an empty repository
+with a bypass-permissions session sitting in it, which is the same mistake as a "most recent
+project" default wearing different clothes: the target becomes invisible at exactly the moment
+it matters. Saying `new` is the one extra word that keeps a directory from coming into existence
+by accident. The name goes through §3's checks 1-3 unchanged — only the existence check (4) is
+relaxed, and it is relaxed into its opposite, because `new` on a name that is already there is
+not a new project. See §12 slice 10, and §9.3 for the part of it that is not a `mkdir`.
 
 **A second session in a directory that already has one is allowed, and the reply says so.**
 Refusing would be wrong — two sessions on one repo is a normal way to work — but they will
@@ -481,6 +492,19 @@ All verified 2026-09-12 unless noted.
    `hasTrustDialogAccepted: true`.
    **A directory created in `~/Projects` later must be opened by hand with `claude` once
    first.** The trust dialog under a PTY with nobody watching just hangs until the 45s timeout.
+
+   **Slice 10 is what stops that being true, and this entry is the first thing it has to
+   settle.** The hang is *inferred* here — from the flag being set on all 46 project entries in
+   `~/.claude.json`, never from watching a fresh directory come up — and it has never been
+   observed under `--dangerously-skip-permissions`, which is the only way this bot ever starts
+   one. Probe it before designing around it. If it does hang, pre-seeding
+   `projects[<abs path>].hasTrustDialogAccepted` is the obvious fix and the wrong one: every
+   live Claude Code process rewrites that file continuously, so a read-modify-write from the
+   daemon races all of them over 46 projects' configuration to save one key. Answering the
+   prompt on the PTY is self-contained, is no more UI-coupled than the URL scrape already is
+   (§14 covers both), and for a directory this bot created empty a second earlier there is
+   nothing to trust — which is the argument that makes answering it legitimate rather than
+   merely convenient.
 
 4. **Killing the PTY leaves the remote session registered but offline** — it stays in the
    claude.ai/code list without the green dot. `claude --continue` in that directory reattaches
@@ -784,6 +808,24 @@ a home path.
 *Green:* the above.
 *Run:* leave a session open for an afternoon, confirm `var/` has not grown without bound.
 
+### Slice 10 — a project that does not exist yet
+
+Starts by settling §9.3, because what that probe finds decides how much of this slice is a
+`mkdir` and how much is a runner that answers a dialog.
+
+*Red:* `new scratchpad` creates a direct child of the root and starts a session in it; `new`
+refuses everything `claude` refuses and by the same code — `new ../etc`, `new /tmp/x`, `new
+.ssh`, `new a/b`, `new` on its own — and creates nothing on any of them; a refused `new` leaves
+no directory behind; `new beacon` on a name already there starts a session and says the
+directory was already present, rather than failing; two `new scratchpad` in one batch create one
+directory and not an error; the cap and the §5 same-directory warning apply to a `new` session
+exactly as to a `claude` one; and the created directory comes up to a link rather than to §9.3's
+trust prompt.
+*Green:* `config.create()` beside `resolve()` — sharing checks 1-3, inverting 4 — the verb in
+`commands.py`, the listener wiring, and whatever the probe says §9.3 needs.
+*Run:* `new` a directory from the phone and confirm a link comes back inside the deadline rather
+than a trust-prompt tail at 45s. Then `ls` it, `stop` it, and check the directory is still there.
+
 ---
 
 ## 13. Progress
@@ -802,6 +844,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 7 | `claude` end to end | ☑ | §4.2's "never blocks" cannot be bought with a smaller poll interval — getUpdates holds for 50s, so a meta poll inside the loop answers the phone a minute late — so the wait is a thread per session and the reply arrives *after* whatever was sent behind it. The finding that mattered came from the run step and not the tests: `terminate()` reported success against a detached runner it had not signalled, because `waitpid` answers ECHILD for a process that is alive but no longer ours. That is the pid `stop` gets after any restart. See §9.11, which also records that the two grace periods nest. Then §9.11's own lesson turned up *in the tests*: one that ended by waiting out a 30s session deadline was racing `settle()`'s 30s join, which is one failure in ten under load — and was 30 of the suite's 37 seconds. Releasing the waiter instead of outliving it took the suite to 7.5s. Smaller, and nearly shipped: §7's scrub must not be a general "long opaque run" rule, because a session id is 26 characters of exactly that and the scrub would have eaten the one reply that matters. §2's claim is now verified rather than asserted — see the control experiment recorded there, and then verified again by accident: a session sent `launchctl kickstart -k` as its own prompt, ran it, and both live sessions came through it untouched. The first real use from a phone found what no test could, and it is now §9.12: Remote Control took 68 minutes to connect, the waiter had long since given up, and two working sessions were reported to the phone as failures. |
 | 8 | fleet control + reconciliation | ☐ | |
 | 9 | hardening | ☐ | |
+| 10 | new projects from the phone | ☐ | |
 
 ---
 
@@ -834,4 +877,5 @@ what would have to change to reopen it.
 | Concurrency | `max_sessions: 2` on 8 GB | You watch memory during two real sessions and find headroom. |
 | Bare `claude` | Answers with the project list; starts nothing (§5) | The extra tap outweighs starting in the wrong repo, which it will not. |
 | Same-directory sessions | Allowed, flagged in the reply (§5) | Two sessions actually clobber each other's edits — then `--worktree` per session. |
+| Creating projects from the phone | A separate `new <name>` verb; `claude <unknown>` stays a typo (§5, §12 slice 10) | A mistyped name creating an empty repository turns out to be harmless, which it is not while every session bypasses permissions. |
 | Runtime | System `/usr/bin/python3`, stdlib only (§3) | Something here genuinely needs a third-party package, which nothing does yet. |
