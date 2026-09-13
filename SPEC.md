@@ -615,6 +615,54 @@ All verified 2026-09-12 unless noted.
     nobody messaging leave *identical* traces in `var/bot.log`, and §14 sends you to that log
     first.
 
+    ***Corrected 2026-09-13.*** The guess above — "the trigger was external and shared, most
+    likely the network" — is wrong, and §9.13 is what it actually was. Two sessions releasing
+    within a second of each other is still unexplained, but the *stall* reproduces in
+    twenty-five seconds and has nothing to do with the network.
+
+13. **A session started under launchd produces no terminal output at all; the same session
+    started from a shell comes up in under a second.** *Reproduced 2026-09-13*, and it costs
+    the bot its entire deliverable: a runner that never sees output never scrapes a URL, so
+    the phone is told the session failed while the session is running perfectly well.
+
+    The repro needs neither the bot nor Telegram. Spawn `claude --remote-control <name>
+    --dangerously-skip-permissions` through `session.spawn()` and read the master for 25s:
+
+    | started from | bytes on the pty | url |
+    |---|---|---|
+    | a shell | 3806 | found at ~0.3s |
+    | `launchctl submit` | **0** | none |
+
+    **Ruled out, each by experiment and not by reasoning:**
+
+    - *The Claude Code version.* 2.1.269 and 2.1.270 both work from a shell and both produce
+      zero bytes under launchd. The upgrade to 2.1.270 landed at 09:04 on the morning this was
+      found and looked like the obvious culprit. It is not one — §14's standing check still
+      stands, but this is not it.
+    - *The environment.* `child_env()` is a filter over `os.environ`, so a probe from a
+      terminal inherits a far richer environment than the daemon's. Rebuilt from the running
+      daemon's own — 19 variables, no `COLORTERM`, no `TERM_PROGRAM` — it still comes up in
+      0.3s from a shell.
+    - *The spawn path.* A detached runner forked through `Sessions.start()`, exactly as the
+      listener forks it, reached `live` in 2.5 seconds from a shell.
+    - *Credentials.* Claude Code keeps them in the login keychain (`Claude Code-credentials`;
+      there is no `~/.claude/.credentials.json`) and a LaunchAgent has no `SECURITYSESSIONID`,
+      which looked decisive. It is not: `security find-generic-password -w` returns 0 from
+      inside a `launchctl submit` job.
+    - *File descriptors.* launchd allows 256 against a shell's 1,048,576. A shell probe under
+      `ulimit -n 256` comes up normally.
+
+    The binary is fine under launchd — `claude --version` exits 0 there. It is specifically
+    the interactive startup that goes silent.
+
+    **The open lead is scheduling.** The stalled `claude` under launchd showed `PRI 20`
+    against `PRI 31` for the identical process from a shell, which fits a QoS clamp inherited
+    from the job throttling Bun's startup to a crawl — and fits §9.12's sessions completing
+    68 minutes later rather than never. `ProcessType` is already `Standard`, so if this is the
+    cause the fix belongs on the child (`taskpolicy`, or an explicit QoS) rather than on the
+    job. Unconfirmed: `taskpolicy -c` rejected the clamp name tried, and the experiment was
+    not repeated.
+
 ---
 
 ## 10. Security
@@ -845,7 +893,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 5 | listener, echoing | ☑ | A corrupt `var/offset` is dangerous in only one direction, and it is the opposite of the obvious one. Too *small* replays a batch, and §7's date guard then drops it; too *large* acknowledges updates that have not arrived, and the bot goes **permanently deaf** — silently, and across restarts, because the bad number is on disk. `read_offset` therefore bounds the value as well as its type. Also, proved live on the first boot: it dropped two messages left queued by slice 3's `--whoami` three hours earlier, which is §3's correction seen from the other side — they were still there to drop. |
 | 6 | PTY runner + URL scrape | ☑ | The pty hangup that §2 leans on is **racy**: it reaches the child through its controlling terminal, which it does not have until `TIOCSCTTY` has run, so a master closed in that window orphans it instead of killing it. And `killpg(pid)` fails with `ESRCH` there — indistinguishable from success — because there is no group yet. `terminate()` signals group *and* process. See §9.10; slice 8's `stop all` is what would have been quietly leaving sessions behind. Confirmed live: box-drawing rules in a real transcript now measure exactly 200, where §6 recorded 80 before the ioctl. |
 | 7 | `claude` end to end | ☑ | §4.2's "never blocks" cannot be bought with a smaller poll interval — getUpdates holds for 50s, so a meta poll inside the loop answers the phone a minute late — so the wait is a thread per session and the reply arrives *after* whatever was sent behind it. The finding that mattered came from the run step and not the tests: `terminate()` reported success against a detached runner it had not signalled, because `waitpid` answers ECHILD for a process that is alive but no longer ours. That is the pid `stop` gets after any restart. See §9.11, which also records that the two grace periods nest. Then §9.11's own lesson turned up *in the tests*: one that ended by waiting out a 30s session deadline was racing `settle()`'s 30s join, which is one failure in ten under load — and was 30 of the suite's 37 seconds. Releasing the waiter instead of outliving it took the suite to 7.5s. Smaller, and nearly shipped: §7's scrub must not be a general "long opaque run" rule, because a session id is 26 characters of exactly that and the scrub would have eaten the one reply that matters. §2's claim is now verified rather than asserted — see the control experiment recorded there, and then verified again by accident: a session sent `launchctl kickstart -k` as its own prompt, ran it, and both live sessions came through it untouched. The first real use from a phone found what no test could, and it is now §9.12: Remote Control took 68 minutes to connect, the waiter had long since given up, and two working sessions were reported to the phone as failures. |
-| 8 | fleet control + reconciliation | ☑ | The pass has to run **before the batch it arrived with**, or the first `claude` after a reboot is refused against a cap held entirely by records whose runners that reboot took — two of them were on disk this morning, which is where the fixture came from. Announcing exactly once is a filesystem problem and not a bookkeeping one: the waiter thread and the tick can both be holding one newly-live record (§4.6's 45s deadline falls *inside* the ≤50s tick), and after a `launchctl kickstart` they are two **processes** — so `O_CREAT|O_EXCL` per (session, kind), with the link and the ending claimed separately so neither spends the other's. §9.12's late link then falls out of the same walk for free, because a waiter that gave up claims nothing. `alive()` refuses a `runner_pid` of `0` or `-1` before `os.kill` ever sees it — those mean *this whole process group* and *every process this user owns*, and the same record is what `stop all` iterates. Two things only the run step could say: the end notice claimed sessions had **run** for 11h when the machine had been switched off for three of them (this pass cannot know when a runner died, only that it is gone, so it now reports when the session *started*), and a restarted daemon takes up to 50s to notice anything at all, because the first tick is the first *return* from a 50s poll. Phone half of the run step — two sessions, a third refused, `ls`, `stop all` — still outstanding. |
+| 8 | fleet control + reconciliation | ☑ | The pass has to run **before the batch it arrived with**, or the first `claude` after a reboot is refused against a cap held entirely by records whose runners that reboot took — two of them were on disk this morning, which is where the fixture came from. Announcing exactly once is a filesystem problem and not a bookkeeping one: the waiter thread and the tick can both be holding one newly-live record (§4.6's 45s deadline falls *inside* the ≤50s tick), and after a `launchctl kickstart` they are two **processes** — so `O_CREAT|O_EXCL` per (session, kind), with the link and the ending claimed separately so neither spends the other's. §9.12's late link then falls out of the same walk for free, because a waiter that gave up claims nothing. `alive()` refuses a `runner_pid` of `0` or `-1` before `os.kill` ever sees it — those mean *this whole process group* and *every process this user owns*, and the same record is what `stop all` iterates. Two things only the run step could say: the end notice claimed sessions had **run** for 11h when the machine had been switched off for three of them (this pass cannot know when a runner died, only that it is gone, so it now reports when the session *started*), and a restarted daemon takes up to 50s to notice anything at all, because the first tick is the first *return* from a 50s poll. Run step done from the phone at 10:03–10:12: two sessions, a third `claude beacon` refused at the cap, `ls`, `stop 2` taking only the second, `stop all` taking the rest. The links never came back, but for nothing this slice does — see §9.13, which is the failure §9.12 misread as the network. |
 | 9 | hardening | ☐ | |
 | 10 | new projects from the phone | ☐ | |
 
