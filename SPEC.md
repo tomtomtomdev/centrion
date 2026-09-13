@@ -411,6 +411,22 @@ Never put the token in an exception message: it is in the URL, and `HTTPError` c
 
 ## 8. launchd
 
+> **Suspended 2026-09-13, and not yet replaced.** §9.13 makes a LaunchAgent unusable for this
+> bot: under launchd, Claude Code hangs at startup in any directory containing a `.git`, which
+> is every directory this bot can reach. The agent is booted out and the listener is running by
+> hand — `launchd/bot.sh` from a shell, which is what that script's header always said was the
+> supported way to start it, and which the lock makes safe to mix with a loaded agent.
+>
+> Everything below still describes the plist, because it is still on disk and still correct;
+> what is no longer true is that it is what runs. Reload with
+> `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tommy.centrion.bot.plist` once
+> §9.13 has an answer — and stop the hand-run copy first, or it holds the lock and the agent
+> logs a refusal every ThrottleInterval seconds, which is `bot.sh` telling you exactly this.
+>
+> **What the hand-run path costs**, and what a durable replacement has to buy back: nothing
+> restarts the listener after a crash, a logout or a reboot. That is the whole of what §8 was
+> for.
+
 `~/Library/LaunchAgents/com.tommy.centrion.bot.plist`, matching the `com.tommy.*` convention.
 
 ```
@@ -925,6 +941,14 @@ Not slices — things that stay true after the build.
   already does it.
 - `tail -f var/bot.log` is the first thing to look at when the phone gets no reply; a silent
   drop there is §10.3 working as designed, not a bug.
+- **While §8 is suspended, `pgrep -f 'bot.py --serve'` is the only thing that says the bot is
+  up.** There is no `launchctl list` row to check any more, and nothing will have restarted it.
+- **`child_env()` strips `CLAUDE_CODE*` but not `CLAUDE_EFFORT`, `CLAUDE_PID` or `AI_AGENT`.**
+  Harmless while launchd started the listener, because launchd has none of them. It is not
+  harmless now that the supported path is a shell: start `bot.sh` from inside a Claude Code
+  session and every session the bot spawns inherits that session's effort setting and a
+  `CLAUDE_PID` pointing at somebody else's process. Until §6 covers them by prefix, scrub by
+  hand — `env -u CLAUDE_PID -u CLAUDE_EFFORT -u AI_AGENT ... sh launchd/bot.sh`.
 
 
 ---
