@@ -9,13 +9,14 @@ servers, your git checkouts, permissions already bypassed.
 The bot is a **launcher**, not a bridge. It does not relay conversation. Once the link comes
 back, Remote Control carries everything; Telegram's job is done.
 
-Status: **built through slice 10, unblocked, one step short of signed off.** The command
-surface is complete and every verb of it has been driven from a phone: `claude <project>`
-starts a session, `ls` lists them, `stop <n>` and `stop all` end them, `max_sessions` refuses
-the one past the cap, and §4's reconciliation pass clears the records a reboot orphaned and
-announces a link that arrives after its waiter gave up. Slice 10 put a bound on what all that
-leaves behind: the transcript is capped and a finished session's directory goes after a day
-(§10.7).
+Status: **all eleven slices built; two run steps outstanding, both needing a human.** The
+command surface is complete and every verb of it except the newest has been driven from a
+phone: `claude <project>` starts a session, `ls` lists them, `stop <n>` and `stop all` end
+them, `max_sessions` refuses the one past the cap, and §4's reconciliation pass clears the
+records a reboot orphaned and announces a link that arrives after its waiter gave up. Slice 10
+bounded what all that leaves behind — the transcript is capped and a finished session's
+directory goes after a day (§10.7). Slice 11 added `new <name>`, which creates a project and
+answers §9.3's trust dialog for it, and is the one verb nobody has yet sent from a phone.
 
 **§9.13, which blocked the whole thing, stopped happening before slice 9 could diagnose it.**
 For three hours on 2026-09-13 a LaunchAgent-started Claude Code hung at startup in any directory
@@ -25,8 +26,11 @@ seconds after a launchd spawn. Nothing was changed and nothing was fixed; no reb
 change. So the LaunchAgent is back and holding the lock, `launchctl kickstart -k` puts it back
 in one second, and §9.13 is kept as a recognition guide rather than a diagnosis.
 
-What is not yet proven is the half of slice 9's run step that needs a login: nobody has yet
-logged out and back in to watch `RunAtLoad` do it unattended. See §12 and the table in §13.
+Two run steps are outstanding, and neither can be done from this side of a keyboard. Slice 9's
+needs a login: nobody has logged out and back in to watch `RunAtLoad` start the bot unattended.
+Slice 11's needs the phone: `new <name>` has been driven end to end below the wire — real
+directory, real runner, real link in 2.8s — but not yet as a Telegram message. See §12 and the
+table in §13.
 
 Every claim marked *verified* was tested on this box against Claude Code v2.1.269 (2026-09-12)
 or v2.1.270 (2026-09-13).
@@ -179,7 +183,11 @@ expressible in any message. §9.2 is why the root is `~/Projects` and not `~`.
 
 Resolution, in order — any failure is a `help` reply, never a path in the error:
 
-1. Reject a name containing `/`, `\\`, or a leading `.`, or one that is `.` or `..`.
+1. Reject a name containing `/`, `\\`, a control character, or a leading `.`, or one that is
+   `.` or `..`. *Control characters were added in slice 11*, when `new` made a project name
+   something the bot **writes** to the filesystem rather than only looks up: a directory called
+   `red<ESC>[31m` repaints `var/bot.log` around itself when §14 reads it with `tail -f`, and
+   nothing here can delete it afterwards. Both verbs refuse them, through the same code.
 2. Join to `projects_root` and `os.path.realpath` the result.
 3. Require the realpath's parent to be exactly the realpath of `projects_root` — a direct child,
    so a symlink inside the root that points outside it fails here.
@@ -525,21 +533,47 @@ All verified 2026-09-12 unless noted.
    `~/.claude/settings.json` has `skipDangerousModePermissionPrompt: true`, which is why the
    probe came up straight into `⏵⏵ bypass permissions on`. Every `~/Projects/*` directory has
    `hasTrustDialogAccepted: true`.
-   **A directory created in `~/Projects` later must be opened by hand with `claude` once
-   first.** The trust dialog under a PTY with nobody watching just hangs until the 45s timeout.
+   **A directory created in `~/Projects` later hangs at the trust dialog.** *Verified in slice
+   11, where it had only been inferred before* — from the flag being set on all 46 project
+   entries, never from watching a fresh directory come up. It hangs under
+   `--dangerously-skip-permissions` too, which is the only way this bot ever starts one:
 
-   **Slice 11 is what stops that being true, and this entry is the first thing it has to
-   settle.** The hang is *inferred* here — from the flag being set on all 46 project entries in
-   `~/.claude.json`, never from watching a fresh directory come up — and it has never been
-   observed under `--dangerously-skip-permissions`, which is the only way this bot ever starts
-   one. Probe it before designing around it. If it does hang, pre-seeding
-   `projects[<abs path>].hasTrustDialogAccepted` is the obvious fix and the wrong one: every
-   live Claude Code process rewrites that file continuously, so a read-modify-write from the
-   daemon races all of them over 46 projects' configuration to save one key. Answering the
-   prompt on the PTY is self-contained, is no more UI-coupled than the URL scrape already is
-   (§14 covers both), and for a directory this bot created empty a second earlier there is
-   nothing to trust — which is the argument that makes answering it legitimate rather than
-   merely convenient.
+   ```
+   Quick safety check: Is this a project you created or one you trust? …
+   ❯ No, exit
+     Yes, I trust this folder
+   Enter to confirm · Esc to cancel
+   ```
+
+   Three things about that panel decide the shape of the answer.
+
+   **The default selection is `No, exit`.** Pressing Enter — the obvious "just confirm it" —
+   ends the session. The answer is Down, then Enter, and in between the check that makes it
+   safe to send at all: that the marker actually moved onto `Yes, I trust this folder`. A UI
+   that reorders the two options leaves the session hanging, which is the old behaviour and is
+   honest, rather than confirming whatever is now second.
+
+   **The renderer writes `CSI <n> G` cursor jumps between words instead of spaces**, so the
+   stripped transcript is one unbroken run of letters — `yes,itrustthisfolder`. Anything
+   matching against what a human sees on the screen matches nothing at all. The same shape of
+   trap as §9.5's ULID: the obvious pattern is written against the wrong artefact.
+
+   **Answering it is one-time.** Claude Code writes `hasTrustDialogAccepted` for that path into
+   `~/.claude.json`, and a later `claude <name>` in the same directory comes straight up —
+   verified: a second session in the answered directory reached `live` with no dialog at all.
+
+   Pre-seeding that key from the daemon was the obvious fix and remains the wrong one: every
+   live Claude Code process rewrites that file continuously, so it is a read-modify-write
+   racing all of them over 46 projects' configuration to save one key. Answering on the PTY is
+   self-contained and no more UI-coupled than the URL scrape already is (§14 covers both).
+
+   **What makes the keystroke legitimate rather than merely convenient is narrower than "the
+   bot needs it".** It is that the directory was created by this bot, empty, a second earlier,
+   so there is nothing in it to trust. Both halves of that are enforced, in the two places that
+   can see them: the listener passes `--trust` only for `new`, and the runner answers only if
+   the directory is empty when it starts. `claude <project>` never answers it, and neither does
+   a `new` on a name that was already there with anything in it — those hang at the dialog
+   exactly as they did before, because that is what the dialog is for.
 
 4. **Killing the PTY leaves the remote session registered but offline** — it stays in the
    claude.ai/code list without the green dot. `claude --continue` in that directory reattaches
@@ -774,7 +808,10 @@ Non-negotiable:
    and is worth attacking.
 4. **Never accept a path.** `claude <project>` names a direct child of `projects_root`, run
    through the four checks in §3. No message can express a directory outside `~/Projects`, so
-   `claude ../../etc` and `claude ~/Documents/Junction` are both just a `help` reply.
+   `claude ../../etc` and `claude ~/Documents/Junction` are both just a `help` reply. **`new
+   <name>` runs the same checks, from the same code** — checks 1-3 unchanged and check 4
+   inverted (§12 slice 11) — and creates nothing unless every one of them passes, so a refused
+   `new` cannot leave a directory behind on its way to being refused.
 5. `.telegram.json` at `0600`, gitignored, and **never in the plist** — files in
    `~/Library/LaunchAgents` are world-readable `0644`.
 6. **Cap concurrency.** `max_sessions` — §3 sets the value and §15 records why it is 2 on this
@@ -1042,6 +1079,25 @@ trust prompt.
 *Run:* `new` a directory from the phone and confirm a link comes back inside the deadline rather
 than a trust-prompt tail at 45s. Then `ls` it, `stop` it, and check the directory is still there.
 
+**Outcome: §9.3 was real, and the probe found the one detail that mattered.** A fresh directory
+hangs under `--dangerously-skip-permissions` exactly as the entry inferred — but the dialog's
+default selection is `No, exit`, so the obvious answer to it (press Enter) would have ended the
+session rather than started it. The answer is Down, a check that the marker moved, then Enter;
+§9.3 carries the panel and the two other findings that came with it. Everything downstream of
+the probe was the `mkdir` the slice expected.
+
+Two things the slice did not plan for, both from `new` being the first verb that *writes*.
+A project name reaching the filesystem rather than only a lookup makes a control character
+worth refusing rather than merely surviving — there is no verb here that deletes anything, so a
+directory called `red<ESC>[31m` is one nobody can clean up from a phone. And the cap moved: it
+is now checked *before* the project is resolved, because creating a directory for a session
+that is then refused leaves exactly the empty repository §5 gives `new` its own verb to prevent.
+
+*Run step:* done below the wire, not from the phone. The real chain — `config.create()`, a
+detached runner, the real `claude`, a fresh `~/Projects/probe-new` — answered the dialog one
+second after the spawn and replied with a link in 2.8s, against a 45s deadline; the directory
+was still there after `stop`. The phone half is outstanding, along with slice 9's.
+
 ---
 
 ## 13. Progress
@@ -1061,7 +1117,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 8 | fleet control + reconciliation | ☑ | The pass has to run **before the batch it arrived with**, or the first `claude` after a reboot is refused against a cap held entirely by records whose runners that reboot took — two of them were on disk this morning, which is where the fixture came from. Announcing exactly once is a filesystem problem and not a bookkeeping one: the waiter thread and the tick can both be holding one newly-live record (§4.6's 45s deadline falls *inside* the ≤50s tick), and after a `launchctl kickstart` they are two **processes** — so `O_CREAT|O_EXCL` per (session, kind), with the link and the ending claimed separately so neither spends the other's. §9.12's late link then falls out of the same walk for free, because a waiter that gave up claims nothing. `alive()` refuses a `runner_pid` of `0` or `-1` before `os.kill` ever sees it — those mean *this whole process group* and *every process this user owns*, and the same record is what `stop all` iterates. Two things only the run step could say: the end notice claimed sessions had **run** for 11h when the machine had been switched off for three of them (this pass cannot know when a runner died, only that it is gone, so it now reports when the session *started*), and a restarted daemon takes up to 50s to notice anything at all, because the first tick is the first *return* from a 50s poll. Run step done from the phone at 10:03–10:12: two sessions, a third `claude beacon` refused at the cap, `ls`, `stop 2` taking only the second, `stop all` taking the rest. The links never came back, but for nothing this slice does — see §9.13, which is the failure §9.12 misread as the network. |
 | 9 | the link comes back, and the bot starts itself | ☐ | **The blocker cured itself, and that is the finding.** §9.13 reproduced at 10:03 and was gone by 13:07 with nothing changed between — no reboot, same 2.1.270, same desktop app, 14/14 on its own minimal repro and a real launchd pty run scraping a link in two seconds. So the probe this slice was planned around could not be run at all: `fs_usage` needs an open that never returns and there was no longer one. §8 is back on evidence of working rather than of being understood, which is a weaker warrant than this spec usually accepts and is why §9.13 was kept as a recognition guide instead of being deleted. The code finding was §14's, and it was real: `CLAUDE_PID`, `CLAUDE_EFFORT` and `AI_AGENT` all miss a `CLAUDE_CODE` prefix, so a listener started from a shell inside a Claude Code session was handing that session's effort setting, and a pid belonging to somebody else, to everything it spawned. The lock test the slice asked for was **green the moment it was written** — the property already held, and §11 says that is a test of something that already worked; it was kept anyway, because it executes the two scripts where the existing tests only string-match them, and two supported ways to start is exactly when that stops being theoretical. **Row still unticked: the run step is half done.** `kickstart -k` restarts the listener in a second and the live session survives it; nobody has logged out yet. |
 | 10 | hardening | ☑ | **The cap and the tail are the same file read from two ends, and only one of them was in the brief.** §4.6 reads the last 64 KB of `pty.log` to explain a session that never came up; rotating that file at 4 MiB means a session which fails just after a rotation hands the phone a cleared panel instead of the error — and §9.7's expired login, the likeliest failure after week one, is exactly a session that prints something and dies. Hence two files and a tail that reads back through the older one; a one-file cap would have been a silent regression in the reply that matters most. The third red test was already green from slice 7 and nothing was written for it (§11). Two smaller things, both in the rotation rather than the retention: the cap is checked *after* the write, because a chunk is one 64 KB read off the master and the file is briefly over either way — and a rotation that fails switches the cap off rather than retrying, because the loop it sits in is the session's life (§2) and a failing rename retried per write is a spin in the one place that has to keep reading the terminal. Retention counts from the record's mtime and not from `started`: a session left open for a week is not an old record, and the pass that finishes a reboot's orphan rewrites the record, so the day starts when the session ends rather than when it began. The sweep runs *after* the announcing loop and not inside it, because the marker that keeps an ending to one announcement lives inside the directory being removed — two days of downtime is a record that is terminal, old, and never announced. Run step by flood rather than by afternoon: 26 MiB through a real pty in 2.4s, 5.0 MiB left on disk, the `/login` line still in the tail from either file; the sweep over this box's own records, backdated, kept the live session and took the four ended ones. Nobody has yet watched a real day pass. |
-| 11 | new projects from the phone | ☐ | |
+| 11 | new projects from the phone | ☑ | **§9.3 was true, and the detail that decides the code is the one nobody could have guessed: the trust dialog's default selection is `No, exit`.** The obvious answer — press Enter, it is a confirmation — ends the session. So the runner sends Down, then checks that the marker moved onto `Yes, I trust this folder`, and only then confirms; a reworded or reordered dialog is left hanging, which is the old behaviour and honest, rather than confirmed blind. The matching had its own trap, the same shape as §9.5's: the panel renders words with `CSI <n> G` cursor jumps instead of spaces, so the stripped transcript reads `yes,itrustthisfolder` and any matcher written against what a human sees matches nothing. Answering is one-time — Claude Code writes `hasTrustDialogAccepted` for that path, verified by a second session coming straight up — which is what makes `new x` then `claude x` work tomorrow. The permission to answer it is deliberately split across both processes: the listener passes `--trust` only for `new`, the runner answers only if the directory is empty when it starts, and `new beacon` on an existing repository therefore behaves exactly like `claude beacon`. Two findings from `new` being the first verb that writes rather than reads: a control character in a name is now refused by *both* verbs (there is no delete verb here, so a directory called `red<ESC>[31m` is one nobody can remove from a phone), and the cap is now checked *before* the project is resolved, because a directory created for a session that is then refused is precisely the empty repository §5 gives this verb its own word to prevent. The fake `claude` the pty tests run against cost an hour to the oldest trap in this file: it mixed `select()` with a buffered reader, so it took all three bytes of an arrow key off the kernel to return one, then waited out its idle timeout on a terminal that had already answered it. Run step done below the wire — real create, real detached runner, real `claude`, fresh directory: dialog answered one second after the spawn, link in 2.8s against a 45s deadline, directory still there after `stop`. From the phone: outstanding. |
 
 ---
 
@@ -1069,9 +1125,15 @@ Updated at step 7 of every slice. Notes is the column that matters.
 
 Not slices — things that stay true after the build.
 
-- **After any Claude Code upgrade, re-run slice 6's tests.** The URL lives inside a UI panel,
-  and UI moves. `tests/fixtures/rc_startup.log` pins today's shape; when it stops matching, the
-  fix is to capture a fresh transcript with `session.py --foreground` and diff the two.
+- **After any Claude Code upgrade, re-run slice 6's and slice 11's tests.** Both read a UI, and
+  UI moves. The URL lives inside a panel — `tests/fixtures/rc_startup.log` pins today's shape,
+  and when it stops matching, capture a fresh transcript with `session.py --foreground` and
+  diff the two. §9.3's trust dialog is the second coupling and the one that fails quietly:
+  `TestTheTrustDialog` pins the wording and the marker, and if the panel is reworded the
+  failure in the field is `new <name>` timing out at 45s with the dialog in the tail. That is
+  the designed behaviour rather than a crash, so nothing will page you — check it deliberately.
+  The one-line probe: `python3 session.py --cwd <a fresh empty dir in ~/Projects> --name probe
+  --trust --foreground` should come up to a link in about three seconds.
 - `python3 bot.py --whoami` stays the way `allowed_chat_ids` gets filled in, as `notify.py`
   already does it.
 - `tail -f var/bot.log` is the first thing to look at when the phone gets no reply; a silent
@@ -1109,4 +1171,5 @@ what would have to change to reopen it.
 | Bare `claude` | Answers with the project list; starts nothing (§5) | The extra tap outweighs starting in the wrong repo, which it will not. |
 | Same-directory sessions | Allowed, flagged in the reply (§5) | Two sessions actually clobber each other's edits — then `--worktree` per session. |
 | Creating projects from the phone | A separate `new <name>` verb; `claude <unknown>` stays a typo (§5, §12 slice 11) | A mistyped name creating an empty repository turns out to be harmless, which it is not while every session bypasses permissions. |
+| Answering §9.3's trust dialog | On the PTY, and only for a directory this bot created *and* finds empty — never by writing `hasTrustDialogAccepted` into `~/.claude.json` (§9.3) | Claude Code grows a flag that means "this directory is trusted", or stops rewriting `~/.claude.json` from every live process, which is what makes seeding it a race today. |
 | Runtime | System `/usr/bin/python3`, stdlib only (§3) | Something here genuinely needs a third-party package, which nothing does yet. |

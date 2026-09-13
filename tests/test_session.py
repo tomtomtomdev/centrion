@@ -81,6 +81,61 @@ def drain(fd, deadline=10.0):
     return out
 
 
+#: A fake `claude` that renders §9.3's trust dialog the way the real one does and insists on
+#: being answered properly. Captured from the probe on 2026-09-13: words are separated by
+#: `CSI <n> G` cursor jumps rather than spaces — which is why the stripped transcript has no
+#: spaces in it at all, and why anything matching against this has to normalise whitespace
+#: away. The default selection is `No, exit`, so a bare Enter ends the session: this exits with
+#: no link, exactly as the real one would.
+FAKE_CLAUDE = r"""
+import os, select, sys, tty
+tty.setraw(0)
+
+def key():
+    # os.read and not sys.stdin.buffer.read: select() asks the *kernel* what is waiting, and a
+    # buffered reader takes all three bytes of an arrow key off it to return one — so the next
+    # select() sees an empty fd, waits out IDLE, and the fake gives up on a terminal that has
+    # already answered it. The same trap the runner's own loop avoids by reading the fd raw.
+    ready, _, _ = select.select([0], [], [], IDLE)
+    return os.read(0, 16) if ready else b""
+LINK = "https://claude.ai/code/session_01HJK2Lh42N7JbfMGExJkpTF"
+OPTIONS = sys.argv[1] or "Yes, I trust this folder"
+IDLE = float(sys.argv[2])     # nothing from the terminal for this long: give up and exit
+
+def draw(selected):
+    out = "\x1b[2GQuick\x1b[8Gsafety\x1b[15Gcheck:\x1b[22GIs\x1b[25Gthis\x1b[30Ga"
+    out += "\x1b[32Gproject\x1b[40Gyou\x1b[44Gcreated\x1b[52Gor\x1b[55Gone\x1b[59Gyou"
+    out += "\x1b[63Gtrust?\r\n\r\n"
+    for i, label in enumerate(("No, exit", OPTIONS)):
+        out += "\x1b[2G" + ("❯" if i == selected else " ")
+        out += "\x1b[4G" + label.replace(" ", "\x1b[%dG" % (10 + i)) + "\r\n"
+    out += "\x1b[2GEnter\x1b[8Gto\x1b[11Gconfirm\r\n"
+    sys.stdout.write(out)
+    sys.stdout.flush()
+
+selected, seen = 0, b""
+draw(selected)
+while True:
+    byte = key()
+    if not byte:
+        break                 # the real one would wait for a human; a test cannot
+    seen += byte
+    if seen.endswith(b"\x1b[B"):
+        selected = 1
+        draw(selected)
+    elif seen.endswith(b"\x1b[A"):
+        selected = 0
+        draw(selected)
+    elif seen.endswith(b"\r"):
+        if selected == 1:
+            sys.stdout.write("\r\nwelcome\x1b[10G" + LINK + "\r\n")
+            sys.stdout.flush()
+        else:
+            sys.stdout.write("\r\nexiting\r\n")
+            sys.stdout.flush()
+        break
+"""
+
 class TestTheUrlInARealTranscript(unittest.TestCase):
     """The fixture is the contract. §14: when it stops matching, capture a fresh one."""
 
@@ -864,6 +919,167 @@ class TestTheTranscriptDoesNotGrowForever(unittest.TestCase):
 
 def _raises(*_args):
     raise OSError(errno.EACCES, "read-only file system")
+
+
+
+class TestTheTrustDialog(unittest.TestCase):
+    """§9.3, and slice 11 is what stops it being true.
+
+    A directory created in `~/Projects` after Claude Code last saw it comes up to a *Quick
+    safety check* — verified on this box at last, under `--dangerously-skip-permissions`, where
+    the spec had only inferred it from a flag set on all 46 project entries. The runner sits
+    there until the 45s deadline and the phone gets a panel instead of a link.
+
+    **The default selection is `No, exit`.** That is the finding that decides the shape of the
+    answer: pressing Enter — the obvious "just confirm it" — ends the session. The answer is
+    Down, then Enter, and in between the one thing that makes it safe to send at all, which is
+    checking that the marker actually moved onto the option this code means to choose. A UI
+    that reorders these two must leave the session hanging (which is today's behaviour, and is
+    honest) rather than confirm whatever is now second.
+    """
+
+    def trust(self, **kw):
+        t = session.Trust(**kw)
+        self.addCleanup(lambda: None)
+        return t
+
+    def dialog(self, marked=0, second="Yes, I trust this folder"):
+        """The panel as the real one renders it: words joined by cursor jumps, no spaces."""
+        rows = ["Is\x1b[10Gthis\x1b[15Ga\x1b[17Gproject\x1b[25Gyou\x1b[29Gcreated\x1b[37Gor"
+                "\x1b[40Gone\x1b[44Gyou\x1b[48Gtrust?"]
+        for i, label in enumerate(("No, exit", second)):
+            rows.append(("\u276f" if i == marked else " ") + "\x1b[4G" + label)
+        return ("\r\n".join(rows) + "\r\n").encode()
+
+    def test_nothing_is_sent_before_the_dialog_is_there(self):
+        t = self.trust()
+        self.assertIsNone(t.feed(b"\x1b[2J starting up\r\n", 0.0))
+        self.assertIsNone(t.feed(b"", 10.0))
+
+    def test_it_presses_down_once_the_panel_has_settled(self):
+        t = self.trust()
+        self.assertIsNone(t.feed(self.dialog(), 0.0), "it answered a half-drawn panel")
+        self.assertEqual(t.feed(b"", session.SETTLE), session.DOWN)
+
+    def test_it_confirms_only_after_the_marker_has_moved(self):
+        t = self.trust()
+        t.feed(self.dialog(), 0.0)
+        self.assertEqual(t.feed(b"", session.SETTLE), session.DOWN)
+        # The redraw the real one sends back within milliseconds.
+        self.assertIsNone(t.feed(self.dialog(marked=1), session.SETTLE))
+        self.assertEqual(t.feed(b"", 2 * session.SETTLE), session.ENTER)
+
+    def test_a_marker_that_never_moves_is_never_confirmed(self):
+        """If Down did not select what this code thinks it selected, the session hangs and the
+        phone gets the panel at 45s. That is the failure this is *choosing* — the alternative
+        is confirming an option nobody has read."""
+        t = self.trust()
+        t.feed(self.dialog(), 0.0)
+        self.assertEqual(t.feed(b"", session.SETTLE), session.DOWN)
+        for tick in range(2, 60):
+            self.assertIsNone(t.feed(self.dialog(marked=0), tick * session.SETTLE))
+
+    def test_a_second_option_that_is_not_the_yes_is_not_even_reached(self):
+        # A dialog that has been reworded is a dialog this code does not understand, and the
+        # safe thing to do with one is nothing at all.
+        t = self.trust()
+        self.assertIsNone(t.feed(self.dialog(second="Yes, and do not ask again"), 0.0))
+        self.assertIsNone(t.feed(b"", 10 * session.SETTLE))
+
+    def test_the_words_are_matched_without_their_spacing(self):
+        """The renderer writes `CSI <n> G` between words instead of spaces, so the stripped
+        transcript is one run of letters. A matcher written against what a human sees on the
+        screen matches nothing at all here — which is the §9.5 mistake in another costume."""
+        t = self.trust()
+        spaced = ("Is this a project you created or one you trust?\r\n"
+                  "\u276f No, exit\r\nYes, I trust this folder\r\n").encode()
+        t.feed(spaced, 0.0)
+        self.assertEqual(t.feed(b"", session.SETTLE), session.DOWN,
+                         "it only recognises one of the two spellings")
+
+    def test_it_answers_once_and_then_stays_quiet(self):
+        # The panel redraws constantly. A second Enter goes into whatever replaced it.
+        t = self.trust()
+        t.feed(self.dialog(), 0.0)
+        t.feed(b"", session.SETTLE)
+        t.feed(self.dialog(marked=1), session.SETTLE)
+        self.assertEqual(t.feed(b"", 2 * session.SETTLE), session.ENTER)
+        for tick in range(3, 20):
+            self.assertIsNone(t.feed(self.dialog(marked=1), tick * session.SETTLE))
+
+    def test_it_does_not_hold_the_whole_session_in_memory(self):
+        t = self.trust()
+        for _ in range(200):
+            t.feed(b"x" * 4096, 0.0)
+        self.assertLessEqual(len(t.text), session.TRUST_KEEP * 2)
+
+
+class TestAFreshDirectoryComesUpToALink(unittest.TestCase):
+    """The other half of §9.3, through a real pty against a fake that insists on a real answer.
+
+    The fake exits when it is sent a bare Enter, because the real one does: `No, exit` is the
+    default selection. So a link coming back is proof of the whole sequence — the panel was
+    recognised, Down moved the marker, the marker was checked, and only then was it confirmed.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.sessions = os.path.join(self.tmp, "sessions")
+        self.root = os.path.join(self.tmp, "Projects")
+        self.work = os.path.join(self.root, "scratchpad")
+        os.makedirs(self.sessions)
+        os.makedirs(self.work)
+
+    #: How long the fake waits for a keystroke before giving up. The answer takes two SETTLEs
+    #: — recognise, Down, check the marker, Enter — so a second is well over twice as long as
+    #: an answer that is coming needs, and it is what the three tests below spend proving that
+    #: none is. The suite is 7 seconds and slice 7 worked hard for that; a test that waits out
+    #: a timeout it could have bounded is how it goes back to 40.
+    QUIET = "1.0"
+
+    def runner(self, trust=True, options="", idle=QUIET):
+        argv = [sys.executable, "-c", FAKE_CLAUDE, options, idle]
+        return session.Runner("3f2a91", self.work, "scratchpad-3f2a", root=self.sessions,
+                              argv=argv, log=lambda m: None, project="scratchpad",
+                              projects_root=self.root, trust=trust)
+
+    def test_the_directory_the_bot_just_made_comes_up_to_a_link(self):
+        r = self.runner(idle="10.0")
+        r.run()
+        meta = session.read_meta(r.dir)
+        self.assertEqual(meta["url"], CAPTURED, "no link: the dialog was never answered")
+        with open(os.path.join(r.dir, session.TRANSCRIPT), "rb") as fh:
+            self.assertNotIn(b"exiting", fh.read(), "it pressed Enter on `No, exit`")
+
+    def test_without_the_flag_the_dialog_is_left_alone(self):
+        """`claude beacon` must never answer it. §9.3's argument for answering at all is that
+        the directory was created empty by this bot a second earlier — a directory somebody
+        else made, or a repository cloned into the root, is exactly what the dialog is for."""
+        r = self.runner(trust=False)
+        r.run()
+        meta = session.read_meta(r.dir)
+        self.assertIsNone(meta["url"])
+        self.assertEqual(meta["state"], session.FAILED)
+        with open(os.path.join(r.dir, session.TRANSCRIPT), "rb") as fh:
+            self.assertIn(b"trust", fh.read(), "the panel should still be in the transcript")
+
+    def test_a_directory_with_anything_in_it_is_never_trusted(self):
+        """The listener says `new`, and the runner still checks. `new beacon` on a directory
+        that is already a repository is the case: the verb says create, the directory says
+        otherwise, and what is in it is not this bot's to trust away."""
+        open(os.path.join(self.work, "README.md"), "w").close()
+        r = self.runner(trust=True)
+        r.run()
+        self.assertIsNone(session.read_meta(r.dir)["url"])
+
+    def test_a_reworded_dialog_is_left_hanging_rather_than_confirmed(self):
+        r = self.runner(options="Yes, and remember this")
+        r.run()
+        meta = session.read_meta(r.dir)
+        self.assertIsNone(meta["url"])
+        with open(os.path.join(r.dir, session.TRANSCRIPT), "rb") as fh:
+            self.assertNotIn(b"exiting", fh.read(), "it confirmed an option it did not read")
 
 
 

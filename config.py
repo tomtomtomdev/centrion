@@ -207,8 +207,87 @@ class ProjectError(Exception):
 # `/` and `\` are what a path looks like; NUL is what makes realpath() raise instead of return.
 _NOT_IN_A_NAME = ("/", "\\", "\x00")
 
-_NOT_A_NAME = ("`claude <project>` takes the name of a directory in the projects root, not a "
-               "path. Send `claude` on its own for the list.")
+
+def _unprintable(name):
+    """True for a name holding a control character. Slice 11, and `new` is why.
+
+    §3's first check was written when every verb could only ever *reach* a directory somebody
+    had already made by hand. `new` writes one, from a message, so the name is now wire content
+    on its way to the filesystem — and a directory called `a\bb` or `red\x1b[31m` is one this
+    bot cannot help you get rid of afterwards, because there is no verb here that deletes
+    anything. Both verbs refuse them, because two rules is how the two doors drift apart.
+    """
+    return any(c < " " or c == "\x7f" for c in name)
+
+#: Verb-agnostic on purpose: `claude` and `new` refuse the same names through the same code
+#: (§12 slice 11), and a message naming one of the two verbs would be wrong half the time.
+_NOT_A_NAME = ("a project is the name of a directory in the projects root, not a path. Send "
+               "`claude` on its own for the list.")
+
+
+def _child(name, root):
+    """Checks 1-3 of §3: `name` → where it would be, whether or not anything is there.
+
+    Split out of `resolve()` for `create()`, which shares these three exactly and inverts the
+    fourth (§12 slice 11). It is one function rather than two copies because this is the
+    security boundary §10.4 is a promise about, and the way a second copy fails is silently:
+    `new` would go on accepting a name that `claude` had started refusing, and the bot would
+    have a weaker door beside the one everything else is tested against.
+    """
+    if root is None:
+        root = load().projects_root
+    root = os.path.realpath(os.path.expanduser(root))
+
+    # 1. The name is a name. First, because os.path.join(root, "/etc") is "/etc".
+    if not isinstance(name, str) or not name:
+        raise ProjectError("that is not a project name. " + _NOT_A_NAME)
+    if name.startswith(".") or any(c in name for c in _NOT_IN_A_NAME) or _unprintable(name):
+        raise ProjectError("that is not a project name. " + _NOT_A_NAME)
+
+    # 2. Resolve it.
+    path = os.path.realpath(os.path.join(root, name))
+
+    # 3. It is a direct child of the root, after resolution.
+    if os.path.dirname(path) != root:
+        raise ProjectError("that is not inside the projects root, and the bot cannot start a "
+                           "session outside it. " + _NOT_A_NAME)
+    return path
+
+
+def create(name, root=None):
+    """`name` → `(directory, created)`, making it if it is not there. §5's `new`, §12 slice 11.
+
+    Checks 1-3 are `resolve()`'s, unchanged and shared — `new` refuses everything `claude`
+    refuses, which is the whole of why creating a project is allowed to be a verb at all. Check
+    4 is inverted: `claude` needs the directory to exist and this does not.
+
+    **Nothing is created until every check has passed.** A refusal that had already run the
+    `mkdir` would leave `new ../etc` writing a directory on its way to being rejected, which is
+    the boundary failing while reporting that it held.
+
+    `created` is False for a directory that was already there, and that is not an error: the
+    phone asked for a project by that name and there is one. It changes the reply (§5) and it
+    is the difference between a session this bot may answer §9.3's trust dialog for and one it
+    may not — see session.Trust.
+    """
+    path = _child(name, root)
+    if os.path.isdir(path):
+        return path, False
+    if os.path.exists(path):
+        raise ProjectError("that is a file, not a project directory. Send `claude` on its own "
+                           "for the list.")
+    try:
+        os.mkdir(path)
+    except FileExistsError:
+        # Two `new scratchpad` in one batch. The loser of the race gets what it asked for.
+        return path, False
+    except OSError as e:
+        # A read-only root, a full disk, a name this filesystem will not take. §7: the phone
+        # gets a sentence and the daemon keeps polling — and the sentence carries no path,
+        # because this one reaches Telegram like every other refusal (§10).
+        raise ProjectError("could not create that project directory (%s)."
+                           % (e.strerror or "unknown error"))
+    return path, True
 
 
 def resolve(name, root=None):
@@ -238,23 +317,7 @@ def resolve(name, root=None):
     Returns a resolved absolute path. Note it is *not* case-normalised — see
     test_projects.TestTheHappyCase for why that matters to §5's same-directory warning.
     """
-    if root is None:
-        root = load().projects_root
-    root = os.path.realpath(os.path.expanduser(root))
-
-    # 1. The name is a name.
-    if not isinstance(name, str) or not name:
-        raise ProjectError("that is not a project name. " + _NOT_A_NAME)
-    if name.startswith(".") or any(c in name for c in _NOT_IN_A_NAME):
-        raise ProjectError("that is not a project name. " + _NOT_A_NAME)
-
-    # 2. Resolve it.
-    path = os.path.realpath(os.path.join(root, name))
-
-    # 3. It is a direct child of the root, after resolution.
-    if os.path.dirname(path) != root:
-        raise ProjectError("that is not inside the projects root, and the bot cannot start a "
-                           "session outside it. " + _NOT_A_NAME)
+    path = _child(name, root)
 
     # 4. It is a directory, and it is there.
     if not os.path.exists(path):

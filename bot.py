@@ -349,18 +349,24 @@ class Sessions:
         """That session's record, or None. §2: these two processes talk through files."""
         return session.read_meta(self.directory(sid))
 
-    def start(self, sid, name, cwd, project, chat_id, prompt=None):
+    def start(self, sid, name, cwd, project, chat_id, prompt=None, trust=False):
         """Fork a runner for this session and return its pid. Never waits for it (§4.2).
 
         `cwd` has already been through `config.resolve()` and goes through it again inside the
         runner (§3): the listener resolves, the runner re-checks, and the string that came off
         the wire is never a working directory.
+
+        `trust` is §9.3's, and it is one half of a condition: this process knows the directory
+        was created by this bot a moment ago, and the runner knows whether there is anything in
+        it. Neither half is enough on its own — see session.Trust.
         """
         argv = [self.python, self.script,
                 "--sid", sid, "--name", name, "--cwd", cwd, "--project", project,
                 "--chat-id", str(chat_id), "--root", self.root]
         if prompt:
             argv.extend(["--prompt", prompt])
+        if trust:
+            argv.append("--trust")
 
         os.makedirs(self.root, exist_ok=True)
         # A list and no shell, which is the whole of the defence here: `project` and `prompt`
@@ -683,6 +689,7 @@ class Listener:
             "claude                   the projects below, and nothing else\n"
             "claude <project>         a session there\n"
             "claude <project> <text>  a session there, then type that\n"
+            "new <name>               a new project directory, and a session in it\n"
             "ls                       the live sessions\n"
             "stop <n> · stop all      end one, or all of them\n"
             "help                     this\n"
@@ -841,16 +848,13 @@ class Listener:
         kept — *the listener never blocks on a session* — and the visible consequence is that
         `claude beacon` is answered after anything sent behind it.
         """
-        try:
-            cwd = config.resolve(intent.project, self.cfg.projects_root)
-        except config.ProjectError as e:
-            # §3: any resolution failure is a help reply, and it names the rule that was broken
-            # rather than the path that broke it.
-            self.say(chat_id, "%s\n\n%s" % (e, self.help()))
-            return "refused, not a project"
-
         # §10.6: without a cap at all, a held-down `claude` fills RAM with Claude Code
         # processes. The union is the point — see self.pending.
+        #
+        # **Before the project is resolved, and before `new` creates anything.** A session that
+        # cannot start is not a reason to leave an empty directory on the disk — and one this
+        # bot made but never used is exactly the accident §5 gives `new` its own verb to
+        # prevent, with the added insult that nothing here can delete it afterwards.
         running = set(r.get("sid") for r in self.fleet()) | self.pending
         if len(running) >= self.cfg.max_sessions:
             self.say(chat_id, "%d of %d sessions already running. `ls` to see them, "
@@ -858,13 +862,29 @@ class Listener:
                      % (len(running), self.cfg.max_sessions))
             return "refused, at the cap"
 
+        making = intent.verb == commands.NEW
+        try:
+            if making:
+                # §5: creating a project is its own verb, and the checks it runs are
+                # `resolve()`'s own — 1 to 3 unchanged, 4 inverted (§12 slice 11). Nothing is
+                # created unless all of them pass, so a refused `new` leaves nothing behind.
+                cwd, created = config.create(intent.project, self.cfg.projects_root)
+            else:
+                cwd, created = config.resolve(intent.project, self.cfg.projects_root), None
+        except config.ProjectError as e:
+            # §3: any resolution failure is a help reply, and it names the rule that was broken
+            # rather than the path that broke it.
+            self.say(chat_id, "%s\n\n%s" % (e, self.help()))
+            return "refused, not a project"
+
         sid = self.mint()
         # §3's meta.json: sid 3f2a91 gives the name centrion-3f2a. The spelling is the one that
         # was sent, not the one on disk (§9.9) — it is a label in the Claude app, not a path.
         name = "%s-%s" % (intent.project, sid[:4])
         self.pending.add(sid)
         try:
-            pid = self.sessions.start(sid, name, cwd, intent.project, chat_id, intent.prompt)
+            pid = self.sessions.start(sid, name, cwd, intent.project, chat_id, intent.prompt,
+                                      trust=making)
         except Exception as e:
             self.pending.discard(sid)
             # The one failure with no transcript behind it: nothing was spawned, so nothing
@@ -876,20 +896,20 @@ class Listener:
                      % scrub(str(e), self.tg.redact))
             return "spawn failed"
 
-        self.watch(chat_id, sid, intent.project, name)
+        self.watch(chat_id, sid, intent.project, name, created=created)
         return "session %s, runner pid %d" % (sid, pid)
 
-    def watch(self, chat_id, sid, project, name):
+    def watch(self, chat_id, sid, project, name, created=None):
         """Wait for this session somewhere other than the poll loop. §4.2."""
         waiter = threading.Thread(target=self.waited, name="session-" + sid, daemon=True,
-                                  args=(chat_id, sid, project, name))
+                                  args=(chat_id, sid, project, name, created))
         # A thread per pending session is the design; a thread per message ever received would
         # be a leak that takes a week to show itself on a process that never exits.
         self.waiters = [w for w in self.waiters if w.is_alive()]
         self.waiters.append(waiter)
         waiter.start()
 
-    def waited(self, chat_id, sid, project, name):
+    def waited(self, chat_id, sid, project, name, created=None):
         """One waiter, start to finish. Runs on its own thread and swallows everything."""
         try:
             record, state = self.wait(sid)
@@ -901,7 +921,8 @@ class Listener:
                 self.sessions.claim(sid, LINK_SENT)
             elif state in (session.FAILED, session.ENDED):
                 self.sessions.claim(sid, END_SENT)
-            sent = self.say(chat_id, self.outcome(record, state, sid, project, name))
+            sent = self.say(chat_id,
+                            self.outcome(record, state, sid, project, name, created))
             self.log("session %s: %s — %s" % (sid, state or "no link in %ds" % self.timeout,
                                               "replied" if sent else "reply NOT delivered"))
         except Exception as e:
@@ -934,8 +955,14 @@ class Listener:
                 return record, None
             self.sleep(self.poll_every)
 
-    def outcome(self, record, state, sid, project, name):
-        """What the phone gets when a session has resolved one way or the other. §4.6, §5."""
+    def outcome(self, record, state, sid, project, name, created=None):
+        """What the phone gets when a session has resolved one way or the other. §4.6, §5.
+
+        `created` is None for `claude` and a bool for `new`. It is a line in the reply rather
+        than a message of its own because §4.6 promises exactly one reply per session — and it
+        is in *both* branches because a `new` whose session then failed has still left a
+        directory behind, and the phone is the only place that will ever say so.
+        """
         if state == session.LIVE:
             # §5: the link on a line of its own, because that is what Telegram will make
             # tappable. The third line is not decoration either — what has just started is a
@@ -943,6 +970,8 @@ class Listener:
             # that fact is in front of the person who caused it.
             fleet = self.fleet()
             lines = ["▶ %s · %s" % (project, name)]
+            if created is not None:
+                lines.append(self.made(record, project, created))
             # §5: allowed, and flagged. Refusing would be wrong — two sessions on one repo is
             # a normal way to work — and one line is the whole mitigation; anything more
             # belongs to git rather than to this bot.
@@ -965,9 +994,23 @@ class Listener:
                     "directory's trust prompt and an expired /login both look like this."
                     % (project, self.timeout, sid))
 
+        if created is not None:
+            head = "%s\n%s" % (head, self.made(record, project, created))
         tail = self.tail(sid)
         return "%s\n\n%s" % (head, tail) if tail else \
                "%s\n\nThe transcript is empty." % head
+
+    def made(self, record, project, created):
+        """§5's one extra line for `new`: what it made, or what was already there.
+
+        The path is tilde-collapsed like every other path that leaves this machine (§7), and it
+        is here at all because `new` is the only verb that changes the filesystem — a reply
+        that did not say so would leave the phone unable to tell a fresh directory from a
+        session started in a repository full of somebody's work.
+        """
+        cwd = record.get("cwd") if isinstance(record, dict) else None
+        where = tilde(cwd) if isinstance(cwd, str) and cwd else project
+        return "📁 %s created" % where if created else "📁 %s was already there" % where
 
     def tail(self, sid, lines=TAIL_LINES):
         """The last few lines of that session's terminal, fit to leave this machine. §4.6.
@@ -1008,7 +1051,7 @@ class Listener:
             return
 
         intent = commands.parse(message.get("text"))
-        if intent.verb == commands.START and intent.project is not None:
+        if intent.verb in (commands.START, commands.NEW) and intent.project is not None:
             done = self.begin(chat_id, intent)
         else:
             done = "replied" if self.say(chat_id, self.answer(intent)) \

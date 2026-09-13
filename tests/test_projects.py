@@ -115,6 +115,14 @@ class TestCheck1TheNameIsAName(Base):
         self.refuses(3, "name")
 
 
+    def test_a_control_character_is_not_a_name_either(self):
+        # Both verbs, one rule (§12 slice 11). A directory with an escape sequence in its name
+        # repaints var/bot.log around itself when §14 reads it with `tail -f`; loggable()
+        # defends the log, and this defends everything else.
+        for name in ("a\bb", "red\x1b[31m", "two\nlines"):
+            self.refuses(name, "name")
+
+
 class TestCheck2AndCheck3ItStaysInsideTheRoot(Base):
     """§3.2/§3.3 — realpath the join, and require its parent to be exactly realpath(root)."""
 
@@ -167,6 +175,113 @@ class TestCheck4ItIsADirectory(Base):
     def test_a_dangling_symlink_is_refused(self):
         os.symlink(os.path.join(self.root, "gone"), os.path.join(self.root, "dangling"))
         self.refuses("dangling", "exist")
+
+
+class TestCreatingOne(Base):
+    """§5's `new`, and §12 slice 11: checks 1-3 unchanged, check 4 inverted.
+
+    The reason it is a separate verb rather than a flag on `claude` is in §5, and the reason it
+    is the *same code* is here: `new` must refuse everything `claude` refuses, or the boundary
+    §10.4 defends has a second, weaker door beside it. Only the last check moves, and it moves
+    into its opposite — `claude` needs the directory to be there, `new` does not.
+
+    The property that matters more than any single refusal: **a refused `new` creates nothing.**
+    A check that ran after the `mkdir` would mean `new ../etc` leaving a directory behind on
+    its way to being refused.
+    """
+
+    def creates(self, name):
+        path, created = config.create(name, self.root)
+        self.assertTrue(created, "it reported the directory as already there")
+        self.assertTrue(os.path.isdir(path))
+        return path
+
+    def refuses_to_create(self, name, because):
+        before = sorted(os.listdir(self.root))
+        with self.assertRaises(config.ProjectError) as cm:
+            config.create(name, self.root)
+        msg = str(cm.exception)
+        self.assertIn(because, msg.lower(), "message did not name the problem: %r" % msg)
+        for leak in (self.root, self.tmp, self.outside, os.path.realpath(self.root),
+                     os.path.expanduser("~")):
+            self.assertNotIn(leak, msg, "the refusal leaked a path: %r" % msg)
+        # The whole point of refusing before the mkdir rather than after it.
+        self.assertEqual(sorted(os.listdir(self.root)), before,
+                         "a refused `new` left something behind")
+        return msg
+
+    def test_it_creates_a_direct_child_of_the_root(self):
+        path = self.creates("scratchpad")
+        self.assertEqual(os.path.dirname(path), os.path.realpath(self.root))
+        self.assertEqual(os.path.basename(path), "scratchpad")
+
+    def test_the_directory_is_empty_and_ordinary(self):
+        # §9.3 answers the trust dialog for an empty directory and for nothing else, so what
+        # `new` makes has to actually be empty.
+        self.assertEqual(os.listdir(self.creates("scratchpad")), [])
+
+    def test_a_name_that_is_already_there_is_not_a_failure(self):
+        """§12 slice 11: `new beacon` starts a session and says the directory was already
+        present. Refusing would be the wrong answer to a phone — the directory is there, which
+        is what was being asked for."""
+        path, created = config.create("beacon", self.root)
+        self.assertEqual(path, config.resolve("beacon", self.root))
+        self.assertFalse(created, "it claimed to have created a directory that was there")
+
+    def test_twice_creates_one_directory(self):
+        # Two `new scratchpad` in one batch is one tap repeated on a phone, not an error.
+        first, created_first = config.create("scratchpad", self.root)
+        second, created_second = config.create("scratchpad", self.root)
+        self.assertEqual(first, second)
+        self.assertTrue(created_first)
+        self.assertFalse(created_second)
+
+    def test_a_file_by_that_name_is_still_refused(self):
+        open(os.path.join(self.root, "notes.txt"), "w").close()
+        self.refuses_to_create("notes.txt", "file")
+
+    def test_it_refuses_everything_the_name_checks_refuse(self):
+        # Check 1, unchanged. Each of these is also a `claude` refusal, by the same code.
+        for name in ("sub/dir", "../etc", "..", ".", ".ssh", "a\\b", "x\x00y", "", None):
+            self.refuses_to_create(name, "name")
+
+    def test_it_refuses_a_name_with_a_control_character_in_it(self):
+        """`new` is the first verb that writes a name to the filesystem, and that is what makes
+        this worth refusing rather than merely surviving: `claude` can only ever reach a
+        directory somebody already made, while `new` can manufacture one from a phone message —
+        and a directory whose name holds a backspace or an ANSI escape cannot be cleaned up
+        from a phone, because this bot has no verb that deletes anything."""
+        for name in ("a\bb", "red\x1b[31m", "two\nlines", "tab\there"):
+            self.refuses_to_create(name, "name")
+
+    def test_it_refuses_a_path_that_leaves_the_root(self):
+        # Check 3, unchanged: join() drops the root for an absolute second argument, which is
+        # why check 1 runs first and why this one is here at all.
+        self.refuses_to_create(os.path.join(self.outside, "x"), "name")
+
+    def test_it_refuses_a_name_that_escapes_through_a_symlink(self):
+        """Check 3 again, and the case it exists for: the name is a name, the join stays inside
+        the root, and the realpath comes out somewhere else entirely."""
+        os.symlink(self.outside, os.path.join(self.root, "escape"))
+        self.refuses_to_create("escape", "root")
+        self.assertEqual(os.listdir(self.outside), [], "it created a directory outside the root")
+
+    def test_a_grandchild_is_not_a_direct_child(self):
+        self.refuses_to_create("a/b", "name")
+        self.assertFalse(os.path.exists(os.path.join(self.root, "a")))
+
+    def test_it_does_not_create_the_root_itself(self):
+        # `new .` and `new ..` are check 1, but the failure they would cause is worth naming:
+        # the root is not a project and must never be handed back as one.
+        for name in (".", ".."):
+            self.refuses_to_create(name, "name")
+
+    def test_what_it_creates_is_what_resolve_accepts(self):
+        """The two halves of §3 have to agree, or `new x` is followed by `claude x` refusing —
+        on a phone, with no way to tell which of the two is wrong."""
+        path = self.creates("scratchpad")
+        self.assertEqual(config.resolve("scratchpad", self.root), path)
+        self.assertIn("scratchpad", config.projects(self.root))
 
 
 class TestTheHappyCase(Base):

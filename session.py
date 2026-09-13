@@ -87,8 +87,33 @@ KEEP = 256
 #: and the link — behind a stray ESC forever.
 CARRY_LIMIT = 512
 
-#: §4: type the prompt, let the input box settle, then send Enter separately.
+#: §4: type the prompt, let the input box settle, then send Enter separately. §9.3's dialog is
+#: answered on the same rhythm and for the same reason — a panel still drawing itself is a panel
+#: whose keystrokes land somewhere unpredictable.
 SETTLE = 0.4
+
+#: §9.3's trust dialog, normalised. *Verified on this box, 2026-09-13*, and the verification is
+#: the point: the spec had inferred the hang from a flag set on 46 project entries and had never
+#: watched a fresh directory come up under `--dangerously-skip-permissions`. It hangs.
+#:
+#: Matched against text with **all whitespace removed**, because the renderer writes words
+#: separated by `CSI <n> G` cursor jumps rather than spaces — strip() takes the escapes out and
+#: what is left has no gaps in it at all. A matcher written against what a human sees on the
+#: screen matches nothing here.
+TRUST_QUESTION = "isthisaprojectyoucreatedoroneyoutrust"
+TRUST_YES = "yes,itrustthisfolder"
+
+#: The selected option carries this marker. **The default selection is `No, exit`** — which is
+#: why the answer is not a bare Enter, and why the marker having moved is checked before one is
+#: sent at all.
+TRUST_MARKER = "\u276f"
+
+#: Arrow keys as the terminal sends them, and the confirm.
+DOWN, ENTER = b"\x1b[B", b"\r"
+
+#: How much normalised text is kept while looking for the dialog. The panel is ~350 characters
+#: with its spacing removed and the question and the option have to be in the buffer together.
+TRUST_KEEP = 4096
 
 READ_SIZE = 65536
 TICK = 0.2            # select timeout; also how often the settle timer is checked
@@ -130,6 +155,67 @@ def extract_url(data):
     """The session link in `data`, or None. One-shot; `Scrape` is the streaming version."""
     found = URL_RE.search(strip(data))
     return found.group(0) if found else None
+
+
+def squeeze(text):
+    """Terminal text with its spacing and case removed. See TRUST_QUESTION for why."""
+    return "".join(strip(text).split()).lower()
+
+
+class Trust:
+    """§9.3's trust dialog, answered on the terminal. Slice 11.
+
+    A directory created in `~/Projects` after Claude Code last saw it comes up to a *Quick
+    safety check* and waits for a human who is not at the keyboard — under
+    `--dangerously-skip-permissions` too, which is the only way this bot ever starts one. The
+    runner sits there until the listener's 45s deadline and the phone gets a panel where a link
+    should be. That is the whole of what stands between `new scratchpad` and a session.
+
+    **Why answering it here is legitimate and not merely convenient.** §9.3 weighed the
+    alternative — pre-seeding `projects[<path>].hasTrustDialogAccepted` in `~/.claude.json` —
+    and rejected it: every live Claude Code process rewrites that file continuously, so the
+    daemon would be racing all of them over 46 projects' configuration to save one key. The
+    argument that makes the keystroke honest is narrower than "the bot needs it": the directory
+    was created by this bot, empty, a second earlier, so there is nothing in it to trust. The
+    runner enforces the empty half (see Runner.run) and the listener the created half; neither
+    is enough on its own, and `claude <project>` never gets here at all.
+
+    **Down, then check, then Enter.** The default selection is `No, exit`, so the obvious
+    "press Enter to confirm" ends the session — and a blind Down+Enter would confirm whatever
+    the second option happens to be after the next UI change. So the marker is checked onto the
+    option this code means to choose before it is confirmed, and only the redraw that arrives
+    *after* the Down counts. A dialog that does not answer to this is left alone: the session
+    hangs, the phone gets the panel at 45s, and that is the failure being chosen deliberately
+    over confirming something nobody read. §14 has the standing check.
+    """
+
+    WAITING, SEEN, ASKED, MOVED, DONE = "waiting", "seen", "asked", "moved", "done"
+
+    def __init__(self):
+        self.state = self.WAITING
+        self.text = ""
+        self.at = None
+
+    def feed(self, chunk, now):
+        """Terminal output in, a keystroke out — or None, which is the usual answer."""
+        if chunk:
+            self.text = (self.text + squeeze(chunk))[-TRUST_KEEP:]
+
+        if self.state == self.WAITING:
+            if TRUST_QUESTION in self.text and TRUST_YES in self.text:
+                self.state, self.at = self.SEEN, now
+        elif self.state == self.SEEN and now - self.at >= SETTLE:
+            # The buffer is cleared with the keystroke: what proves the marker moved is the
+            # redraw that comes *after* this, and the panel already on screen has the marker
+            # sitting on `No, exit`.
+            self.state, self.text = self.ASKED, ""
+            return DOWN
+        elif self.state == self.ASKED and TRUST_MARKER + TRUST_YES in self.text:
+            self.state, self.at = self.MOVED, now
+        elif self.state == self.MOVED and now - self.at >= SETTLE:
+            self.state = self.DONE
+            return ENTER
+        return None
 
 
 class Scrape:
@@ -484,7 +570,7 @@ class Runner:
     """One session, from `starting` to `ended`, and the pty held open in between."""
 
     def __init__(self, sid, cwd, name, root=SESSIONS, binary=None, argv=None, project=None,
-                 chat_id=None, prompt=None, projects_root=None, log=_stderr):
+                 chat_id=None, prompt=None, projects_root=None, trust=False, log=_stderr):
         self.sid = sid
         self.cwd = cwd
         self.name = name
@@ -494,8 +580,13 @@ class Runner:
         self.prompt = prompt
         self.projects_root = projects_root
         self.argv = argv or claude_argv(binary, name)
+        # §9.3: the listener sets this for `new`, because the created-by-this-bot half of the
+        # argument is the half only the listener knows. The empty half is checked in run(),
+        # where the directory is — see there.
+        self.trusting = trust
         self.log = log
         self.scrape = Scrape()
+        self.trust = None
         self.record = {}
         self.stopping = False
 
@@ -556,6 +647,23 @@ class Runner:
             self.update(state=FAILED, error=str(e))
             return FAILED
 
+        # §9.3, and the second half of the argument that makes answering the trust dialog
+        # honest: the listener says this session was a `new`, and the directory says whether
+        # there is anything in it to be trusted away. Both, or the dialog is left alone —
+        # `new beacon` on a repository somebody else made is `claude beacon` in that respect,
+        # and the check is here because the emptiness is a fact about a directory, on the
+        # machine that has it, at the moment before anything is started in it.
+        if self.trusting:
+            try:
+                empty = not os.listdir(self.cwd)
+            except OSError:
+                empty = False
+            if empty:
+                self.trust = Trust()
+            else:
+                self.log("session %s: %s is not empty — leaving §9.3's dialog alone"
+                         % (self.sid, self.project))
+
         pid, master = spawn(self.argv, self.cwd, child_env())
         self.update(claude_pid=pid)
         self.log("spawned pid %d in %s" % (pid, self.cwd))
@@ -608,6 +716,7 @@ class Runner:
         entered = False
 
         while not self.stopping:
+            chunk = b""
             try:
                 ready, _, _ = select.select([master], [], [], TICK)
             except OSError as e:
@@ -632,6 +741,16 @@ class Runner:
                     self.update(state=LIVE, url=self.scrape.url)
                     self.log("live: %s" % self.scrape.url)
 
+            # §9.3. Outside the `if ready` block because two of its four steps are timers, and
+            # a panel that has finished drawing sends nothing more to wait for. It stops
+            # mattering the moment there is a link.
+            if self.trust is not None and not self.scrape.url:
+                key = self.trust.feed(chunk, time.time())
+                if key is not None:
+                    os.write(master, key)
+                    if key is ENTER:
+                        self.log("session %s: answered §9.3's trust dialog" % self.sid)
+
             if not self.prompt or not self.scrape.url:
                 continue
             # §4: type it only once the session is live — before that there is no input box and
@@ -654,6 +773,8 @@ def main():
     ap.add_argument("--chat-id", type=int, default=None, help="who to tell when it ends")
     ap.add_argument("--prompt", default=None, help="typed into the session once it is live")
     ap.add_argument("--root", default=SESSIONS, help="where session directories live")
+    ap.add_argument("--trust", action="store_true",
+                    help="answer §9.3's trust dialog if the directory is empty (`new` only)")
     ap.add_argument("--foreground", action="store_true",
                     help="do not detach; for debugging by hand (SPEC.md §12)")
     a = ap.parse_args()
@@ -671,7 +792,7 @@ def main():
 
     runner = Runner(a.sid or os.urandom(3).hex(), os.path.abspath(os.path.expanduser(a.cwd)),
                     a.name, root=a.root, binary=cfg.claude_bin, project=a.project,
-                    chat_id=a.chat_id, prompt=a.prompt)
+                    chat_id=a.chat_id, prompt=a.prompt, trust=a.trust)
     if a.foreground:
         print("session %s · %s" % (runner.sid, runner.dir), file=sys.stderr)
     state = runner.run()

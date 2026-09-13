@@ -141,6 +141,49 @@ class TestStartingASession(Base):
         self.assertIntent("claude beacon   ", commands.START, project="beacon", prompt=None)
 
 
+class TestCreatingAProject(Base):
+    """§5: `new scratchpad` is its own verb, and that is the whole of its safety.
+
+    Folding creation into `claude <name>` would make every typo an empty repository with a
+    bypass-permissions session in it. The parser's half of that is small and absolute: `new`
+    parses exactly like `claude` and bare `new` is help, because a `new` with nothing to name
+    cannot be given a sensible default without inventing a directory nobody asked for.
+
+    Whether the name is *allowed* is not decided here — `new ../etc` parses cleanly and
+    `config.create()` refuses it, the same way `claude ../etc` parses cleanly and
+    `config.resolve()` refuses it. One boundary, one place (§10.4).
+    """
+
+    def test_new_names_the_project_to_create(self):
+        self.assertIntent("new scratchpad", commands.NEW, "scratchpad")
+
+    def test_the_slash_form_is_the_same_verb(self):
+        self.assertIntent("/new scratchpad", commands.NEW, "scratchpad")
+
+    def test_it_takes_a_prompt_like_claude_does(self):
+        # §5 says it starts a session there `as above`, and above is `claude beacon fix it`.
+        self.assertIntent("new scratchpad write me a README", commands.NEW, "scratchpad",
+                          "write me a README")
+
+    def test_bare_new_is_help_and_never_a_default_name(self):
+        """Bare `claude` answers with the project list because there is a list to give. There
+        is no such answer here: any default would be a directory nobody named."""
+        self.assertHelp("new")
+        self.assertHelp("/new")
+        self.assertHelp("new   ")
+
+    def test_the_verb_folds_but_the_name_does_not(self):
+        # §9.9: the volume is case-insensitive and the name is a filesystem name, so it reaches
+        # the boundary spelled the way it was sent.
+        self.assertIntent("NEW Scratchpad", commands.NEW, "Scratchpad")
+
+    def test_a_name_that_is_not_a_name_still_parses(self):
+        # And is refused by config.create(), which is the same code that refuses it for
+        # `claude`. A second copy of that check here is how the two drift apart.
+        for name in ("../etc", "/tmp/x", ".ssh", "a/b"):
+            self.assertIntent("new " + name, commands.NEW, name)
+
+
 class TestTheFleetVerbs(Base):
     """SPEC.md §5 tier 2 — enough to not need a laptop to clean up."""
 
@@ -246,11 +289,17 @@ class TestTheContract(Base):
         self.assertIsInstance(got, tuple)
         self.assertEqual(tuple(got), (commands.START, "beacon", "fix it", None))
 
-    def test_the_verb_is_always_one_of_the_four(self):
-        for text in ("claude", "claude beacon", "ls", "stop 1", "stop all", "help", "", None,
-                     "garbage", "/start"):
-            self.assertIn(commands.parse(text).verb,
-                          (commands.START, commands.LIST, commands.STOP, commands.HELP))
+    def test_the_verb_is_always_one_of_the_five(self):
+        for text in ("claude", "claude beacon", "new scratchpad", "ls", "stop 1", "stop all",
+                     "help", "", None, "garbage", "/start"):
+            self.assertIn(commands.parse(text).verb, commands.VERBS)
+
+    def test_every_verb_is_one_telegram_will_offer(self):
+        # §5 registers these with BotFather's /setcommands. A verb the parser knows and the
+        # menu does not is one nobody on a phone will discover.
+        self.assertEqual(commands.VERBS,
+                         (commands.START, commands.NEW, commands.LIST, commands.STOP,
+                          commands.HELP))
 
     def test_nothing_makes_it_raise(self):
         """§7: the poll loop must survive every message anyone can send it.
@@ -262,6 +311,7 @@ class TestTheContract(Base):
         hostile = [
             None, 3, 3.5, True, b"claude beacon", ["claude"], {"text": "claude"}, object(),
             "claude " + "x" * 100000,            # Telegram's 4096 cap is on send, not receive.
+            "new", "new ../../etc", "new " + "y" * 100000,
             "claude beacon \x00\x1b[31mred",     # NUL and a raw ANSI escape.
             "claude beacon",              # nbsp: whitespace to split(), as it happens.
             "stop ²",                        # isdigit() is True here and int() raises.

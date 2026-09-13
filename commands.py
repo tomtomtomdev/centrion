@@ -16,6 +16,10 @@ Two rules the parser deliberately does not enforce, because something else enfor
   filesystem name and a prompt is English, and both reach their destination spelled the way
   they were sent (§9.9).
 
+`new <name>` is deliberately the same grammar as `claude <project>` and deliberately a
+different verb (§5, §15): the name is not checked here either, so `new ../etc` parses cleanly
+and `config.create()` refuses it through the very checks that refuse `claude ../etc`.
+
 The grammar is `verb [argument [rest]]` and everything unrecognised is `help` (§5), which makes
 one shape of bug worth naming: a message that *nearly* parses must never become a dangerous
 approximation of itself. `stop` on its own is the case that matters — one of its two readings
@@ -27,9 +31,10 @@ help is what was asked for.
 """
 import collections
 
-# The four intents, spelled as the words that produce them so a logged or printed intent reads
+# The five intents, spelled as the words that produce them so a logged or printed intent reads
 # back as the message that made it.
 START = "claude"      # §5 tier 1: start a session (or, with no project, list the projects).
+NEW = "new"           # §5 tier 1: make the directory first, then start a session in it.
 LIST = "ls"           # §5 tier 2: the live sessions.
 STOP = "stop"         # §5 tier 2: signal one runner, or all of them.
 HELP = "help"         # §5: and everything else.
@@ -38,7 +43,7 @@ HELP = "help"         # §5: and everything else.
 ALL = "all"
 
 #: What BotFather's /setcommands should carry (§5). The listener owns the descriptions.
-VERBS = (START, LIST, STOP, HELP)
+VERBS = (START, NEW, LIST, STOP, HELP)
 
 Intent = collections.namedtuple("Intent", "verb project prompt target")
 Intent.__new__.__defaults__ = (None, None, None)
@@ -76,11 +81,15 @@ def parse(text):
     verb = verb.split("@", 1)[0].lower()
     args = parts[1:]
 
-    if verb == START:
+    if verb in (START, NEW):
         if not args:
-            return Intent(START)                       # §5: answers with the list, starts nothing.
+            # §5: bare `claude` answers with the project list and starts nothing — one extra
+            # tap, and no session can begin in a repository nobody named. Bare `new` has no
+            # such answer available: every default it could pick is a directory nobody asked
+            # for, so it is help.
+            return Intent(START) if verb == START else _HELP
         prompt = args[1].rstrip() if len(args) > 1 else ""
-        return Intent(START, args[0], prompt or None)
+        return Intent(verb, args[0], prompt or None)
 
     if verb == STOP:
         if len(args) != 1:

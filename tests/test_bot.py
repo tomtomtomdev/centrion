@@ -216,9 +216,9 @@ class FakeSessions(bot.Sessions):
         self.unstoppable = set()  # runner pids that outlive a SIGKILL, per §9.11
         self.stopped = []         # (sid, grace) per stop(), so §9.11's nesting is assertable
 
-    def start(self, sid, name, cwd, project, chat_id, prompt=None):
+    def start(self, sid, name, cwd, project, chat_id, prompt=None, trust=False):
         self.started.append({"sid": sid, "name": name, "cwd": cwd, "project": project,
-                             "chat_id": chat_id, "prompt": prompt})
+                             "chat_id": chat_id, "prompt": prompt, "trust": trust})
         if self.fail is not None:
             raise self.fail
         # The record says what this session was actually asked for. It used to say `beacon`
@@ -2518,6 +2518,143 @@ class TestOldSessionsAreForgotten(Base):
 
     def test_the_day_is_the_number_the_spec_names(self):
         self.assertEqual(bot.RETAIN, 86400)
+
+
+class TestCreatingAProjectFromThePhone(Base):
+    """§5's `new`, slice 11. A directory that does not exist yet, from a phone.
+
+    The verb is the safety (§15): `claude beacn` is a typo and stays one, because a `claude`
+    that created what it could not find would turn every mistyped name into an empty repository
+    with a bypass-permissions session sitting in it. Everything below is about keeping that
+    line exactly where §5 put it — `new` refuses everything `claude` refuses, by the same code,
+    and creates nothing on any of them.
+    """
+
+    def created(self, name="scratchpad"):
+        return os.path.join(self.projects, name)
+
+    def test_it_creates_the_directory_and_starts_a_session_in_it(self):
+        tg = self.deliver(message("new scratchpad"))
+        self.assertTrue(os.path.isdir(self.created()))
+        self.assertEqual(len(self.sessions.started), 1)
+        self.assertEqual(self.sessions.started[0]["cwd"], self.created())
+        self.assertEqual(self.sessions.started[0]["project"], "scratchpad")
+        self.assertIn(LINK, tg.texts[0].splitlines())
+
+    def test_the_reply_says_what_it_created(self):
+        # The one thing this verb does that `claude` does not, and the phone is the only place
+        # it will ever be visible.
+        got = self.deliver(message("new scratchpad")).texts[0]
+        self.assertIn("created", got.lower())
+        self.assertIn(bot.tilde(self.created()), got)
+
+    def test_a_name_that_is_already_there_starts_a_session_and_says_so(self):
+        """Not an error: the directory is there, which is what was being asked for. But the
+        reply has to distinguish the two, or `new beacon` on an existing repository reads as
+        having made a fresh one."""
+        tg = self.deliver(message("new beacon"))
+        self.assertEqual(len(self.sessions.started), 1)
+        self.assertEqual(self.sessions.started[0]["cwd"], os.path.join(self.projects, "beacon"))
+        self.assertIn("already", tg.texts[0].lower())
+        self.assertNotIn("created", tg.texts[0].lower())
+
+    def test_a_refused_name_creates_nothing_and_answers_with_help(self):
+        for name in ("../etc", "/tmp/x", ".ssh", "a/b", "..", "."):
+            before = sorted(os.listdir(self.projects))
+            tg = self.deliver(message("new " + name))
+            self.assertEqual(sorted(os.listdir(self.projects)), before,
+                             "`new %s` left something behind" % name)
+            self.assertEqual(self.sessions.started, [], "`new %s` started a session" % name)
+            self.assertEqual(len(tg.sent), 1)
+            self.assertIn("beacon", tg.texts[0], "the refusal should carry the project list")
+
+    def test_nothing_is_created_outside_the_root(self):
+        # §10.4 from the other side: `new` is the first verb that *writes* to the filesystem,
+        # and the boundary is the same one or it is not a boundary.
+        outside = os.path.join(self.tmp, "Documents")
+        os.makedirs(outside)
+        self.deliver(message("new " + os.path.join(outside, "x")))
+        self.assertEqual(os.listdir(outside), [])
+        self.assertEqual(self.sessions.started, [])
+
+    def test_bare_new_creates_nothing(self):
+        before = sorted(os.listdir(self.projects))
+        tg = self.deliver(message("new"))
+        self.assertEqual(sorted(os.listdir(self.projects)), before)
+        self.assertEqual(self.sessions.started, [])
+        self.assertIn("beacon", tg.texts[0])
+
+    def test_two_in_one_batch_make_one_directory(self):
+        """One tap repeated on a phone. The second is not an error and not a second
+        directory — and with the cap at 2 they both get sessions, in the same place, which is
+        exactly the case §5's same-directory warning exists for."""
+        tg = self.deliver(message("new scratchpad", uid=1), message("new scratchpad", uid=2))
+        self.assertTrue(os.path.isdir(self.created()))
+        self.assertEqual(len(self.sessions.started), 2)
+        self.assertEqual(len(tg.sent), 2)
+        self.assertTrue(any("2nd session" in t for t in tg.texts),
+                        "two sessions in one directory and no warning: %r" % (tg.texts,))
+
+    def test_the_cap_applies_exactly_as_it_does_to_claude(self):
+        self.place("aa11aa", runner_pid=4001)
+        self.place("bb22bb", runner_pid=4002)
+        tg = self.deliver(message("new scratchpad"))
+        self.assertIn("already running", tg.texts[0])
+        self.assertEqual(self.sessions.started, [])
+        # And the directory is not made either: a session that cannot start is not a reason to
+        # leave an empty repository behind.
+        self.assertFalse(os.path.exists(self.created()))
+
+    def test_it_takes_a_prompt_like_claude_does(self):
+        self.deliver(message("new scratchpad write me a README"))
+        self.assertEqual(self.sessions.started[0]["prompt"], "write me a README")
+
+    def test_the_help_offers_the_verb(self):
+        """§5 puts `new` in tier 1, beside `claude`. A verb nobody can discover from the phone
+        is a verb that does not exist — and the whole argument for it being a separate word is
+        that somebody has to type it deliberately."""
+        got = self.deliver(message("help")).texts[0]
+        self.assertIn("new <name>", got)
+        self.assertIn("new", commands.VERBS)
+
+    def test_the_runner_is_told_it_may_answer_the_trust_dialog(self):
+        """§9.3, and the reason it is a flag rather than the runner's own idea: the argument
+        for answering is that this bot created the directory empty a second earlier, and the
+        runner is the only process that cannot know that."""
+        self.deliver(message("new scratchpad"))
+        self.assertTrue(self.sessions.started[0]["trust"])
+
+    def test_claude_never_tells_the_runner_that(self):
+        self.deliver(message("claude beacon"))
+        self.assertFalse(self.sessions.started[0]["trust"],
+                         "`claude` would answer the trust dialog for a directory it did not "
+                         "create — which is what the dialog is for")
+
+    def test_what_it_creates_the_project_list_then_offers(self):
+        self.deliver(message("new scratchpad"))
+        tg = self.deliver(message("claude"))
+        self.assertIn("scratchpad", tg.texts[0])
+
+    def test_the_directory_outlives_the_session(self):
+        # §12's run step in miniature: `new`, then `stop`, and the work is still there.
+        self.deliver(message("new scratchpad"))
+        sid = self.sessions.started[0]["sid"]
+        self.deliver(message("stop all"))
+        self.assertEqual(self.sessions.read(sid)["state"], session.ENDED, "it never stopped")
+        self.assertTrue(os.path.isdir(self.created()),
+                        "stopping the session removed the project")
+
+    def test_a_creation_that_fails_is_answered_rather_than_raised(self):
+        """§7: the poll loop survives everything. A read-only root, a full disk, a name the
+        filesystem will not take — the phone gets a sentence and the daemon keeps polling."""
+        os.chmod(self.projects, 0o500)
+        self.addCleanup(os.chmod, self.projects, 0o700)
+        tg = self.deliver(message("new scratchpad"))
+        self.assertEqual(len(tg.sent), 1)
+        self.assertEqual(self.sessions.started, [])
+        # The sentence, not the help text under it: §5 has the project list naming the root,
+        # which in the real config is `~/Projects` and here is a temporary directory.
+        self.assertNotIn(self.tmp, tg.texts[0].split("\n\n")[0], "the refusal leaked a path")
 
 
 if __name__ == "__main__":
