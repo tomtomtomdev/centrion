@@ -14,6 +14,10 @@ var/
 __pycache__/
 *.py[cod]
 
+# WINDOWS.md: the Windows venv (W5a's install.ps1 creates it) and throwaway spike scripts.
+.venv/
+scratch/
+
 # macOS
 .DS_Store
 

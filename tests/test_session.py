@@ -191,6 +191,136 @@ class TestTheUrlInARealTranscript(unittest.TestCase):
             self.assertEqual(session.extract_url("at " + url + " ok"), url)
 
 
+#: WINDOWS.md W0a: the same startup captured through ConPTY on the Windows box. ConPTY does
+#: not pass the program's bytes through — it re-renders from its own screen buffer and emits
+#: a diff as VT sequences of its own — so the Mac fixture proves nothing about what the
+#: scraper sees there. Absent until W0a captures it; skipped rather than failed until then,
+#: because the fixture is the output of that slice and not an input to it.
+FIXTURE_WIN = os.path.join(ROOT, "tests", "fixtures", "rc_startup_win.log")
+
+
+@unittest.skipUnless(os.path.exists(FIXTURE_WIN), "no Windows capture yet (WINDOWS.md W0a)")
+class TestTheWindowsCapture(unittest.TestCase):
+    """What ConPTY hands the runner, and whether the same Scrape reads it.
+
+    The link is not pinned to a constant the way CAPTURED is, because it is whatever session
+    the spike happened to start; the contract is that exactly one well-formed link is found,
+    and that it is the *same* one at every chunk size — the two ways ConPTY's re-rendering
+    could break the scraper are a URL interleaved with cursor moves (no match at all) and a
+    URL emitted twice in two redraws with a boundary in one of them (a different, truncated
+    match at some chunk size).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(FIXTURE_WIN, "rb") as fh:
+            cls.raw = fh.read()
+        cls.url = session.extract_url(cls.raw)
+
+    def test_the_fixture_is_a_real_conpty_transcript(self):
+        self.assertGreater(len(self.raw), 1000)
+        self.assertIn(b"\x1b[", self.raw, "no ANSI escapes — this is not a ConPTY capture")
+
+    def test_it_finds_exactly_one_link_in_the_whole_transcript(self):
+        self.assertIsNotNone(self.url, "no link in the Windows capture")
+        self.assertRegex(self.url, r"^https://claude\.ai/code/session_[A-Za-z0-9_-]+$")
+        clean = session.ANSI_RE.sub("", self.raw.decode("utf-8", "replace"))
+        self.assertEqual(len(set(session.URL_RE.findall(clean))), 1,
+                         "more than one distinct link — a redraw changed it")
+
+    def test_it_finds_the_same_link_however_conpty_chops_it_up(self):
+        for size in (1, 2, 3, 7, 16, 64, 137, 512, 4096):
+            scrape = session.Scrape()
+            found = None
+            for i in range(0, len(self.raw), size):
+                found = found or scrape.feed(self.raw[i:i + size])
+            self.assertEqual(found, self.url, "lost or changed the URL at chunk size %d" % size)
+
+    def test_it_does_not_invent_a_link_before_one_arrives(self):
+        cut = self.raw.find(b"claude.ai")
+        scrape = session.Scrape()
+        for i in range(0, cut, 64):
+            self.assertIsNone(scrape.feed(self.raw[i:i + 64]))
+
+
+#: W0a's first run, before the spike answered anything: the §9.3 dialog as ConPTY draws it,
+#: marker on `No, exit`. A fresh clone is untrusted, so on a new box the dialog is the first
+#: thing every session meets, not an edge case.
+TRUST_FIXTURE_WIN = os.path.join(ROOT, "tests", "fixtures", "trust_dialog_win.log")
+
+
+@unittest.skipUnless(os.path.exists(TRUST_FIXTURE_WIN) and os.path.exists(FIXTURE_WIN),
+                     "no Windows captures yet (WINDOWS.md W0a)")
+class TestTheWindowsTrustDialog(unittest.TestCase):
+    """session.Trust against ConPTY's rendering of the dialog, both halves.
+
+    `trust_dialog_win.log` stops at the panel: Trust must see it and press Down, and nothing
+    else, because the marker never moves in that capture. `rc_startup_win.log` is the whole
+    run — panel, the redraw after Down with the marker on `Yes`, then the link — so the same
+    Trust fed that stream must press Down and then Enter, in that order, once each.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(TRUST_FIXTURE_WIN, "rb") as fh:
+            cls.panel = fh.read()
+        with open(FIXTURE_WIN, "rb") as fh:
+            full = fh.read()
+        # The whole run began exactly as the panel capture did — same binary, same directory,
+        # same dialog — so what follows the common prefix is what ConPTY drew *after* Down.
+        assert full.startswith(cls.panel), "the two captures are not from the same startup"
+        cls.after_down = full[len(cls.panel):]
+
+    def drive(self, size, with_redraw):
+        """The runner's rhythm: output arrives in chunks, and a keystroke is answered by
+        whatever the terminal draws next. Feeding the whole run in one chunk would hand
+        Trust the post-Down redraw *before* it pressed Down, which no terminal does."""
+        trust = session.Trust()
+        keys = []
+        now = 0.0
+
+        def feed(chunk):
+            nonlocal now
+            key = trust.feed(chunk, now)
+            now += 1.0                       # every call is past SETTLE
+            if key is not None:
+                keys.append(key)
+
+        for i in range(0, len(self.panel), size):
+            feed(self.panel[i:i + size])
+        feed(b"")                            # the settle tick that produces Down
+        if with_redraw:
+            for i in range(0, len(self.after_down), size):
+                feed(self.after_down[i:i + size])
+            feed(b"")                        # the settle tick that produces Enter
+        return trust, keys
+
+    def test_the_panel_alone_gets_down_and_nothing_else(self):
+        trust, keys = self.drive(512, with_redraw=False)
+        self.assertEqual(keys, [session.DOWN])
+        self.assertEqual(trust.state, trust.ASKED)
+
+    def test_the_redraw_after_down_gets_enter(self):
+        trust, keys = self.drive(512, with_redraw=True)
+        self.assertEqual(keys, [session.DOWN, session.ENTER])
+        self.assertEqual(trust.state, trust.DONE)
+
+    @unittest.expectedFailure
+    def test_the_answer_does_not_depend_on_chunking(self):
+        """Fails today at 64 bytes and below, on both platforms — WINDOWS.md W3h.
+
+        Trust squeezes each chunk on its own, so an escape split across two chunks leaves
+        its tail in the text and breaks the phrase it lands in. Scrape carries a partial
+        escape to the next chunk for exactly this reason; Trust does not yet. The W0a spike
+        answered the dialog because it matched against everything accumulated, not chunk by
+        chunk. Expected to fail until W3h gives Trust the same carry; the decorator comes off
+        in that slice.
+        """
+        for size in (1, 16, 64, 128, 512):
+            _, keys = self.drive(size, with_redraw=True)
+            self.assertEqual(keys, [session.DOWN, session.ENTER], "chunk size %d" % size)
+
+
 class TestAChunkBoundaryInsideTheUrl(unittest.TestCase):
     """The failure this prevents is a *plausible* wrong answer, not an error."""
 

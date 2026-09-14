@@ -8,9 +8,13 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **plan only. Nothing here is built and nothing marked *verified*.** Every claim about
-Windows behaviour below is what the API documents or what is known from other ConPTY programs,
-and slice W0 exists to turn the ones that matter into facts before anything else is written.
+Status: **W0a, W0b and W0d done (2026-09-14); W0c next.** The go/no-go question is answered
+*go*: under a 200x50 ConPTY, `claude.exe --remote-control` printed its link 6.2 seconds after
+spawn, as one contiguous run, and today's `Scrape` finds it unmodified at every chunk size
+(`tests/fixtures/rc_startup_win.log`). Two Ctrl-C bytes on the ConPTY input ended it in 1.7
+seconds with exit status 0. Everything below that is not in §11's table is still plan, and the
+claims about Windows behaviour in it are what the API documents until a slice turns them into
+facts.
 
 Facts about this box (2026-09-14): Windows 11 Pro 22621, Python 3.12.10 with pip 25.0.1, no
 third-party packages installed (`pywinpty`, `psutil`, `pywin32` all absent). Claude Code
@@ -138,6 +142,21 @@ against it as well. The `Trust` matcher (whitespace stripped, per §9.3) is the 
 the two to need a new fixture, because ConPTY may place the option text with cursor jumps
 different from the Mac renderer's.
 
+*W0a, 2026-09-14 — both answered.* The URL was one contiguous run of bytes in the raw stream,
+one distinct link in the whole capture, found at every chunk size from 1 to 4096. The trust
+dialog came up too — a fresh clone is untrusted on this box, so it is the first thing every
+session meets — and ConPTY draws it with `CSI 4 G` column jumps that the squeeze removes, so
+`Trust` matches both the question and the moved marker unchanged (`trust_dialog_win.log` is
+the panel, and the bytes after it in `rc_startup_win.log` are the redraw after Down). One
+thing turned up that is *not* Windows-specific: `Trust` squeezes each chunk on its own and
+does not carry a partial escape to the next chunk the way `Scrape` does, so at chunk sizes of
+64 bytes and below the escape fragments land inside the phrase and nothing matches. The Mac
+gets away with it because 64 KB reads deliver the panel in a few pieces. W3h fixes it.
+
+Also learned: `pywinpty.PTY.read()` returns `str` (it decodes UTF-8 itself) and `write()`
+takes `str`. The runner's transcript must re-encode, and W3b's `Terminal.read` should return
+bytes so `pump`, `Scrape` and `Transcript` see one type on both platforms.
+
 **`terminate(pid, grace)`** — the runner keeps the job handle it created at spawn. Graceful
 first: write `\x03`, wait `SETTLE`, write `\x03` again, wait up to `grace` polling
 `pty.isalive()`. Then `win32job.TerminateJobObject(job, 1)`. Then close the pty. **The order is
@@ -194,11 +213,13 @@ error once, on purpose — the same first-run friction the Mac's `chmod 600` giv
 
 **5.2 — `claude_bin`.** `DEFAULT_CLAUDE_BIN = "~/.local/bin/claude"` becomes
 `shutil.which("claude")` on Windows, which today resolves to the winget `claude.exe`. The
-existence check stays; `os.access(X_OK)` goes (always true on Windows). The Mac note about
-"abspath, not realpath, because the symlink follows updates" has a Windows counterpart worth
-checking in W0: whether Claude Code's self-updater on Windows replaces the winget exe in place,
-or installs to `%USERPROFILE%\.local\bin\claude.exe` and leaves the winget one behind. If the
-latter, the default should prefer the `.local\bin` one when it exists.
+existence check stays; `os.access(X_OK)` goes (always true on Windows). *W0d, 2026-09-14:*
+this box has **both** — `%USERPROFILE%\.local\bin\claude.exe` is v2.1.231 from 2026-08-13 and
+stale, the winget one on `PATH` is v2.1.268, and `~/.claude.json` says `installMethod: native`,
+`autoUpdates: false`. So the `.local\bin` copy must *not* be preferred: `which` is the default,
+and the Mac's "abspath, not realpath" reasoning does not apply because there is no symlink to
+follow. With auto-updates off, upgrading is `winget upgrade Anthropic.ClaudeCode`, done by hand,
+and the runner picks up the new exe on its next spawn without a restart.
 
 **5.3 — `resolve()`.** Today's first rule is "the name is a name", because
 `os.path.join(root, "/etc")` is `/etc`. On Windows there are two more shapes of that trap:
@@ -531,6 +552,18 @@ written first and skip on the missing fixture.
   This is the runner's acceptance run; record the time-to-link in §11.
 - Test: Windows; Mac suite for the shared `pump` changes.
 
+**W3h — `Trust` carries a partial escape, like `Scrape`.** Portable; found by W0a.
+- Red: already written. `test_session.py::TestTheWindowsTrustDialog::
+  test_the_answer_does_not_depend_on_chunking` is decorated `@unittest.expectedFailure`
+  and fails at chunk sizes 64, 16 and 1. Remove the decorator; it is now the red test. Add the
+  same sweep against the Mac fixture in `TestTheTrustDialog` for the question half.
+- Green: give `Trust.feed` the carry `Scrape.feed` has — hold a trailing `\x1b...` fragment
+  (bounded by `CARRY_LIMIT`) and prepend it to the next chunk before squeezing. Same for a
+  split multi-byte character: use an incremental decoder as `Scrape` does, or squeeze bytes
+  through one shared helper.
+- Run: none.
+- Test: both platforms.
+
 ### W4 — the listener
 
 **W4a — `alive` and `started` via psutil.**
@@ -643,10 +676,11 @@ the Mac when the slice touched shared or posix code.
 
 | Slice | Status | Date | Commit | Suite (win · mac) | Run step showed / learned |
 |---|---|---|---|---|---|
-| W0a link out of ConPTY | todo | | | | |
-| W0b graceful exit | todo | | | | assertion: two `\x03` → `isalive()` false within `GRACE` |
+| — baseline before any slice | — | 2026-09-14 | 7a09f8d | 163 ran, 23 F, 18 E · not run | Windows: `test_bot` and `test_session` fail to import (`fcntl`); `test_config`'s 0600 tests and `test_projects` fail. Mac suite not run from this desk. |
+| W0a link out of ConPTY | done | 2026-09-14 | see W0a commit | 6 pass, 1 xfail (stubbed run, see note) · not run | **Go.** Link 6.2s after spawn, contiguous, one distinct link, found at every chunk size. Trust dialog met first (fresh clone is untrusted) and answered via ConPTY arrow keys — second fixture for free. `Trust` loses the dialog at chunks ≤64 bytes: new slice W3h. pywinpty I/O is `str`, not bytes. New tests run on Windows via `scratch\run_win_tests.py`, which stubs `fcntl`/`termios` until W1c; they run natively on the Mac. Full suite unchanged from baseline. |
+| W0b graceful exit | done | 2026-09-14 | — (scratch only) | — | Two `\x03` 0.4s apart: exit status 0 after 1.71s. One Ctrl-C alone was not tried; the pair is what §4 specifies. Job kill stays as the fallback, not the path. |
 | W0c child outlives parent under Task Scheduler | todo | | | | |
-| W0d `claude.exe` location after update | todo | | | | |
+| W0d `claude.exe` location after update | done | 2026-09-14 | see W0a commit | — | `which` → winget exe v2.1.268. `~\.local\bin\claude.exe` also present, v2.1.231, stale. `autoUpdates: false`, `installMethod: native`. §5.2 amended: do not prefer `.local\bin`. |
 | W1a `session_posix.py` | todo | | | | |
 | W1b `bot.py` through `procs` | todo | | | | |
 | W1c imports on Windows | todo | | | | count of tests newly skipped on win32: |
@@ -659,6 +693,7 @@ the Mac when the slice touched shared or posix code.
 | W3e Job Object and `terminate` | todo | | | | |
 | W3f stop marker | todo | | | | |
 | W3g `child_env`, runner acceptance run | todo | | | | time to link: |
+| W3h `Trust` carries a partial escape | red | 2026-09-14 | see W0a commit | | red test exists as an `expectedFailure`; fails at chunk sizes 64, 16, 1; passes at 128+ |
 | W4a `alive`/`started` via psutil | todo | | | | |
 | W4b `Sessions.stop` | todo | | | | |
 | W4c runner outlives listener | todo | | | | |
@@ -675,5 +710,18 @@ the Mac when the slice touched shared or posix code.
 
 ### Decisions changed by evidence
 
-Appended, dated, when a run step contradicts the plan above and a section was amended. Empty
-until W0.
+Appended, dated, when a run step contradicts the plan above and a section was amended.
+
+- **2026-09-14, W0d → §5.2.** The plan allowed for preferring `%USERPROFILE%\.local\bin\
+  claude.exe` if the self-updater installed there. It is there, and it is the *stale* one
+  (v2.1.231 against winget's v2.1.268); auto-updates are off. Default is `shutil.which`, full
+  stop.
+- **2026-09-14, W0a → new slice W3h.** `Trust` was assumed portable and untouched. It is
+  portable, but it drops the dialog at chunk sizes ≤64 bytes on any platform, because it does
+  not carry a partial escape across chunks. A red test is in place as an `expectedFailure`.
+- **2026-09-14, W0a → §4, W3b.** `pywinpty` reads and writes `str`, not bytes. `Terminal.read`
+  is specified to return bytes so the shared loop sees one type.
+- **2026-09-14, W0a → §9 ritual.** Until W1c, tests that import `session` cannot run natively
+  on Windows. `scratch\run_win_tests.py` stubs `fcntl`/`termios` so the portable classes can;
+  it is throwaway and W1c retires it. The full suite's Windows count stays at the baseline
+  until then, and that is recorded rather than hidden.
