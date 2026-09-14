@@ -687,9 +687,9 @@ the Mac when the slice touched shared or posix code.
 | — baseline before any slice | — | 2026-09-14 | 7a09f8d | 163 ran, 23 F, 18 E · not run | Windows: `test_bot` and `test_session` fail to import (`fcntl`); `test_config`'s 0600 tests and `test_projects` fail. Mac suite not run from this desk. |
 | W0a link out of ConPTY | done | 2026-09-14 | d6701b9 | 6 pass, 1 xfail (stubbed run, see note) · not run | **Go.** Link 6.2s after spawn, contiguous, one distinct link, found at every chunk size. Trust dialog met first (fresh clone is untrusted) and answered via ConPTY arrow keys — second fixture for free. `Trust` loses the dialog at chunks ≤64 bytes: new slice W3h. pywinpty I/O is `str`, not bytes. New tests run on Windows via `scratch\run_win_tests.py`, which stubs `fcntl`/`termios` until W1c; they run natively on the Mac. Full suite unchanged from baseline. |
 | W0b graceful exit | done | 2026-09-14 | — (scratch only) | — | Two `\x03` 0.4s apart: exit status 0 after 1.71s. One Ctrl-C alone was not tried; the pair is what §4 specifies. Job kill stays as the fallback, not the path. |
-| W0c child outlives parent under Task Scheduler | done | 2026-09-14 | see W0c commit | 3 pass (`tests.test_procs_win`) · n/a | **Both children survive; breakaway is refused.** Under a scheduled task the parent is in a job with `LimitFlags = 0`: `CREATE_BREAKAWAY_FROM_JOB` → "Access is denied" and no child at all. `Stop-ScheduledTask` killed the parent (task was Running) and left the flagless control *and* the `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP` child alive. §3, §6 and W4c amended: no breakaway, no retry. Round 1's "parent_in_job: false" was a bad ctypes call (no `wintypes`), corrected in round 2. |
+| W0c child outlives parent under Task Scheduler | done | 2026-09-14 | 0c549c6 | 3 pass (`tests.test_procs_win`) · n/a | **Both children survive; breakaway is refused.** Under a scheduled task the parent is in a job with `LimitFlags = 0`: `CREATE_BREAKAWAY_FROM_JOB` → "Access is denied" and no child at all. `Stop-ScheduledTask` killed the parent (task was Running) and left the flagless control *and* the `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP` child alive. §3, §6 and W4c amended: no breakaway, no retry. Round 1's "parent_in_job: false" was a bad ctypes call (no `wintypes`), corrected in round 2. |
 | W0d `claude.exe` location after update | done | 2026-09-14 | d6701b9 | — | `which` → winget exe v2.1.268. `~\.local\bin\claude.exe` also present, v2.1.231, stale. `autoUpdates: false`, `installMethod: native`. §5.2 amended: do not prefer `.local\bin`. |
-| W1a `session_posix.py` | todo | | | | |
+| W1a `session_posix.py` | green · Mac pending | 2026-09-14 | see W1a commit | 29 pass, 1 xfail (stubbed run) · **not run** | `spawn`/`_reaped`/`_signal`/`terminate`/`detach` moved verbatim; `session.spawn`/`terminate` stay as wrappers because their defaults (`ROWS`/`COLS`, `GRACE`) are session.py's constants; `detach`/`_reaped` are the platform's. Signal setup went through `procs.catch_signals`. `alive()` added for W1b; `started()` raises `NotImplementedError("W1b")`. On Windows `session.py` now fails on `session_win` instead of `fcntl` — same count. **Mac hand-run and Mac suite not done from this desk; see "Pending on the Mac".** |
 | W1b `bot.py` through `procs` | todo | | | | |
 | W1c imports on Windows | todo | | | | count of tests newly skipped on win32: |
 | W2a `claude_bin` default, drive rule | todo | | | | |
@@ -715,6 +715,19 @@ the Mac when the slice touched shared or posix code.
 | retention day 1 on NTFS | — | | | | |
 | first sleep/wake with a session open | — | | | | |
 | first self-update under a live runner | — | | | | |
+
+### Pending on the Mac
+
+The ritual's step 5 says shared and posix changes are tested on the Mac *before* the commit.
+This work is being done from the Windows box, so that step is a debt, listed here and cleared
+by running each item on the Mac and moving its row to `done`. Nothing below is considered
+verified until then, and W1c's first Windows-green run is not a substitute.
+
+| Slice | What to run on the Mac | Expect |
+|---|---|---|
+| W1a | `/usr/bin/python3 -m compileall -q .` | clean — 3.9 syntax; no 3.9 on the Windows box to check with |
+| W1a | `/usr/bin/python3 -m unittest -q` | green; the count is the pre-W0 count plus the new `TestThePlatformSeam` (6) and fixture tests (7, one xfail) |
+| W1a | `python3 session.py --foreground --cwd <project> --name w1a` | a link, and Ctrl-C leaves `meta.json` at `ended` — the signal path now goes through `session_posix.catch_signals` |
 
 ### Decisions changed by evidence
 

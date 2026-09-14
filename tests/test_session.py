@@ -37,6 +37,7 @@ import threading
 import time
 import shutil
 import unittest
+from unittest import mock
 import fcntl
 
 import session
@@ -189,6 +190,62 @@ class TestTheUrlInARealTranscript(unittest.TestCase):
         for ident in ("01HJK2Lh42N7JbfMGExJkpTF", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "aB9_x-Y"):
             url = "https://claude.ai/code/session_" + ident
             self.assertEqual(session.extract_url("at " + url + " ok"), url)
+
+
+class TestThePlatformSeam(unittest.TestCase):
+    """WINDOWS.md §2, W1a: the process and terminal mechanisms live behind `session.procs`.
+
+    Everything under `Runner` that touches a pty or a process goes through one module chosen
+    by `sys.platform`, and both modules export the same names. The names are the contract —
+    `session_win.py` (W1c onwards) has to fill in every one of them, and a name missing on
+    one side is an AttributeError at the worst moment, inside a runner that has already
+    written `starting`.
+    """
+
+    SURFACE = ("spawn", "terminate", "detach", "alive", "started", "spawn_flags", "Lock",
+               "request_stop", "stop_requested", "catch_signals", "restore_signals")
+
+    def test_the_posix_module_has_the_whole_surface(self):
+        import session_posix
+        for name in self.SURFACE:
+            self.assertTrue(hasattr(session_posix, name), "session_posix.%s is missing" % name)
+
+    def test_session_exposes_the_chosen_module_as_procs(self):
+        for name in self.SURFACE:
+            self.assertTrue(hasattr(session.procs, name), "session.procs.%s is missing" % name)
+
+    def test_the_module_is_chosen_by_platform(self):
+        # Every non-Windows platform gets the posix module; the win32 branch is W1c's.
+        for platform in ("darwin", "linux", "freebsd13"):
+            with mock.patch.object(sys, "platform", platform):
+                self.assertEqual(session._platform().__name__, "session_posix", platform)
+
+    def test_the_old_names_still_resolve_on_session(self):
+        # bot.py and these tests call session.spawn / terminate / detach directly. detach and
+        # _reaped are the platform's functions; spawn and terminate are wrappers because their
+        # defaults are this module's constants.
+        for name in ("detach", "_reaped"):
+            self.assertIs(getattr(session, name), getattr(session.procs, name), name)
+        for name in ("spawn", "terminate"):
+            self.assertTrue(callable(getattr(session, name)), name)
+
+    def test_spawn_and_terminate_forward_with_the_module_defaults(self):
+        with mock.patch.object(session.procs, "spawn", return_value=(1, 2)) as spawn:
+            self.assertEqual(session.spawn(["x"], "/tmp", {}), (1, 2))
+            spawn.assert_called_once_with(["x"], "/tmp", {}, session.ROWS, session.COLS)
+        with mock.patch.object(session.procs, "terminate", return_value=True) as terminate:
+            self.assertTrue(session.terminate(4242))
+            terminate.assert_called_once_with(4242, session.GRACE, session._stderr)
+
+    def test_the_posix_no_ops_answer_as_the_mac_needs(self):
+        import session_posix
+        self.assertEqual(session_posix.spawn_flags(), {})
+        self.assertTrue(session_posix.Lock(os.path.join(tempfile.gettempdir(), "x")).take())
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        session_posix.request_stop(d)
+        self.assertFalse(session_posix.stop_requested(d),
+                         "posix stops runners with SIGTERM; the marker is W3f's, not W1a's")
 
 
 #: WINDOWS.md W0a: the same startup captured through ConPTY on the Windows box. ConPTY does
