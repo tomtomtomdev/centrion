@@ -32,15 +32,22 @@ import struct
 import subprocess
 import sys
 import tempfile
-import termios
 import threading
 import time
 import shutil
 import unittest
 from unittest import mock
-import fcntl
 
 import session
+
+#: WINDOWS.md W1c. The tests that fork, open a pty or send a signal are the Mac's — they test
+#: session_posix.py against a real terminal — and are skipped on Windows, where their two
+#: modules do not exist. The portable half of this file runs on both.
+POSIX = sys.platform != "win32"
+if POSIX:
+    import fcntl
+    import termios
+posix_only = unittest.skipUnless(POSIX, "forks, opens a pty or sends a signal: session_posix")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE = os.path.join(ROOT, "tests", "fixtures", "rc_startup.log")

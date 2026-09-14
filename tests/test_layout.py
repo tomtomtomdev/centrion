@@ -13,6 +13,7 @@ Stdlib only, no network: `/usr/bin/python3 -m unittest discover -s tests -t . -v
 """
 import os
 import subprocess
+import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -26,6 +27,32 @@ def ignored(path):
         raise AssertionError(
             "git check-ignore failed (exit %d) — is %s a git repository?" % (r.returncode, ROOT))
     return r.returncode == 0
+
+
+class TestEverythingImportsHere(unittest.TestCase):
+    """WINDOWS.md W1c: every module imports on the platform the tests are running on.
+
+    Until W1c, `import session` on Windows died on `fcntl` before a single portable test could
+    run, and the suite reported two import errors instead of a pass/skip count anybody could
+    read. The seam (W1a, W1b) is what makes this possible; this test is what makes it stay
+    true — a Unix-only import creeping back into a shared module fails here first, on either
+    platform.
+    """
+
+    MODULES = ("commands", "config", "telegram", "session", "bot")
+
+    def test_imports_on_this_platform(self):
+        import importlib
+        for name in self.MODULES:
+            try:
+                importlib.import_module(name)
+            except ImportError as e:
+                self.fail("%s does not import on %s: %s" % (name, sys.platform, e))
+
+    def test_the_platform_module_is_the_right_one(self):
+        import session
+        expected = "session_win" if sys.platform == "win32" else "session_posix"
+        self.assertEqual(session.procs.__name__, expected)
 
 
 class TestRepositoryExists(unittest.TestCase):
