@@ -8,13 +8,14 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **W0a, W0b and W0d done (2026-09-14); W0c next.** The go/no-go question is answered
-*go*: under a 200x50 ConPTY, `claude.exe --remote-control` printed its link 6.2 seconds after
-spawn, as one contiguous run, and today's `Scrape` finds it unmodified at every chunk size
+Status: **W0 complete (2026-09-14); W1a next.** The go/no-go question is answered *go*: under
+a 200x50 ConPTY, `claude.exe --remote-control` printed its link 6.2 seconds after spawn, as one
+contiguous run, and today's `Scrape` finds it unmodified at every chunk size
 (`tests/fixtures/rc_startup_win.log`). Two Ctrl-C bytes on the ConPTY input ended it in 1.7
-seconds with exit status 0. Everything below that is not in §11's table is still plan, and the
-claims about Windows behaviour in it are what the API documents until a slice turns them into
-facts.
+seconds with exit status 0. A child of a scheduled task survives the task being stopped, with
+no breakaway flag — which is refused there anyway. Everything below that is not in §11's table
+is still plan, and the claims about Windows behaviour in it are what the API documents until a
+slice turns them into facts.
 
 Facts about this box (2026-09-14): Windows 11 Pro 22621, Python 3.12.10 with pip 25.0.1, no
 third-party packages installed (`pywinpty`, `psutil`, `pywin32` all absent). Claude Code
@@ -95,7 +96,7 @@ Windows Update cannot break at 3am.
 | Graceful stop | `SIGTERM` to claude | **write `\x03` to the ConPTY, wait `GRACE`, then `TerminateJobObject`** | ConPTY turns a 0x03 on its input into a CTRL_C_EVENT for the attached console. Claude Code asks for a second Ctrl-C to confirm exit, so send it twice with a short gap. Hard kill via the job if it is still there. |
 | Listener → runner stop | `SIGTERM` to runner | **a `stop` marker file in the session directory**, polled every `TICK` | Windows cannot deliver a catchable signal to another process. §2 already has the two processes talking only through files, so this is the design extended rather than a new channel. Fallback after `STOP_GRACE`: `TerminateProcess` on the runner, and the job takes claude with it. |
 | Liveness | `kill(pid, 0)` + `/bin/ps lstart` | **`psutil.pid_exists` + `psutil.Process(pid).create_time()`** | Both halves of §4's pid-reuse guard in two calls, no `ps` to parse. `psutil` is a compiled wheel, available for 3.12. |
-| Detach | `os.setsid()` in the runner | **`Popen(creationflags=DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP \| CREATE_BREAKAWAY_FROM_JOB)`** in the listener | The listener's supervisor may put it in a job of its own (Task Scheduler does); `BREAKAWAY` is what stops the runner dying with the listener. **This is the single riskiest claim in the plan** — see W0. |
+| Detach | `os.setsid()` in the runner | **`Popen(creationflags=DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP)`** in the listener — and **not** `CREATE_BREAKAWAY_FROM_JOB` | *W0c, verified 2026-09-14:* Task Scheduler does put the task in a job, with `LimitFlags = 0` — so `BREAKAWAY` is refused with "Access is denied" and the runner would never start. It is also unnecessary: `Stop-ScheduledTask` terminated the parent and left both a flagless child and a detached child running. The runner survives the listener on Windows by default; the two remaining flags give it no shared console and no inherited Ctrl-C. |
 | Lock | `lockf` on fd 9 across an `exec` | **a named mutex, `Local\centrion-<sha1 of config path>`**, taken in `bot.py --serve` before the first `getUpdates` | The kernel releases a mutex when its owner dies, so like `lockf` there is no stale lock to clear. No shell, no inherited fd, and so no equivalent of §8's "the runner must close fd 9" trap — child processes do not inherit a mutex handle unless asked to. |
 | Supervision | launchd `KeepAlive` + `RunAtLoad` | **Task Scheduler, at-logon trigger, running `windows\bot.cmd`, which is a restart loop** | See §7. Task Scheduler's own restart-on-failure is capped and slow; a ten-line loop in the wrapper is the honest `KeepAlive`. |
 | Config secrecy | `stat` mode 0600 | **DACL check**: refuse if any ACE grants `Everyone`, `Users`, or `Authenticated Users` | See §5.1. |
@@ -250,11 +251,14 @@ the runner's `GRACE` plus the two Ctrl-C settles, or the listener kills a runner
 halfway through ending claude cleanly.
 
 **`Sessions.start()`** — `Popen(argv, stdin=DEVNULL, cwd=HERE, close_fds=True,
-creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB)`.
-`CREATE_BREAKAWAY_FROM_JOB` raises if the listener's job forbids breakaway; catch that and
-retry without the flag, logging it — a runner that dies with the listener is worse than one
-that does not, but a runner that never starts is worse still. W0 establishes which case Task
-Scheduler puts us in. `reap()` stays: `Popen.poll()` works on Windows.
+creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)`. No `CREATE_BREAKAWAY_FROM_JOB`
+and no retry logic: W0c showed the scheduler's job refuses breakaway outright, and showed the
+runner does not need it — a child of a scheduled task survives the task being stopped. The
+runner therefore stays *inside* the scheduler's job for its life. That is harmless today
+(`LimitFlags = 0`, no kill-on-close) and is the assumption W5c re-verifies with a real
+session: if a Windows update ever gives that job `KILL_ON_JOB_CLOSE`, every session dies with
+the listener, and the fix at that point is to spawn the runner through a second scheduled task
+or WMI rather than `Popen`. `reap()` stays: `Popen.poll()` works on Windows.
 
 **The lock** — moves from `bot.sh` into `serve()`, before `Telegram()` is constructed, so a
 second copy is refused before its first `getUpdates` (§7's 409 is mutual). On the Mac the lock
@@ -584,9 +588,13 @@ written first and skip on the missing fixture.
 - Test: both platforms.
 
 **W4c — the runner outlives the listener.**
-- Red: W0c's test, now expected to pass, plus `test_start_retries_without_breakaway` when
-  `Popen` raises `PermissionError` with the flag set.
-- Green: `spawn_flags()` on win32; the fallback in `start()`.
+- Red: W0c's tests already pass from a console; the new red is
+  `test_bot.py::test_start_uses_the_platform_flags` (portable, fake `procs`) asserting
+  `Popen` is called with `procs.spawn_flags()`, and `test_procs_win.py::
+  test_spawn_flags_exclude_breakaway` asserting the real `spawn_flags()` matches W0c's
+  finding. No retry logic — W0c removed the need for it.
+- Green: `spawn_flags()` on win32 returns `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`;
+  `start()` passes it through.
 - Run: from a console, `python bot.py --serve`, start a session from the phone, Ctrl-C the
   listener, `tasklist` shows the runner and `claude.exe` still there; restart the listener
   and `ls` shows the session as live, same pids.
@@ -677,10 +685,10 @@ the Mac when the slice touched shared or posix code.
 | Slice | Status | Date | Commit | Suite (win · mac) | Run step showed / learned |
 |---|---|---|---|---|---|
 | — baseline before any slice | — | 2026-09-14 | 7a09f8d | 163 ran, 23 F, 18 E · not run | Windows: `test_bot` and `test_session` fail to import (`fcntl`); `test_config`'s 0600 tests and `test_projects` fail. Mac suite not run from this desk. |
-| W0a link out of ConPTY | done | 2026-09-14 | see W0a commit | 6 pass, 1 xfail (stubbed run, see note) · not run | **Go.** Link 6.2s after spawn, contiguous, one distinct link, found at every chunk size. Trust dialog met first (fresh clone is untrusted) and answered via ConPTY arrow keys — second fixture for free. `Trust` loses the dialog at chunks ≤64 bytes: new slice W3h. pywinpty I/O is `str`, not bytes. New tests run on Windows via `scratch\run_win_tests.py`, which stubs `fcntl`/`termios` until W1c; they run natively on the Mac. Full suite unchanged from baseline. |
+| W0a link out of ConPTY | done | 2026-09-14 | d6701b9 | 6 pass, 1 xfail (stubbed run, see note) · not run | **Go.** Link 6.2s after spawn, contiguous, one distinct link, found at every chunk size. Trust dialog met first (fresh clone is untrusted) and answered via ConPTY arrow keys — second fixture for free. `Trust` loses the dialog at chunks ≤64 bytes: new slice W3h. pywinpty I/O is `str`, not bytes. New tests run on Windows via `scratch\run_win_tests.py`, which stubs `fcntl`/`termios` until W1c; they run natively on the Mac. Full suite unchanged from baseline. |
 | W0b graceful exit | done | 2026-09-14 | — (scratch only) | — | Two `\x03` 0.4s apart: exit status 0 after 1.71s. One Ctrl-C alone was not tried; the pair is what §4 specifies. Job kill stays as the fallback, not the path. |
-| W0c child outlives parent under Task Scheduler | todo | | | | |
-| W0d `claude.exe` location after update | done | 2026-09-14 | see W0a commit | — | `which` → winget exe v2.1.268. `~\.local\bin\claude.exe` also present, v2.1.231, stale. `autoUpdates: false`, `installMethod: native`. §5.2 amended: do not prefer `.local\bin`. |
+| W0c child outlives parent under Task Scheduler | done | 2026-09-14 | see W0c commit | 3 pass (`tests.test_procs_win`) · n/a | **Both children survive; breakaway is refused.** Under a scheduled task the parent is in a job with `LimitFlags = 0`: `CREATE_BREAKAWAY_FROM_JOB` → "Access is denied" and no child at all. `Stop-ScheduledTask` killed the parent (task was Running) and left the flagless control *and* the `DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP` child alive. §3, §6 and W4c amended: no breakaway, no retry. Round 1's "parent_in_job: false" was a bad ctypes call (no `wintypes`), corrected in round 2. |
+| W0d `claude.exe` location after update | done | 2026-09-14 | d6701b9 | — | `which` → winget exe v2.1.268. `~\.local\bin\claude.exe` also present, v2.1.231, stale. `autoUpdates: false`, `installMethod: native`. §5.2 amended: do not prefer `.local\bin`. |
 | W1a `session_posix.py` | todo | | | | |
 | W1b `bot.py` through `procs` | todo | | | | |
 | W1c imports on Windows | todo | | | | count of tests newly skipped on win32: |
@@ -693,7 +701,7 @@ the Mac when the slice touched shared or posix code.
 | W3e Job Object and `terminate` | todo | | | | |
 | W3f stop marker | todo | | | | |
 | W3g `child_env`, runner acceptance run | todo | | | | time to link: |
-| W3h `Trust` carries a partial escape | red | 2026-09-14 | see W0a commit | | red test exists as an `expectedFailure`; fails at chunk sizes 64, 16, 1; passes at 128+ |
+| W3h `Trust` carries a partial escape | red | 2026-09-14 | d6701b9 | | red test exists as an `expectedFailure`; fails at chunk sizes 64, 16, 1; passes at 128+ |
 | W4a `alive`/`started` via psutil | todo | | | | |
 | W4b `Sessions.stop` | todo | | | | |
 | W4c runner outlives listener | todo | | | | |
@@ -721,6 +729,11 @@ Appended, dated, when a run step contradicts the plan above and a section was am
   not carry a partial escape across chunks. A red test is in place as an `expectedFailure`.
 - **2026-09-14, W0a → §4, W3b.** `pywinpty` reads and writes `str`, not bytes. `Terminal.read`
   is specified to return bytes so the shared loop sees one type.
+- **2026-09-14, W0c → §3, §6, W4c.** The plan called `CREATE_BREAKAWAY_FROM_JOB` "the single
+  riskiest claim" and planned a retry without it. Measured: Task Scheduler's job has
+  `LimitFlags = 0`, breakaway is refused, and children survive the task being stopped without
+  it. The flag is removed, the retry is removed, and the runner's survival is now a property
+  of the scheduler's job having no kill-on-close — which W5c re-checks with a real session.
 - **2026-09-14, W0a → §9 ritual.** Until W1c, tests that import `session` cannot run natively
   on Windows. `scratch\run_win_tests.py` stubs `fcntl`/`termios` so the portable classes can;
   it is throwaway and W1c retires it. The full suite's Windows count stays at the baseline
