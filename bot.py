@@ -48,7 +48,6 @@ is the only thing here that sends without being asked — a session whose runner
 (§9.12) a session whose link turned up an hour after anyone was still waiting for it.
 """
 import argparse
-import errno
 import os
 import re
 import shutil
@@ -62,9 +61,19 @@ import config
 import session
 import telegram
 
+#: The platform's process mechanisms — WINDOWS.md §2, §6. Every question this file asks about
+#: a process (is that pid alive, when did it start, how is a runner started so that it
+#: outlives me, am I the only listener) goes through here, and session.py chose the module.
+procs = session.procs
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 VAR = os.path.join(HERE, "var")
 OFFSET = os.path.join(VAR, "offset")
+#: The single-instance lock (§8). On the Mac launchd/bot.sh holds a `lockf` on this file
+#: before python starts and `procs.Lock` has nothing to do; on Windows the mutex is named
+#: after it and taken in serve(). One path, spelled once, so the two never guard different
+#: things.
+LOCK = os.path.join(VAR, ".bot.lock")
 
 #: §7: drop any message whose `date` predates daemon start by more than this.
 STALE_AFTER = 120
@@ -284,34 +293,12 @@ def ordinal(n):
     return "%d%s" % (n, {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th"))
 
 
-def process_started(pid):
-    """When that pid's process started, in epoch seconds, or None if there is no such process.
-
-    §4 asks for this by name: `pid reuse is theoretically possible between reboots; started is
-    in the record, so compare it against the process start time before trusting a pid that is
-    alive.` It is not an exotic case here — pids after a reboot are four-digit numbers handed
-    out within a minute of login, and every record on disk names one.
-
-    `ps` because macOS has no /proc and the alternative is a ctypes sysctl against a
-    kinfo_proc layout, which is a great deal of fragile arithmetic to avoid one subprocess on
-    a pass that runs at most a handful of times every fifty seconds. §9.6 also applies: this
-    box has no third-party packages and is not getting one for this.
-    """
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return None
-    try:
-        out = subprocess.check_output(["/bin/ps", "-o", "lstart=", "-p", str(pid)],
-                                      stderr=subprocess.DEVNULL)
-    except (subprocess.CalledProcessError, OSError):
-        return None
-    text = out.decode("ascii", "replace").strip()
-    try:
-        # `Sun Sep 13 09:10:27 2026`, in the C locale ps always answers in.
-        return time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y"))
-    except (ValueError, OverflowError):
-        return None
+#: When that pid's process started, in epoch seconds, or None if there is no such process.
+#: §4 asks for this by name: `pid reuse is theoretically possible between reboots; started is
+#: in the record, so compare it against the process start time before trusting a pid that is
+#: alive.` The mechanism — `/bin/ps lstart` on the Mac, psutil on Windows — is the platform's
+#: (session_posix.started); the comparison against the record is `Sessions.alive`'s.
+process_started = procs.started
 
 
 class Sessions:
@@ -374,8 +361,11 @@ class Sessions:
         # nothing to quote for (§10). stdin is /dev/null because the runner has a terminal of
         # its own for the session and no use for launchd's; stdout and stderr are inherited, so
         # the runner's log lines land in var/bot.log beside the listener's (§14).
+        # `spawn_flags()` is empty on the Mac — the runner detaches itself with setsid() — and
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP on Windows (WINDOWS.md §6).
         with open(os.devnull, "rb") as devnull:
-            child = subprocess.Popen(argv, stdin=devnull, cwd=HERE, close_fds=True)
+            child = subprocess.Popen(argv, stdin=devnull, cwd=HERE, close_fds=True,
+                                     **procs.spawn_flags())
         self.children.append(child)
         return child.pid
 
@@ -445,15 +435,11 @@ class Sessions:
         pid = record.get("runner_pid")
         if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
             return False
-        try:
-            os.kill(pid, 0)
-        except OverflowError:
+        # `kill(pid, 0)` on the Mac, with EPERM counted as alive — a process that belongs to
+        # someone else is there (§9.11); psutil on Windows. The platform answers "is there
+        # something at this pid"; the start-time check below answers "is it ours".
+        if not procs.alive(pid):
             return False
-        except OSError as e:
-            # EPERM is not death: it means the process is there and belongs to someone else.
-            # session.py's _reaped() draws the same line for the same reason (§9.11).
-            if e.errno != errno.EPERM:
-                return False
 
         started = record.get("started")
         if isinstance(started, bool) or not isinstance(started, (int, float)):
@@ -462,7 +448,7 @@ class Sessions:
             # that does is not: `ls` is the only view of a bypass-permissions session this
             # machine offers, and `stop` can only reach what `ls` can see.
             return True
-        began = process_started(pid)
+        began = procs.started(pid)
         if began is None:
             return True              # it answered kill(0) a moment ago; ps losing a race is
         return began <= started + PID_REUSE_SLACK        # not evidence of anything
@@ -1264,6 +1250,13 @@ def serve(cfg=None, tg=None):
     """
     cfg = cfg or config.load()
     os.makedirs(VAR, exist_ok=True)
+    # Before the first getUpdates, because a 409 is mutual (§7): the copy that loses the race
+    # takes the working one down with it. On the Mac this is always True — bot.sh already
+    # holds the lockf — and on Windows it is the mutex (WINDOWS.md §6).
+    if not procs.Lock(LOCK).take():
+        log("another centrion already holds %s — this copy exits rather than 409ing the one "
+            "that is working (SPEC.md §7)" % tilde(LOCK))
+        return 0
     tg = tg or telegram.Telegram(cfg.bot_token, log=log)
     listener = Listener(cfg, tg)
     log("centrion listening · %d allowed chat(s) · root %s · max_sessions %d · offset %s"

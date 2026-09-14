@@ -22,6 +22,7 @@ import fcntl
 import os
 import signal
 import struct
+import subprocess
 import sys
 import termios
 import time
@@ -176,9 +177,32 @@ def alive(pid):
 def started(pid):
     """When that pid's process started, in epoch seconds, or None if there is no such process.
 
-    Filled in by W1b, which moves bot.process_started() here. Until then bot.py keeps its own.
+    SPEC.md §4 asks for this by name: `pid reuse is theoretically possible between reboots;
+    started is in the record, so compare it against the process start time before trusting a
+    pid that is alive.` It is not an exotic case — pids after a reboot are four-digit numbers
+    handed out within a minute of login, and every record on disk names one.
+
+    `ps` because macOS has no /proc and the alternative is a ctypes sysctl against a
+    kinfo_proc layout, which is a great deal of fragile arithmetic to avoid one subprocess on
+    a pass that runs at most a handful of times every fifty seconds. §9.6 also applies: the
+    Mac has no third-party packages and is not getting one for this. (Moved from bot.py in
+    W1b; the Windows answer is psutil, in session_win.py.)
     """
-    raise NotImplementedError("W1b")
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    try:
+        out = subprocess.check_output(["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                                      stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    text = out.decode("ascii", "replace").strip()
+    try:
+        # `Sun Sep 13 09:10:27 2026`, in the C locale ps always answers in.
+        return time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y"))
+    except (ValueError, OverflowError):
+        return None
 
 
 def detach():

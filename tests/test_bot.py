@@ -62,6 +62,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 import bot
 import commands
@@ -1512,6 +1513,102 @@ class TestTheLaunchdInstall(unittest.TestCase):
         for name in ("DISABLE_TELEMETRY", "DO_NOT_TRACK", "DISABLE_GROWTHBOOK",
                      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "ANTHROPIC_API_KEY"):
             self.assertNotIn(name, env)
+
+
+class TestTheListenerUsesThePlatformSeam(unittest.TestCase):
+    """WINDOWS.md §6, W1b: every process question bot.py asks goes through `session.procs`.
+
+    The listener has four such questions — is that pid alive, when did it start, how do I
+    start a runner so it outlives me, and am I the only listener — and on the Mac the answers
+    are `kill(0)`, `/bin/ps`, nothing (the runner detaches itself) and nothing (bot.sh holds
+    the lock). Each gets a Windows answer in W4. These tests pin the seam, with fakes, so the
+    real-process tests elsewhere in this file stay about the Mac's behaviour.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.sessions = bot.Sessions(root=self.dir, log=lambda *_: None)
+
+    def record(self, **over):
+        rec = {"runner_pid": 4242, "started": int(time.time()) - 10}
+        rec.update(over)
+        return rec
+
+    def test_alive_asks_the_platform_and_then_checks_the_start_time(self):
+        with mock.patch.object(bot.procs, "alive", return_value=True) as alive, \
+             mock.patch.object(bot.procs, "started", return_value=time.time() - 20) as started:
+            self.assertTrue(self.sessions.alive(self.record()))
+        alive.assert_called_once_with(4242)
+        started.assert_called_once_with(4242)
+
+    def test_a_pid_the_platform_says_is_gone_is_gone(self):
+        with mock.patch.object(bot.procs, "alive", return_value=False), \
+             mock.patch.object(bot.procs, "started") as started:
+            self.assertFalse(self.sessions.alive(self.record()))
+        started.assert_not_called()
+
+    def test_a_pid_that_started_after_the_record_is_somebody_else(self):
+        # §4's pid-reuse guard, unchanged in meaning: the platform says when the process
+        # began, bot.py says whether that is too late to be the runner.
+        rec = self.record(started=1000)
+        with mock.patch.object(bot.procs, "alive", return_value=True), \
+             mock.patch.object(bot.procs, "started", return_value=1000 + bot.PID_REUSE_SLACK + 1):
+            self.assertFalse(self.sessions.alive(rec))
+        with mock.patch.object(bot.procs, "alive", return_value=True), \
+             mock.patch.object(bot.procs, "started", return_value=1000 + bot.PID_REUSE_SLACK):
+            self.assertTrue(self.sessions.alive(rec))
+
+    def test_the_type_guard_never_reaches_the_platform(self):
+        # kill(0, sig) is this process's group and kill(-1, sig) is every process this user
+        # owns; on Windows pid 0 and pid 4 are the idle and System processes. Neither side
+        # gets asked about a pid that is not a positive int.
+        with mock.patch.object(bot.procs, "alive") as alive:
+            for bad in (0, -1, True, None, "4242", 4242.0):
+                self.assertFalse(self.sessions.alive(self.record(runner_pid=bad)), repr(bad))
+        alive.assert_not_called()
+
+    def test_process_started_is_the_platforms(self):
+        self.assertIs(bot.process_started, bot.procs.started)
+
+    def test_stop_goes_through_session_terminate_with_the_nested_grace(self):
+        # §9.11: a runner is given STOP_GRACE, which exceeds its own GRACE, or it is
+        # hard-killed halfway through ending claude.
+        with mock.patch.object(self.sessions, "alive", return_value=True), \
+             mock.patch.object(session, "terminate", return_value=True) as terminate:
+            self.assertTrue(self.sessions.stop(self.record()))
+        terminate.assert_called_once_with(4242, grace=bot.STOP_GRACE, log=self.sessions.log)
+        self.assertGreater(bot.STOP_GRACE, session.GRACE)
+
+    def test_start_passes_the_platform_flags_to_popen(self):
+        fake = mock.Mock(pid=777)
+        with mock.patch.object(bot.procs, "spawn_flags", return_value={"creationflags": 9}), \
+             mock.patch.object(bot.subprocess, "Popen", return_value=fake) as popen:
+            pid = self.sessions.start("abc123", "name", self.dir, "proj", 1)
+        self.assertEqual(pid, 777)
+        kwargs = popen.call_args.kwargs
+        self.assertEqual(kwargs.get("creationflags"), 9)
+        self.assertTrue(kwargs.get("close_fds"))
+        self.assertEqual(self.sessions.children, [fake])
+
+    def test_serve_takes_the_lock_before_it_touches_telegram(self):
+        lock = mock.Mock()
+        lock.take.return_value = False
+        cfg = mock.Mock(allowed_chat_ids=[1], projects_root=self.dir, max_sessions=1,
+                        bot_token="t")
+        with mock.patch.object(bot.procs, "Lock", return_value=lock) as Lock, \
+             mock.patch.object(bot, "Listener") as Listener, \
+             mock.patch.object(bot.telegram, "Telegram") as Telegram, \
+             mock.patch.object(bot, "log"):
+            self.assertEqual(bot.serve(cfg=cfg), 0)
+        Lock.assert_called_once_with(bot.LOCK)
+        Telegram.assert_not_called()
+        Listener.assert_not_called()
+
+    def test_the_lock_path_is_the_one_lock_sh_uses(self):
+        # One lock file for both the shell's lockf and the Windows mutex named after it.
+        self.assertEqual(os.path.relpath(bot.LOCK, bot.HERE).replace(os.sep, "/"),
+                         "var/.bot.lock")
 
 
 class TestTheLockGuardsTheToken(unittest.TestCase):
