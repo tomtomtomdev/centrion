@@ -16,11 +16,24 @@ See SPEC.md §3 for the file's shape and §15 for why there is no `default_proje
 """
 import json
 import os
+import shutil
 import stat
+import sys
 
 CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".telegram.json")
 
-DEFAULT_CLAUDE_BIN = "~/.local/bin/claude"
+#: Where `claude` is, when `.telegram.json` does not say. Two different questions per platform.
+#: On the Mac it is the installer's symlink, kept current by self-update, and `_binary` is
+#: careful not to resolve it. Windows has no such symlink: `claude install` leaves a copy under
+#: `%USERPROFILE%\.local\bin` and winget leaves another on PATH, and on this box (WINDOWS.md
+#: W0d) the `.local\bin` one is *stale* — v2.1.231 against winget's v2.1.268, with auto-updates
+#: off. So the nearest thing to "whatever `claude` means right now" is PATH, and preferring
+#: `.local\bin` would silently pin every session to a build from a month ago. WINDOWS.md §5.2.
+#: `which` returns None when Claude Code is not installed at all; `_binary` says so by name.
+if sys.platform == "win32":
+    DEFAULT_CLAUDE_BIN = shutil.which("claude")
+else:
+    DEFAULT_CLAUDE_BIN = "~/.local/bin/claude"
 DEFAULT_MAX_SESSIONS = 2          # SPEC.md §3: 8 GB on this box.
 REQUIRED_MODE = 0o600
 
@@ -156,6 +169,13 @@ def _binary(path, data, check):
     of the symlink.
     """
     raw = data.get("claude_bin") or DEFAULT_CLAUDE_BIN
+    if raw is None:
+        # Windows only, and only with Claude Code not installed: there the default *is* the
+        # lookup, so there is nothing to fall back to. Falling through to the type check below
+        # would answer "`claude_bin` must be a string" about a key this file does not contain,
+        # which sends the reader to fix the wrong thing. WINDOWS.md §5.2.
+        raise ConfigError("%s: `claude_bin` is not set and `claude` is not on PATH — "
+                          "install Claude Code, or name the exe with `claude_bin`" % path)
     if not isinstance(raw, str):
         raise ConfigError("%s: `claude_bin` must be a string" % path)
     binary = os.path.abspath(os.path.expanduser(raw))
@@ -163,7 +183,10 @@ def _binary(path, data, check):
         if not os.path.exists(binary):
             raise ConfigError("%s: `claude_bin` does not exist: %s — `claude install` may have "
                               "moved it" % (path, binary))
-        if not os.access(binary, os.X_OK):
+        # No executable bit on Windows: os.access(X_OK) there is os.access(F_OK) under another
+        # name, true for a text file and for one marked read-only. A check that cannot fail
+        # reads like the Mac's guarantee without being one, so it is not asked. WINDOWS.md §5.2.
+        if sys.platform != "win32" and not os.access(binary, os.X_OK):
             raise ConfigError("%s: `claude_bin` is not executable: %s" % (path, binary))
     return binary
 
@@ -207,6 +230,24 @@ class ProjectError(Exception):
 # `/` and `\` are what a path looks like; NUL is what makes realpath() raise instead of return.
 _NOT_IN_A_NAME = ("/", "\\", "\x00")
 
+#: Drive-qualified names, which `os.path.splitdrive` catches and `os.path.isabs` does not.
+#: Two shapes, and on Windows `join` gets each of them wrong in a different direction
+#: (WINDOWS.md §5.3, measured):
+#:
+#:   * `C:foo` is drive-relative — "foo, under whatever the current directory on drive
+#:     C: happens to be". `isabs` says False. With the root on the same drive, join quietly
+#:     *drops the `C:`* and returns `<root>\foo`, so check 3 passes and a session would
+#:     start in a directory nobody named — and `new C:foo` would create it. With the root on
+#:     another drive, join keeps `C:foo` whole and realpath resolves it against C:'s
+#:     per-drive cwd: outside the root entirely, which is §10.4 broken rather than bent.
+#:   * `\\srv\share` is a UNC root, and splitdrive returns the whole of it as the drive.
+#:     Its backslashes are already refused above, but the containment argument should not
+#:     rest on this platform spelling its separator with a character that list happens to
+#:     hold.
+#:
+#: On the Mac `posixpath.splitdrive` finds a drive in nothing at all, so this costs the
+#: Mac nothing and `C:foo` stays an ordinary, if odd, directory name there.
+
 
 def _unprintable(name):
     """True for a name holding a control character. Slice 11, and `new` is why.
@@ -238,10 +279,12 @@ def _child(name, root):
         root = load().projects_root
     root = os.path.realpath(os.path.expanduser(root))
 
-    # 1. The name is a name. First, because os.path.join(root, "/etc") is "/etc".
+    # 1. The name is a name. First, because os.path.join(root, "/etc") is "/etc" — and on
+    #    Windows because of the two drive shapes below, which join gets wrong in two directions.
     if not isinstance(name, str) or not name:
         raise ProjectError("that is not a project name. " + _NOT_A_NAME)
-    if name.startswith(".") or any(c in name for c in _NOT_IN_A_NAME) or _unprintable(name):
+    if (name.startswith(".") or any(c in name for c in _NOT_IN_A_NAME) or _unprintable(name)
+            or os.path.splitdrive(name)[0]):
         raise ProjectError("that is not a project name. " + _NOT_A_NAME)
 
     # 2. Resolve it.
@@ -302,6 +345,8 @@ def resolve(name, root=None):
     1. The name is a name. This has to be first because `os.path.join(root, "/etc")` is `/etc` —
        join drops the root entirely when its second argument is absolute, so a containment check
        that trusted join alone would end up comparing `/etc` against its own parent and passing.
+       On Windows two further shapes say "absolute" in a way `isabs` does not; see the note
+       beside `_NOT_IN_A_NAME`.
     2. Join and `os.path.realpath`. The root is realpath'd too: on this box `projects_root` may
        be reached through a symlink (`/var` → `/private/var` is the everyday case), and comparing
        a resolved child against an unresolved root refuses everything.

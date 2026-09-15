@@ -124,6 +124,53 @@ class TestCheck1TheNameIsAName(Base):
             self.refuses(name, "name")
 
 
+@unittest.skipIf(POSIX, "the drive and UNC shapes are NTFS path syntax; on the Mac `C:foo` is "
+                 "an ordinary directory name: WINDOWS.md §5.3")
+class TestCheck1OnWindows(Base):
+    r"""§3.1 on NTFS — the two path shapes `os.path.isabs` does not call absolute.
+
+    Check 1's job is that a name is a name, and on the Mac `/` carries every way of saying
+    otherwise. Windows has two more, and only one of them is caught by anything already here:
+
+    - `C:foo` is *drive-relative*. It means "foo, under whatever the process's current
+      directory on drive C: happens to be" — a per-drive cwd the runner never sets and cannot
+      read back. `isabs("C:foo")` is False and `join(root, "C:foo")` keeps the root, so check 3
+      would compare a path against its parent and pass, and the session would start in a
+      directory nobody named. This is the one the backslash rule does not see.
+    - `C:\x` and `\\srv\share` are already refused, by the backslash in them. They are pinned
+      here anyway because §5.3 names all three shapes as one rule: the containment argument
+      must not rest on the incidental fact that this platform spells its separator with a
+      character check 1 happens to list.
+    """
+
+    #: Check 1's exact wording. Asserting on "name" alone would pass on check 4's "no project
+    #: by that name exists here" — which is what a drive-relative name got before this rule,
+    #: and is the wrong refusal for the right-looking reason.
+    CHECK_1 = "not a project name"
+
+    def test_a_drive_relative_name_is_refused(self):
+        self.refuses("C:foo", self.CHECK_1)
+
+    def test_a_drive_absolute_name_is_refused(self):
+        self.refuses(r"C:\Windows", self.CHECK_1)
+
+    def test_a_unc_name_is_refused(self):
+        self.refuses(r"\\srv\share", self.CHECK_1)
+
+    def test_creating_one_refuses_the_same_shapes(self):
+        """`new` shares checks 1-3 with `claude` through _child() (§12 slice 11).
+
+        The assertion that matters is the second one: `create` inverts check 4, so a name
+        check 1 lets through does not stop at "no project by that name exists" — it makes the
+        directory. Refusing late and refusing not at all are the same thing here.
+        """
+        before = sorted(os.listdir(self.root))
+        for name in ("C:foo", r"C:\Windows", r"\\srv\share"):
+            with self.assertRaises(config.ProjectError):
+                config.create(name, self.root)
+        self.assertEqual(sorted(os.listdir(self.root)), before)
+
+
 class TestCheck2AndCheck3ItStaysInsideTheRoot(Base):
     """§3.2/§3.3 — realpath the join, and require its parent to be exactly realpath(root)."""
 

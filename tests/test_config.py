@@ -166,15 +166,53 @@ class TestClaudeBinary(Base):
         # SPEC.md §9.8: `claude install` can move it; catch that once at startup.
         self.refuses(self.valid(claude_bin=os.path.join(self.tmp, "gone")), "does not exist")
 
-    @unittest.skipUnless(POSIX, "os.access(X_OK) is true for every existing file on Windows: WINDOWS.md W2a")
+    @unittest.skipUnless(POSIX, "the executable bit is the Mac's half of this pair: WINDOWS.md §5.2")
     def test_a_non_executable_binary_is_refused(self):
         os.chmod(self.claude, 0o644)
         self.refuses(self.valid(), "not executable")
 
-    @unittest.skipUnless(POSIX, "the Mac's default; Windows resolves via shutil.which: WINDOWS.md W2a")
+    @unittest.skipIf(POSIX, "the Windows half of the pair above: WINDOWS.md §5.2")
+    def test_executability_is_not_checked_on_windows(self):
+        """There is no X_OK bit here, so asking about one can only ever say yes.
+
+        `os.access(path, os.X_OK)` on Windows is `F_OK` wearing a different name — it answers
+        True for a text file and for a file whose read-only attribute is set. A check that
+        cannot fail is worse than no check: it reads like the Mac's guarantee and is not one.
+        It is gone on this platform, and this test is what says so out loud.
+        """
+        os.chmod(self.claude, 0o444)
+        cfg = config.load(self.write(self.valid()))
+        self.assertEqual(cfg.claude_bin, self.claude)
+
+    @unittest.skipUnless(POSIX, "the Mac's default is the versioned symlink: WINDOWS.md §5.2")
     def test_the_default_is_used_when_absent(self):
         cfg = config.load(self.write(self.valid(claude_bin=_ABSENT)), check_claude=False)
         self.assertTrue(cfg.claude_bin.endswith("/.local/bin/claude"))
+
+    @unittest.skipIf(POSIX, "the Windows default is whatever is on PATH: WINDOWS.md §5.2")
+    def test_the_default_on_windows_is_what_is_on_path(self):
+        r"""W0d: this box has two claude.exe, and `~/.local/bin` holds the *stale* one.
+
+        v2.1.231 from August sits under `%USERPROFILE%\.local\bin` while winget's v2.1.268
+        is the one on PATH, and `~/.claude.json` says auto-updates are off. The Mac's default
+        is a symlink that self-update keeps pointing at the current build; there is no such
+        symlink here, so the equivalent of "whatever `claude` means right now" is `which`.
+        """
+        cfg = config.load(self.write(self.valid(claude_bin=_ABSENT)), check_claude=False)
+        self.assertEqual(cfg.claude_bin, shutil.which("claude"))
+        self.assertNotIn(".local", cfg.claude_bin)
+
+    def test_a_default_that_is_not_on_path_is_refused_in_its_own_words(self):
+        """`shutil.which` returns None when Claude Code is not installed — say that.
+
+        Portable because the message is: with no default to fall back on, `claude_bin` absent
+        is a config that cannot start a session, and the reply has to name the reason rather
+        than fall through to the type check and say "`claude_bin` must be a string" about a
+        key the file does not contain.
+        """
+        with mock.patch.object(config, "DEFAULT_CLAUDE_BIN", None):
+            msg = self.refuses(self.valid(claude_bin=_ABSENT), "on path")
+        self.assertIn("claude_bin", msg)
 
     @needs_symlinks
     def test_a_symlinked_binary_is_not_resolved(self):

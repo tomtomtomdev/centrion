@@ -8,8 +8,8 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **W1 complete (2026-09-15); W2a next.** The suite runs natively on Windows since W1c:
-492 tests, 422 pass, 69 skipped as the Mac's (each skip names its reason or the slice that
+Status: **W2a done (2026-09-15); W2b next.** The suite runs natively on Windows since W1c:
+499 tests, 429 pass, 69 skipped as the Mac's (each skip names its reason or the slice that
 un-gates it), one expected failure (W3h's). The go/no-go question is answered *go*: under
 a 200x50 ConPTY, `claude.exe --remote-control` printed its link 6.2 seconds after spawn, as one
 contiguous run, and today's `Scrape` finds it unmodified at every chunk size
@@ -224,11 +224,36 @@ and the Mac's "abspath, not realpath" reasoning does not apply because there is 
 follow. With auto-updates off, upgrading is `winget upgrade Anthropic.ClaudeCode`, done by hand,
 and the runner picks up the new exe on its next spawn without a restart.
 
+*W2a, 2026-09-15:* built, with one case the plan did not have. `shutil.which` returns `None`
+when Claude Code is not installed at all, and on Windows the default *is* that lookup — so
+there is nothing to fall back to, and `_binary` would have fallen through to the type check
+and answered "`claude_bin` must be a string" about a key the file does not contain. It now
+says the file did not set `claude_bin` and `claude` is not on PATH. The check is portable
+code reached only on Windows; its test patches `DEFAULT_CLAUDE_BIN` to `None` and so runs on
+both platforms.
+
 **5.3 — `resolve()`.** Today's first rule is "the name is a name", because
 `os.path.join(root, "/etc")` is `/etc`. On Windows there are two more shapes of that trap:
 `C:foo` (drive-relative) and `\\server\share` (UNC), both of which `os.path.isabs` does not
 catch the same way. Add `os.path.splitdrive(name)[0] == ""` to the rule. `realpath`, `samefile`
 and the case-insensitivity handling in §9.9 already behave correctly on NTFS.
+
+*W2a, 2026-09-15:* built, and the trap is worse than "isabs does not catch it". Measured on
+this box, `ntpath.join` gets `C:foo` wrong in **two** directions depending on where the root
+is:
+
+| root | `join(root, "C:foo")` | what check 3 then sees |
+|---|---|---|
+| `C:\Users\tommy\Projects` | `C:\Users\tommy\Projects\foo` | a direct child — **passes** |
+| `D:\Projects` | `C:foo` | resolved against C:'s per-drive cwd — outside the root |
+
+Same drive, join silently *drops* the `C:` and the name launders into an ordinary child: a
+session starts in a directory nobody named, and `new C:foo` creates it. Different drive, join
+keeps `C:foo` whole and `realpath` resolves it against the process's current directory on
+drive C:, which is §10.4 broken outright and goes live the day `projects_root` is not on C:.
+`isabs("C:foo")` is `False` for both. `splitdrive` also returns the whole of `\\srv\share` as
+the drive, so the same one-clause rule covers UNC; the backslashes in it were already refused,
+but the containment argument no longer rests on that.
 
 **5.4 — `max_sessions`.** The default of 2 is annotated "8 GB on this box". This box is a
 different box; leave the default and set it in `.telegram.json`.
@@ -719,7 +744,7 @@ the Mac when the slice touched shared or posix code.
 | W1a `session_posix.py` | done · Mac pending | 2026-09-14 | 30f3ccc | 29 pass, 1 xfail (stubbed run) · **not run** | `spawn`/`_reaped`/`_signal`/`terminate`/`detach` moved verbatim; `session.spawn`/`terminate` stay as wrappers because their defaults (`ROWS`/`COLS`, `GRACE`) are session.py's constants; `detach`/`_reaped` are the platform's. Signal setup went through `procs.catch_signals`. `alive()` added for W1b; `started()` raises `NotImplementedError("W1b")`. On Windows `session.py` now fails on `session_win` instead of `fcntl` — same count. **Mac hand-run and Mac suite not done from this desk; see "Pending on the Mac".** |
 | W1b `bot.py` through `procs` | done · Mac pending | 2026-09-14 | 42fb3d4 | 15 pass (stubbed run: W1b's 10 + W1a's 6, one shared) · **not run** | `Sessions.alive` → `procs.alive` + `procs.started`; `process_started` moved to `session_posix.started` verbatim, alias kept for the real-process tests; `start()` passes `**procs.spawn_flags()`; `serve()` takes `procs.Lock(LOCK)` before constructing `Telegram`, exits 0 when refused; `bot.LOCK = var/.bot.lock`, the file lock.sh uses. `errno` import gone from bot.py. First red run caught that a module-level alias is not patchable — `alive` calls `procs.started` directly. |
 | W1c imports on Windows | done | 2026-09-15 | 12100d6, ef04618 | **492 ran: 422 pass, 69 skip, 1 xfail**, 5.9s · **not run** | **First Windows-green run.** `python -c "import bot, session"` → `procs = session_win`. Skips by file — `test_session` 31 (26 fork/pty/signal, 3 import `session_posix`, 1 → W3a, 1 → W3g), `test_bot` 23 (16 fork/shell/`ps`, 3 plist-vs-checkout → W5b, 3 symlink, 1 `chmod` → W2b), `test_config` 7 (4 modes → W2b, 2 → W2a, 1 symlink), `test_projects` 8 (6 symlink, 1 premise, 1 realpath case); every skip names its reason or its slice, and the plan's guess of ~40/~30 was 31/23. The full-suite hang was `TestSpawningForReal` alone — its stub child dies on `os.getsid` and the test waits for output that never comes; no other class blocks on Windows. Two assertions were Mac-*shaped* rather than Mac-only and are now portable: `tilde()`'s expected string (`os.path.join("~", …)`) and the read of `bot.py` as UTF-8 (the Windows default codec is cp1252, which has no 0x81). `test_config.Base` stands the 0600 check down on win32 so the other thirty rules run (W2b). `tests/support.py` is new: `POSIX`, and `needs_symlinks`, which skips for the *account* — this one cannot create symlinks (error 1314; Developer Mode is off) — so 10 §3 boundary tests skip here and run again the moment the privilege exists; whether they then pass on NTFS is unverified. Windows `realpath` returns the on-disk spelling (`resolve("BEACON")` → `…\beacon`), so the miscased-name note test is the Mac's. `scratch\run_win_tests.py` retired. Mac: not run — see Pending. |
-| W2a `claude_bin` default, drive rule | todo | | | | |
+| W2a `claude_bin` default, drive rule | done · Mac pending | 2026-09-15 |  | **499 ran: 429 pass, 69 skip, 1 xfail**, 5.9s · **not run** | **The drive rule was not a tidy-up; it was a live hole.** `resolve("C:foo")` refused before this slice only by falling through to check 4's "no project by that name exists" — so the red test had to assert check 1's wording, and `create("C:foo")`, which inverts check 4, made the directory. Measured: `ntpath.join` drops the `C:` when the root is on the same drive (`C:foo` → `<root>\foo`, a name laundered into a different one that check 3 accepts) and keeps it whole when the root is on another drive (`C:foo` resolved against C:'s per-drive cwd, outside the root — §10.4 broken, and live the day `projects_root` is not on C:). `splitdrive` returns the whole of `\\srv\share` as the drive too, so one clause covers UNC. §5.3 amended with the table. `shutil.which` has a `None` case the plan did not: with Claude Code not installed the Windows default *is* the lookup, so `_binary` now says so by name instead of falling through to "`claude_bin` must be a string" (§5.2 amended). Run step: the literal command gave W2b's 0600 error as predicted; with the mode check stood down, `claude_bin` resolved to the winget exe and not to the stale `.local\bin` copy, and the three drive shapes were refused against the real `~\Projects`. +7 tests, no skip count change: the two W2a-gated posix tests now have win32 twins, and the twin for `X_OK` was green before the code changed — `os.access(X_OK)` here is `F_OK` under another name, so removing the call changes no answer, only what the code claims. The placeholder `.telegram.json` the run step needed was deleted after; W2b's run step writes its own. |
 | W2b DACL check | todo | | | | |
 | W3a rotate order, `write_meta` retry | todo | | | | |
 | W3b `Terminal` and `spawn` on ConPTY | todo | | | | |
@@ -758,6 +783,10 @@ verified until then, and W1c's first Windows-green run is not a substitute.
 | W1b | `/usr/bin/python3 -m unittest -q` | green; `TestTheListenerUsesThePlatformSeam` (10) added; the real-process tests at the end of `test_bot.py` still pass through the `process_started` alias |
 | W1b | `sh launchd/bot.sh`, then `ls` from the phone | the listener starts (the `Lock` no-op returns True under bot.sh's lockf), answers `ls`; a second `sh launchd/bot.sh` is still refused by bot.sh, not by python |
 | W1c | `/usr/bin/python3 -m compileall -q .` | clean — `tests/support.py` and the decorators are 3.9 syntax, but nobody has compiled them with 3.9 |
+| W2a | `/usr/bin/python3 -m compileall -q .` | clean — nothing here reaches for 3.10 syntax, but the ritual's step 3 is the only thing that knows that |
+| W2a | `/usr/bin/python3 -m unittest -q` | green, and **nothing newly skipped**: of the four new tests the Mac runs, three are `skipIf(POSIX)` win32 twins it skips by design and one — the `DEFAULT_CLAUDE_BIN = None` case — is portable and must pass there. `TestCheck1OnWindows` skips whole. The two `skipUnless(POSIX)` tests in `TestClaudeBinary` must still *run* and pass: they are the posix half of the pair now, not leftovers. |
+| W2a | `python3 -c "import config; print(config.load())"` | a Config whose `claude_bin` is still `~/.local/bin/claude` expanded and **not** resolved through the version symlink — §5.2's split must not have moved the Mac's default |
+| W2a | `python3 -c "import config; print(config.resolve('C:foo', '<root>'))"` | `ProjectError` only if a directory of that name is absent; `posixpath.splitdrive` finds no drive, so on the Mac this is an ordinary name and check 4 is what refuses it. A check-1 refusal there means the rule was applied portably by mistake. |
 | W1c | `/usr/bin/python3 -m unittest -q` | green, and **nothing newly skipped**: every W1c decorator is `skipUnless(POSIX)` or `needs_symlinks`, and the Mac can create symlinks. The count is W1b's plus `TestEverythingImportsHere` (2). A skip on the Mac means a decorator landed on the wrong test. |
 
 ### Decisions changed by evidence
@@ -796,6 +825,23 @@ Appended, dated, when a run step contradicts the plan above and a section was am
   the platform default codec (cp1252 here). Both are fixed portably rather than gated;
   the rule for the rest of the port is that a test only gets a platform decorator when
   the *mechanism* it exercises is the platform's.
+- **2026-09-15, W2a → §5.3.** The plan called the drive rule a third shape of check 1's
+  trap. Measured, it is two bugs with opposite symptoms, and which one you get depends on
+  where `projects_root` lives: same drive, `ntpath.join` *drops* the `C:` and `C:foo` becomes
+  `<root>\foo` — a name silently turned into a different, valid one that check 3 accepts;
+  different drive, join keeps `C:foo` and realpath resolves it against C:'s per-drive current
+  directory, outside the root. The second is a §10.4 escape that nothing on this box would
+  have shown, because this box's root is on C:. §5.3 carries the table.
+- **2026-09-15, W2a → §8.** A red test that asserts only the substring `name` cannot tell
+  check 1 from check 4 — "that is not a project name" and "no project by that name exists
+  here" both contain it, and `resolve("C:foo")` passed the first draft of this slice's test
+  before the rule existed. `create()` is what exposed it: it inverts check 4, so a name check 1
+  lets through is not refused late, it is not refused at all. Every boundary test added from
+  here asserts the wording of the check it means, and every check-1 case gets a `create` twin.
+- **2026-09-15, W2a → §5.2.** `shutil.which` returns `None`, and on Windows the default *is*
+  the lookup — there is no second place to look, unlike the Mac's constant. Not having a
+  branch for it meant the message for "Claude Code is not installed" was "`claude_bin` must be
+  a string", about a key the file does not set.
 - **2026-09-15, W1c → W2b.** `stat.S_IMODE` reports `0666` for every file on Windows, so
   the 0600 check refused every `test_config` case and hid the other thirty rules. Until
   the DACL check exists, `test_config.Base` stands the check down on win32 and
