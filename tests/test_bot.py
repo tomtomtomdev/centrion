@@ -69,8 +69,15 @@ import commands
 import config
 import session
 import telegram
+from tests.support import POSIX, needs_symlinks
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+#: WINDOWS.md W1c. The tests that fork the Mac's runner, run launchd/*.sh or read the Mac's
+#: process table are skipped on Windows; W4 gives their properties portable tests over a fake
+#: `procs`, and one real-process test per platform.
+posix_only = unittest.skipUnless(
+    POSIX, "forks, runs a shell script or reads the process table: session_posix and launchd/")
 
 # Shaped like the real thing, and asserted never to escape — same fixture as test_telegram.py.
 TOKEN = "8960211893:AAHreallyNotTheRealTokenJustAFake_x"
@@ -719,6 +726,7 @@ class TestTheProjectList(Base):
         self.assertEqual(config.projects(self.projects),
                          ["beacon", "centrion", "stock-watch-project"])
 
+    @needs_symlinks
     def test_it_offers_only_names_that_resolve(self):
         """The invariant that makes the list trustworthy rather than decorative.
 
@@ -732,6 +740,7 @@ class TestTheProjectList(Base):
         for name in config.projects(self.projects):
             config.resolve(name, self.projects)   # raises ProjectError if the list lies
 
+    @needs_symlinks
     def test_it_skips_files_dotfiles_and_symlinks_out_of_the_root(self):
         os.symlink("/etc", os.path.join(self.projects, "escape"))
         open(os.path.join(self.projects, "README.md"), "w").close()
@@ -741,6 +750,7 @@ class TestTheProjectList(Base):
         self.assertNotIn("README.md", got)
         self.assertNotIn(".hidden", got)
 
+    @needs_symlinks
     def test_a_symlink_to_a_directory_inside_the_root_is_kept(self):
         # It resolves to a direct child of the root, so resolve() accepts it and so must this.
         os.symlink(os.path.join(self.projects, "beacon"),
@@ -766,7 +776,8 @@ class TestWhatLeavesTheMachine(unittest.TestCase):
     def test_the_home_directory_is_collapsed_to_a_tilde(self):
         home = os.path.expanduser("~")
         self.assertEqual(bot.tilde(home), "~")
-        self.assertEqual(bot.tilde(os.path.join(home, "Projects", "beacon")), "~/Projects/beacon")
+        self.assertEqual(bot.tilde(os.path.join(home, "Projects", "beacon")),
+                         os.path.join("~", "Projects", "beacon"))
 
     def test_a_path_outside_the_home_directory_is_left_alone(self):
         self.assertEqual(bot.tilde("/etc/hosts"), "/etc/hosts")
@@ -787,7 +798,7 @@ class TestWhatTheListenerMayReach(Base):
     """
 
     def source(self):
-        with open(os.path.join(ROOT, "bot.py")) as fh:
+        with open(os.path.join(ROOT, "bot.py"), encoding="utf-8") as fh:
             return fh.read()
 
     def test_the_only_program_the_listener_starts_is_the_runner(self):
@@ -1278,6 +1289,7 @@ class TestTheLoopIsNeverBlocked(Base):
                         "a waiter that died left nothing in bot.log")
 
 
+@posix_only
 class TestSpawningForReal(unittest.TestCase):
     """The one place in this file that actually forks. Everything above it fakes the runner.
 
@@ -1381,7 +1393,7 @@ class TestSpawningForReal(unittest.TestCase):
         self.assertFalse(got["sid"], "the runner was already a session leader")
         # Read off the syntax tree rather than the text, because the paragraph above says the
         # words and a substring check would find them there.
-        with open(os.path.join(ROOT, "bot.py")) as fh:
+        with open(os.path.join(ROOT, "bot.py"), encoding="utf-8") as fh:
             tree = ast.parse(fh.read())
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
@@ -1433,6 +1445,12 @@ class TestFittingIntoOneMessage(unittest.TestCase):
                          10000)
 
 
+#: The three checks below compare the plist against *this* checkout, and the plist names the
+#: Mac's. The Windows startup is a Task Scheduler XML (WINDOWS.md W5) with its own checks.
+this_mac_checkout = unittest.skipUnless(
+    POSIX, "the plist names the Mac checkout's paths; Task Scheduler is WINDOWS.md W5")
+
+
 class TestTheLaunchdInstall(unittest.TestCase):
     """SPEC.md §8. Static checks, because the failures here are silent and slow.
 
@@ -1469,12 +1487,14 @@ class TestTheLaunchdInstall(unittest.TestCase):
         self.assertIs(self.plist["RunAtLoad"], True)
         self.assertEqual(self.plist["ThrottleInterval"], 10)
 
+    @this_mac_checkout
     def test_every_path_is_absolute_and_present(self):
         # launchd has no shell, no cd and no useful PATH.
         for path in self.plist["ProgramArguments"] + [self.plist["WorkingDirectory"]]:
             self.assertTrue(os.path.isabs(path), path)
             self.assertTrue(os.path.exists(path), path)
 
+    @this_mac_checkout
     def test_it_runs_this_checkout(self):
         self.assertEqual(os.path.realpath(self.plist["WorkingDirectory"]), os.path.realpath(ROOT))
         self.assertIn(os.path.realpath(os.path.join(self.dir, "bot.sh")),
@@ -1494,6 +1514,7 @@ class TestTheLaunchdInstall(unittest.TestCase):
             for folder in guarded:
                 self.assertNotIn(folder, path, "%s is under TCC-guarded %s" % (path, folder))
 
+    @this_mac_checkout
     def test_the_logs_land_where_section_14_says_to_look(self):
         self.assertEqual(self.plist["StandardOutPath"], self.plist["StandardErrorPath"])
         self.assertEqual(os.path.realpath(self.plist["StandardOutPath"]),
@@ -1653,6 +1674,7 @@ class TestTheLockGuardsTheToken(unittest.TestCase):
         self.assertIn("9", self.lock_sh)
         self.assertIn("close", self.lock_sh.lower())
 
+    @posix_only
     def test_a_second_copy_started_by_any_path_is_refused_before_it_polls(self):
         """§7/§8, and the one property that must survive §8 coming back.
 
@@ -2114,6 +2136,7 @@ class TestASecondSessionInTheSameDirectory(Base):
         self.assertIn(LINK, self.start("claude beacon").texts[-1])
 
 
+@posix_only
 class TestWhetherARunnerIsStillThere(unittest.TestCase):
     """§4: `Verify the runner pid with os.kill(pid, 0)` — and then do not trust it alone.
 
@@ -2741,6 +2764,7 @@ class TestCreatingAProjectFromThePhone(Base):
         self.assertTrue(os.path.isdir(self.created()),
                         "stopping the session removed the project")
 
+    @unittest.skipUnless(POSIX, "chmod 0500 does not make a directory read-only on Windows; a DACL would (WINDOWS.md W2b)")
     def test_a_creation_that_fails_is_answered_rather_than_raised(self):
         """§7: the poll loop survives everything. A read-only root, a full disk, a name the
         filesystem will not take — the phone gets a sentence and the daemon keeps polling."""

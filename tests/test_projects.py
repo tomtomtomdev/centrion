@@ -24,6 +24,7 @@ import tempfile
 import unittest
 
 import config
+from tests.support import POSIX, needs_symlinks
 
 
 class Base(unittest.TestCase):
@@ -126,18 +127,21 @@ class TestCheck1TheNameIsAName(Base):
 class TestCheck2AndCheck3ItStaysInsideTheRoot(Base):
     """§3.2/§3.3 — realpath the join, and require its parent to be exactly realpath(root)."""
 
+    @needs_symlinks
     def test_a_symlink_pointing_outside_the_root_is_refused(self):
         # The case the realpath is for. The name is a perfectly ordinary one — no slash, no
         # dot — so it survives check 1, and only resolving it reveals it leaves the root.
         os.symlink(self.outside, os.path.join(self.root, "junction"))
         self.refuses("junction", "root")
 
+    @needs_symlinks
     def test_a_symlink_pointing_outside_is_refused_even_though_its_target_exists(self):
         # Refused at check 3, before check 4 ever asks whether it is a directory — so the
         # reply is the same whether the escape target exists or not, and probing is useless.
         os.symlink("/etc", os.path.join(self.root, "etc"))
         self.refuses("etc", "root")
 
+    @needs_symlinks
     def test_a_symlink_to_a_sibling_inside_the_root_is_allowed(self):
         # Check 3 is "stays in the root", not "is not a symlink". A link to a real project
         # beside it is still a direct child of the root and must keep working.
@@ -145,6 +149,7 @@ class TestCheck2AndCheck3ItStaysInsideTheRoot(Base):
         self.assertEqual(config.resolve("beacon-alias", self.root),
                          os.path.realpath(self.beacon))
 
+    @needs_symlinks
     def test_a_symlink_to_a_grandchild_of_the_root_is_refused(self):
         # ~/Projects/thing -> ~/Projects/mono/packages/thing resolves to a path whose parent is
         # not the root. §3.3 says direct child, so this is refused; the fix is to name the real
@@ -158,7 +163,9 @@ class TestCheck2AndCheck3ItStaysInsideTheRoot(Base):
         # self.root is under /var/folders, and /var is a symlink to /private/var. If resolve()
         # compared against the root as given rather than its realpath, every single name would
         # be refused as "outside the root" on this machine.
-        self.assertNotEqual(self.root, os.path.realpath(self.root))
+        if self.root == os.path.realpath(self.root):
+            # Windows: %TEMP% is its own realpath, so the premise is the Mac's alone.
+            self.skipTest("this box's temp dir is its own realpath; the premise is /var -> /private/var")
         self.assertEqual(config.resolve("beacon", self.root), os.path.realpath(self.beacon))
 
 
@@ -172,6 +179,7 @@ class TestCheck4ItIsADirectory(Base):
     def test_a_name_that_does_not_exist_is_refused(self):
         self.refuses("nosuchproject", "exist")
 
+    @needs_symlinks
     def test_a_dangling_symlink_is_refused(self):
         os.symlink(os.path.join(self.root, "gone"), os.path.join(self.root, "dangling"))
         self.refuses("dangling", "exist")
@@ -259,6 +267,7 @@ class TestCreatingOne(Base):
         # why check 1 runs first and why this one is here at all.
         self.refuses_to_create(os.path.join(self.outside, "x"), "name")
 
+    @needs_symlinks
     def test_it_refuses_a_name_that_escapes_through_a_symlink(self):
         """Check 3 again, and the case it exists for: the name is a name, the join stays inside
         the root, and the realpath comes out somewhere else entirely."""
@@ -301,6 +310,7 @@ class TestTheHappyCase(Base):
         self.assertEqual(config.resolve("site.com", self.root),
                          os.path.realpath(os.path.join(self.root, "site.com")))
 
+    @unittest.skipUnless(POSIX, "Windows realpath returns the on-disk spelling (WINDOWS.md W1c), so the note this test pins is the Mac's")
     def test_a_miscased_name_finds_the_directory_but_keeps_the_spelling_it_was_given(self):
         """The box is case-insensitive and realpath() is not. Pinned because slice 8 depends.
 

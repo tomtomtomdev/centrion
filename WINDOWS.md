@@ -8,7 +8,9 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **W0 complete (2026-09-14); W1a next.** The go/no-go question is answered *go*: under
+Status: **W1 complete (2026-09-15); W2a next.** The suite runs natively on Windows since W1c:
+492 tests, 422 pass, 69 skipped as the Mac's (each skip names its reason or the slice that
+un-gates it), one expected failure (W3h's). The go/no-go question is answered *go*: under
 a 200x50 ConPTY, `claude.exe --remote-control` printed its link 6.2 seconds after spawn, as one
 contiguous run, and today's `Scrape` finds it unmodified at every chunk size
 (`tests/fixtures/rc_startup_win.log`). Two Ctrl-C bytes on the ConPTY input ended it in 1.7
@@ -358,7 +360,7 @@ The suite is stdlib `unittest` and stays that way. The changes:
 ## 9. Slices
 
 Small, and all the same shape. A slice is one sitting's work, it leaves the Mac suite green
-and the Windows suite green (once W1c exists), and it ends in a commit. No slice starts until
+and the Windows suite green (natively, since W1c), and it ends in a commit. No slice starts until
 the previous one's progress row in §11 is filled in.
 
 ### The ritual
@@ -474,6 +476,9 @@ written first and skip on the missing fixture.
   `X_OK` check is skipped on `win32`; `resolve("C:foo", root)`, `resolve(r"\\srv\share",
   root)` and `resolve("C:\\x", root)` raise `ProjectError`. Posix cases unchanged.
 - Green: §5.2 and §5.3.
+- Un-gate (W1c): `test_config.py::test_a_non_executable_binary_is_refused` and
+  `test_the_default_is_used_when_absent` are `skipUnless(POSIX)` naming this slice; they become
+  the posix half of a platform pair here, alongside the win32 tests above.
 - Run: `python -c "import config; print(config.load(check_claude=True))"` on Windows with a
   minimal `.telegram.json` — expect the 0600 error, which is W2b's red.
 - Test: both platforms.
@@ -484,6 +489,14 @@ written first and skip on the missing fixture.
   `test_accepts_owner_only_dacl` strips inheritance and passes. `pywin32` joins
   `requirements-win.txt`.
 - Green: §5.1.
+- Un-gate (W1c): `test_config.Base.setUp` patches `REQUIRED_MODE` to `0666` on win32 so the
+  other thirty rules in that file can be tested at all, and `TestPermissions` (4) is
+  `skipUnless(POSIX)`. Both go when the DACL check lands: the patch becomes unnecessary
+  because the win32 check no longer reads the mode. `test_bot.py::
+  test_a_creation_that_fails_is_answered_rather_than_raised` (a `chmod 0500` root) is also
+  posix-only since W1c — `os.chmod` only toggles the read-only attribute on Windows, and that
+  does not stop `mkdir` inside a directory — and wants a win32 twin here: a root whose DACL
+  denies the account write, via `icacls /deny`.
 - Run: `config.load()` on this box succeeds after running the printed `icacls` line.
 - Test: both platforms.
 
@@ -494,6 +507,12 @@ written first and skip on the missing fixture.
   recording `replace`; `test_write_meta_retries_permission_error` patches `os.replace` to
   raise `PermissionError` twice then succeed, asserts one file written and two sleeps.
 - Green: the retry (five tries, 20ms) in `write_meta`; `rotate` already has the order.
+- Un-gate (W1c): `test_session.py::test_a_reader_never_sees_a_partial_record` is
+  `skipUnless(POSIX)` naming this slice — on Windows its writer dies with `PermissionError`
+  at the first collision. Its reader holds the file open across `json.loads` of a 100 KB
+  record in a tight loop, so five tries 20ms apart may still lose against it; this slice
+  decides whether the retry widens or the test's reader is made to release between reads,
+  and un-gates the test either way.
 - Run: none.
 - Test: both platforms.
 
@@ -550,6 +569,8 @@ written first and skip on the missing fixture.
 - Red: `test_child_env_win_keeps_windows_essentials` — `SYSTEMROOT`, `COMSPEC`, `APPDATA`,
   `LOCALAPPDATA`, `USERPROFILE`, `TEMP`, `PATH` survive; `CLAUDE_*` and the hazard list do
   not; `TERM` is not set.
+- Un-gate (W1c): `test_session.py::test_claude_is_first_on_the_path` (the Mac's `PATH`) is
+  `skipUnless(POSIX)` naming this slice; the test above is its win32 twin.
 - Green: §4's last paragraph.
 - Run: **`python session.py --foreground --cwd <project> --name w3g` on this box produces
   a link and `pty.log` under `var\sessions\`. Ctrl-C ends it and `meta.json` says `ended`.**
@@ -575,6 +596,10 @@ written first and skip on the missing fixture.
   `test_started_matches_create_time`; `test_bot.py::test_alive_rejects_pid_reused_later`
   (portable, via patched `procs.started` returning `started + PID_REUSE_SLACK + 1`).
 - Green: `psutil` in `requirements-win.txt`; the two functions.
+- Un-gate (W1c): `test_bot.py::TestWhetherARunnerIsStillThere` (8, `/bin/sleep` and
+  `session_posix.started`) is posix-only since W1c, and `TestSpawningForReal` (fd 9,
+  `os.getsid`) with it; their properties get the portable twins over a fake `procs` named
+  here and in W4b–W4c, and one real-process test per platform.
 - Run: `python -c` printing `alive`/`started` for this shell's pid.
 - Test: both platforms.
 
@@ -631,7 +656,9 @@ written first and skip on the missing fixture.
 **W5b — the scheduled task.**
 - Red: `test_layout.py::test_task_xml_settings` parses `windows/centrion.xml` and asserts
   the §7 table: `PT0S`, `IgnoreNew`, batteries `false`, `StartWhenAvailable true`,
-  `InteractiveToken`, a `LogonTrigger`.
+  `InteractiveToken`, a `LogonTrigger`; and the win32 counterparts of the three
+  `TestTheLaunchdInstall` checks W1c gated as `this_mac_checkout` — every path in the XML
+  absolute and present, the working directory is this checkout, the log is `var\bot.log`.
 - Green: the XML template; `install.ps1` substitutes the path and runs `schtasks /Create`.
 - Run: register; log off and on; `var\bot.log` shows the listener up within a minute and a
   phone `ls` answers. Record the seconds.
@@ -691,7 +718,7 @@ the Mac when the slice touched shared or posix code.
 | W0d `claude.exe` location after update | done | 2026-09-14 | d6701b9 | — | `which` → winget exe v2.1.268. `~\.local\bin\claude.exe` also present, v2.1.231, stale. `autoUpdates: false`, `installMethod: native`. §5.2 amended: do not prefer `.local\bin`. |
 | W1a `session_posix.py` | green · Mac pending | 2026-09-14 | 30f3ccc | 29 pass, 1 xfail (stubbed run) · **not run** | `spawn`/`_reaped`/`_signal`/`terminate`/`detach` moved verbatim; `session.spawn`/`terminate` stay as wrappers because their defaults (`ROWS`/`COLS`, `GRACE`) are session.py's constants; `detach`/`_reaped` are the platform's. Signal setup went through `procs.catch_signals`. `alive()` added for W1b; `started()` raises `NotImplementedError("W1b")`. On Windows `session.py` now fails on `session_win` instead of `fcntl` — same count. **Mac hand-run and Mac suite not done from this desk; see "Pending on the Mac".** |
 | W1b `bot.py` through `procs` | green · Mac pending | 2026-09-14 | 42fb3d4 | 15 pass (stubbed run: W1b's 10 + W1a's 6, one shared) · **not run** | `Sessions.alive` → `procs.alive` + `procs.started`; `process_started` moved to `session_posix.started` verbatim, alias kept for the real-process tests; `start()` passes `**procs.spawn_flags()`; `serve()` takes `procs.Lock(LOCK)` before constructing `Telegram`, exits 0 when refused; `bot.LOCK = var/.bot.lock`, the file lock.sh uses. `errno` import gone from bot.py. First red run caught that a module-level alias is not patchable — `alive` calls `procs.started` directly. |
-| W1c imports on Windows | **in progress — stopped 2026-09-15 on request** | 2026-09-15 | checkpoint commit | `tests.test_layout` 10 pass · full suite **hangs** on Windows · Mac not run | Done: red tests `TestEverythingImportsHere` (2) written and now green; `session_win.py` stub with the whole surface (`spawn_flags` and the stop marker are real, everything else raises `NotImplementedError` naming its slice); `test_session.py` guards `fcntl`/`termios` behind `POSIX` and defines the `posix_only` decorator. **Not done:** the decorator is applied to nothing yet, so with `session` now importable the full Windows suite runs the fork/pty tests and *hangs* (killed after 180s; it hung before printing a single class). **Resume here:** run `python -m unittest -v tests.test_session 2>&1 \| tail -40` to find the first blocking test, decorate `TestTheTerminalSize`, `TestTheRunner`, `TestKillingTheRunner`, `TestDetaching`, `TestAFreshDirectoryComesUpToALink` (and whichever else blocks) with `@posix_only`; same in `test_bot.py` for `TestSpawningForReal`, `TestTheLaunchdInstall`, `TestWhetherARunnerIsStillThere`; then `test_config`'s 0600 tests get `skipUnless(posix)` until W2b; then `test_projects` (23 failures, reason not yet looked at). Green = first Windows-green full run; record pass/skip counts. |
+| W1c imports on Windows | done | 2026-09-15 | 12100d6, <w1c> | **492 ran: 422 pass, 69 skip, 1 xfail**, 5.9s · **not run** | **First Windows-green run.** `python -c "import bot, session"` → `procs = session_win`. Skips by file — `test_session` 31 (26 fork/pty/signal, 3 import `session_posix`, 1 → W3a, 1 → W3g), `test_bot` 23 (16 fork/shell/`ps`, 3 plist-vs-checkout → W5b, 3 symlink, 1 `chmod` → W2b), `test_config` 7 (4 modes → W2b, 2 → W2a, 1 symlink), `test_projects` 8 (6 symlink, 1 premise, 1 realpath case); every skip names its reason or its slice, and the plan's guess of ~40/~30 was 31/23. The full-suite hang was `TestSpawningForReal` alone — its stub child dies on `os.getsid` and the test waits for output that never comes; no other class blocks on Windows. Two assertions were Mac-*shaped* rather than Mac-only and are now portable: `tilde()`'s expected string (`os.path.join("~", …)`) and the read of `bot.py` as UTF-8 (the Windows default codec is cp1252, which has no 0x81). `test_config.Base` stands the 0600 check down on win32 so the other thirty rules run (W2b). `tests/support.py` is new: `POSIX`, and `needs_symlinks`, which skips for the *account* — this one cannot create symlinks (error 1314; Developer Mode is off) — so 10 §3 boundary tests skip here and run again the moment the privilege exists; whether they then pass on NTFS is unverified. Windows `realpath` returns the on-disk spelling (`resolve("BEACON")` → `…\beacon`), so the miscased-name note test is the Mac's. `scratch\run_win_tests.py` retired. Mac: not run — see Pending. |
 | W2a `claude_bin` default, drive rule | todo | | | | |
 | W2b DACL check | todo | | | | |
 | W3a rotate order, `write_meta` retry | todo | | | | |
@@ -730,6 +757,8 @@ verified until then, and W1c's first Windows-green run is not a substitute.
 | W1a | `python3 session.py --foreground --cwd <project> --name w1a` | a link, and Ctrl-C leaves `meta.json` at `ended` — the signal path now goes through `session_posix.catch_signals` |
 | W1b | `/usr/bin/python3 -m unittest -q` | green; `TestTheListenerUsesThePlatformSeam` (10) added; the real-process tests at the end of `test_bot.py` still pass through the `process_started` alias |
 | W1b | `sh launchd/bot.sh`, then `ls` from the phone | the listener starts (the `Lock` no-op returns True under bot.sh's lockf), answers `ls`; a second `sh launchd/bot.sh` is still refused by bot.sh, not by python |
+| W1c | `/usr/bin/python3 -m compileall -q .` | clean — `tests/support.py` and the decorators are 3.9 syntax, but nobody has compiled them with 3.9 |
+| W1c | `/usr/bin/python3 -m unittest -q` | green, and **nothing newly skipped**: every W1c decorator is `skipUnless(POSIX)` or `needs_symlinks`, and the Mac can create symlinks. The count is W1b's plus `TestEverythingImportsHere` (2). A skip on the Mac means a decorator landed on the wrong test. |
 
 ### Decisions changed by evidence
 
@@ -753,3 +782,21 @@ Appended, dated, when a run step contradicts the plan above and a section was am
   on Windows. `scratch\run_win_tests.py` stubs `fcntl`/`termios` so the portable classes can;
   it is throwaway and W1c retires it. The full suite's Windows count stays at the baseline
   until then, and that is recorded rather than hidden.
+- **2026-09-15, W1c → §8.** The plan gated tests by platform only. Ten of the §3 boundary
+  tests need `os.symlink`, which on Windows needs Developer Mode or
+  `SeCreateSymbolicLinkPrivilege` and fails with error 1314 without them — a property of
+  the account, not the platform. `tests/support.py::needs_symlinks` probes once and skips
+  for the account, so those tests come back by themselves on a box that has the privilege.
+- **2026-09-15, W1c → §5.3, §9.9.** Windows `os.path.realpath` returns the on-disk case
+  (`BEACON` → `beacon`), where the Mac's keeps the spelling it was given. Slice 8's
+  `samefile` comparison is right on both; the test that pins the Mac's behaviour is
+  posix-only, and §5.3's claim that `realpath` behaves on NTFS is now measured.
+- **2026-09-15, W1c → §8.** Two tests failed on Windows for being Mac-*shaped*, not
+  Mac-only: an expected string with `/` in it, and `open()` of a UTF-8 source file with
+  the platform default codec (cp1252 here). Both are fixed portably rather than gated;
+  the rule for the rest of the port is that a test only gets a platform decorator when
+  the *mechanism* it exercises is the platform's.
+- **2026-09-15, W1c → W2b.** `stat.S_IMODE` reports `0666` for every file on Windows, so
+  the 0600 check refused every `test_config` case and hid the other thirty rules. Until
+  the DACL check exists, `test_config.Base` stands the check down on win32 and
+  `TestPermissions` is the Mac's; W2b removes both.

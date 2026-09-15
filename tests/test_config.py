@@ -15,8 +15,10 @@ import shutil
 import stat
 import tempfile
 import unittest
+from unittest import mock
 
 import config
+from tests.support import POSIX, needs_symlinks
 
 TOKEN = "7654321:AAF-ThisIsAFakeBotTokenForTests_xyz"
 
@@ -33,6 +35,14 @@ class Base(unittest.TestCase):
         with open(self.claude, "w") as fh:
             fh.write("#!/bin/sh\n")
         os.chmod(self.claude, 0o755)
+        if not POSIX:
+            # WINDOWS.md 5.1, W2b: stat.S_IMODE is 0666 for every ordinary file on Windows,
+            # so the 0600 check refuses everything and no other rule in this file could be
+            # tested. Stood down here until the DACL check replaces it; TestPermissions is
+            # the Mac's until then, and W2b's tests are the Windows secrecy check.
+            stood_down = mock.patch.object(config, "REQUIRED_MODE", 0o666)
+            stood_down.start()
+            self.addCleanup(stood_down.stop)
 
     def valid(self, **over):
         d = {"bot_token": TOKEN, "allowed_chat_ids": [987654321],
@@ -77,6 +87,8 @@ class TestFileItself(Base):
         self.refuses(None, "object", raw="[1, 2, 3]")
 
 
+@unittest.skipUnless(POSIX, "stat modes are the Mac's secrecy check; Windows reports 0666 for "
+                     "every file and the DACL check is WINDOWS.md W2b")
 class TestPermissions(Base):
     def test_a_world_readable_config_is_refused(self):
         # 0644 in ~/Library or a synced folder is how a token gets read by something else.
@@ -154,14 +166,17 @@ class TestClaudeBinary(Base):
         # SPEC.md §9.8: `claude install` can move it; catch that once at startup.
         self.refuses(self.valid(claude_bin=os.path.join(self.tmp, "gone")), "does not exist")
 
+    @unittest.skipUnless(POSIX, "os.access(X_OK) is true for every existing file on Windows: WINDOWS.md W2a")
     def test_a_non_executable_binary_is_refused(self):
         os.chmod(self.claude, 0o644)
         self.refuses(self.valid(), "not executable")
 
+    @unittest.skipUnless(POSIX, "the Mac's default; Windows resolves via shutil.which: WINDOWS.md W2a")
     def test_the_default_is_used_when_absent(self):
         cfg = config.load(self.write(self.valid(claude_bin=_ABSENT)), check_claude=False)
         self.assertTrue(cfg.claude_bin.endswith("/.local/bin/claude"))
 
+    @needs_symlinks
     def test_a_symlinked_binary_is_not_resolved(self):
         """The symlink must survive into exec, or self-update breaks the daemon silently.
 

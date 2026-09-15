@@ -43,11 +43,12 @@ import session
 #: WINDOWS.md W1c. The tests that fork, open a pty or send a signal are the Mac's — they test
 #: session_posix.py against a real terminal — and are skipped on Windows, where their two
 #: modules do not exist. The portable half of this file runs on both.
-POSIX = sys.platform != "win32"
+from tests.support import POSIX
 if POSIX:
     import fcntl
     import termios
 posix_only = unittest.skipUnless(POSIX, "forks, opens a pty or sends a signal: session_posix")
+needs_session_posix = unittest.skipUnless(POSIX, "imports session_posix, which needs fcntl and termios")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE = os.path.join(ROOT, "tests", "fixtures", "rc_startup.log")
@@ -212,6 +213,7 @@ class TestThePlatformSeam(unittest.TestCase):
     SURFACE = ("spawn", "terminate", "detach", "alive", "started", "spawn_flags", "Lock",
                "request_stop", "stop_requested", "catch_signals", "restore_signals")
 
+    @needs_session_posix
     def test_the_posix_module_has_the_whole_surface(self):
         import session_posix
         for name in self.SURFACE:
@@ -221,6 +223,7 @@ class TestThePlatformSeam(unittest.TestCase):
         for name in self.SURFACE:
             self.assertTrue(hasattr(session.procs, name), "session.procs.%s is missing" % name)
 
+    @needs_session_posix
     def test_the_module_is_chosen_by_platform(self):
         # Every non-Windows platform gets the posix module; the win32 branch is W1c's.
         for platform in ("darwin", "linux", "freebsd13"):
@@ -244,6 +247,7 @@ class TestThePlatformSeam(unittest.TestCase):
             self.assertTrue(session.terminate(4242))
             terminate.assert_called_once_with(4242, session.GRACE, session._stderr)
 
+    @needs_session_posix
     def test_the_posix_no_ops_answer_as_the_mac_needs(self):
         import session_posix
         self.assertEqual(session_posix.spawn_flags(), {})
@@ -455,6 +459,7 @@ class TestAChunkBoundaryInsideAnEscape(unittest.TestCase):
         self.assertEqual(text, "ready")
 
 
+@posix_only
 class TestTheTerminalSize(unittest.TestCase):
     """SPEC.md §6: the scrape depends on the URL landing on one line."""
 
@@ -620,6 +625,7 @@ class TestTheChildEnvironment(unittest.TestCase):
         self.assertIn("/.local/bin", env["PATH"])
         self.assertIn("/opt/homebrew/bin", env["PATH"])
 
+    @unittest.skipUnless(POSIX, "the Mac's PATH; Windows keeps the inherited one (WINDOWS.md W3g)")
     def test_claude_is_first_on_the_path(self):
         # ~/.local/bin/claude is the version-pinned symlink (§9.8) and must win over anything
         # a brew install might drop in later.
@@ -712,6 +718,7 @@ class TestMetaIsWrittenAtomically(unittest.TestCase):
         session.write_meta(self.tmp, {"state": "starting"})
         self.assertEqual(os.listdir(self.tmp), ["meta.json"])
 
+    @unittest.skipUnless(POSIX, "os.replace over a file a reader holds open is PermissionError on Windows: WINDOWS.md W3a")
     def test_a_reader_never_sees_a_partial_record(self):
         """The test that would fail against a plain `open(path, "w")`.
 
@@ -775,6 +782,7 @@ class TestTheRunner(unittest.TestCase):
         return session.Runner("3f2a91", kw.pop("cwd"), "beacon-3f2a", root=self.sessions,
                               argv=["/bin/sh", "-c", script], log=lambda m: None, **kw)
 
+    @posix_only
     def test_it_records_the_link_and_goes_live(self):
         r = self.runner("printf '\\033[32mhere: %s\\033[0m\\r\\n'; sleep 0.4" % CAPTURED)
         r.run()
@@ -795,6 +803,7 @@ class TestTheRunner(unittest.TestCase):
         self.assertEqual(meta["runner_pid"], os.getpid())
         self.assertIsNone(meta["url"])
 
+    @posix_only
     def test_a_child_that_dies_without_a_link_is_failed_not_ended(self):
         """§4.6 sends the pty tail to the phone on `failed`, and §9.7 is why it matters.
 
@@ -808,6 +817,7 @@ class TestTheRunner(unittest.TestCase):
         self.assertEqual(meta["state"], session.FAILED)
         self.assertIsNone(meta["url"])
 
+    @posix_only
     def test_the_transcript_is_kept_in_full(self):
         r = self.runner("printf 'line one\\r\\nline two\\r\\n'")
         r.run()
@@ -816,6 +826,7 @@ class TestTheRunner(unittest.TestCase):
         self.assertIn(b"line one", log)
         self.assertIn(b"line two", log)
 
+    @posix_only
     def test_the_transcript_keeps_its_escapes(self):
         # §3 calls pty.log the full ANSI transcript, and §12's own fixture came from one. A
         # stripped log could never be replayed into a test like this file's.
@@ -830,6 +841,7 @@ class TestTheRunner(unittest.TestCase):
         r.begin()
         self.assertTrue(os.path.isdir(r.dir))
 
+    @posix_only
     def test_an_initial_prompt_is_typed_after_the_link_appears(self):
         """§4: type it only once the session is live, then Enter separately.
 
@@ -844,6 +856,7 @@ class TestTheRunner(unittest.TestCase):
             log = fh.read()
         self.assertIn(b"fix the probe test", log, "the prompt was never typed")
 
+    @posix_only
     def test_no_prompt_means_nothing_is_typed(self):
         # Otherwise a bare `claude beacon` would put a stray newline into a fresh session.
         # Exact equality: the transcript is what the child printed and nothing else, so a
@@ -874,6 +887,7 @@ class TestTheRunner(unittest.TestCase):
         self.assertEqual(meta["state"], session.FAILED)
         self.assertIsNone(meta["claude_pid"], "it spawned something anyway")
 
+    @posix_only
     def test_a_miscased_project_still_passes_the_recheck(self):
         # §9.9 again, from the other side: the spelling that arrives is the spelling that was
         # sent, and the re-check must not reject a real directory over its case.
@@ -883,6 +897,7 @@ class TestTheRunner(unittest.TestCase):
         self.assertEqual(session.read_meta(r.dir)["state"], session.ENDED)
 
 
+@posix_only
 class TestKillingTheRunner(unittest.TestCase):
     """§12's manual check, automated: kill the runner and claude dies with it."""
 
@@ -941,6 +956,7 @@ class TestKillingTheRunner(unittest.TestCase):
                          "the record must not still say `live` after the runner is gone")
 
 
+@posix_only
 class TestDetaching(unittest.TestCase):
     """SPEC.md §8. Tested in a subprocess, because a setsid() here would detach the runner."""
 
@@ -1088,6 +1104,7 @@ class TestTheTranscriptDoesNotGrowForever(unittest.TestCase):
         t.write(b"k")
         self.assertIn(b"k", self.read(), "the transcript stopped being written")
 
+    @posix_only
     def test_the_runner_caps_a_noisy_session(self):
         """End to end, through a real pty: the child prints more than the cap and the two
         files on disk are still bounded when it is over."""
@@ -1208,6 +1225,7 @@ class TestTheTrustDialog(unittest.TestCase):
         self.assertLessEqual(len(t.text), session.TRUST_KEEP * 2)
 
 
+@posix_only
 class TestAFreshDirectoryComesUpToALink(unittest.TestCase):
     """The other half of §9.3, through a real pty against a fake that insists on a real answer.
 
