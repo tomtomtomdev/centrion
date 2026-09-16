@@ -375,6 +375,24 @@ def claude_argv(binary, name):
 # (WINDOWS.md §2, W1a) and are reached as `spawn` / `terminate` / `_reaped` above.
 
 
+#: How hard `write_meta` tries to land its `os.replace`. WINDOWS.md §4, W3a.
+#:
+#: POSIX renames over an open file without noticing. Windows refuses, with `PermissionError`,
+#: whenever any handle on the target was opened without `FILE_SHARE_DELETE` — which is every
+#: handle `open()` hands out, including the listener's own `read_meta`. So on that platform the
+#: atomic write has a second failure the Mac has never had, and the write that matters most is
+#: the one carrying the URL.
+#:
+#: Measured (W3a, this box): against a listener polling at `bot.SESSION_POLL`, 22 of 150 writes
+#: were refused outright and five tries 20ms apart lost none at all, three runs running, for
+#: about 0.2s of waiting across the whole run. Against a reader that never pauses, *no* policy wins — 5 x 20ms lost 147 of 150 and
+#: 10 x 50ms lost 95 while costing half a second a write. So this is sized for the real reader
+#: and deliberately not widened for the pathological one: it is called from inside the runner's
+#: read loop, which is the session's life (§2), and 80ms is what that loop can afford to miss.
+META_RETRY_TRIES = 5
+META_RETRY_DELAY = 0.020
+
+
 def write_meta(directory, record):
     """Atomically, per §3 — the listener polls this every 0.25s while a session starts."""
     tmp = os.path.join(directory, META + ".%d.tmp" % os.getpid())
@@ -383,7 +401,26 @@ def write_meta(directory, record):
         fh.write("\n")
         fh.flush()
         os.fsync(fh.fileno())
-    os.replace(tmp, os.path.join(directory, META))
+
+    target = os.path.join(directory, META)
+    for attempt in range(META_RETRY_TRIES):
+        try:
+            os.replace(tmp, target)
+            return
+        except PermissionError:
+            # A reader has the target open; it will not have it open for long. See the
+            # constants above for why the bound is five and not fifty.
+            if attempt == META_RETRY_TRIES - 1:
+                # Give up the way the Mac always has — by raising what `os.replace` raised,
+                # which `bot.py`'s caller already catches. But take the temporary file with
+                # us: its name is fixed by the pid, so leaving it behind puts a stale record
+                # in the session directory for the next write to land on top of.
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            time.sleep(META_RETRY_DELAY)
 
 
 def read_meta(directory):

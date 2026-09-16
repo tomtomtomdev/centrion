@@ -718,7 +718,6 @@ class TestMetaIsWrittenAtomically(unittest.TestCase):
         session.write_meta(self.tmp, {"state": "starting"})
         self.assertEqual(os.listdir(self.tmp), ["meta.json"])
 
-    @unittest.skipUnless(POSIX, "os.replace over a file a reader holds open is PermissionError on Windows: WINDOWS.md W3a")
     def test_a_reader_never_sees_a_partial_record(self):
         """The test that would fail against a plain `open(path, "w")`.
 
@@ -726,10 +725,24 @@ class TestMetaIsWrittenAtomically(unittest.TestCase):
         the file and then fills it, so a reader in the gap gets either nothing or a prefix, and
         `json.loads` raises. §4 has the listener polling this file every 0.25s while a session
         starts, so the window is not theoretical.
+
+        **The two failures are not the same failure, and W3a is where that stopped being a
+        detail.** This ran posix-only since W1c because the reader recorded every exception
+        alike. On Windows a reader holding the file open makes the *writer's* `os.replace`
+        fail, and a writer replacing it makes the *reader's* `open` fail — both
+        `PermissionError`, both transient, and neither one a torn record. `read_meta` already
+        answers `None` to the first and `write_meta` retries the second. A partial record is a
+        `ValueError` out of `json`, it is the only thing this test is about, and measured over
+        every run of this spike it has never happened on either platform.
+
+        The retry delay is patched to nothing because this reader is not the listener: it never
+        pauses, so it holds the file open essentially always, and W3a measured that no retry
+        policy wins against it — 5 x 20ms lost 147 of 150 writes and 10 x 50ms lost 95. What is
+        asserted here is the reader's view. The retry's own timing is two tests up.
         """
         path = os.path.join(self.tmp, "meta.json")
         session.write_meta(self.tmp, {"state": "starting", "pad": "x" * 100000})
-        failures = []
+        torn, denied, reads = [], [], []
         stop = threading.Event()
 
         def reader():
@@ -737,19 +750,89 @@ class TestMetaIsWrittenAtomically(unittest.TestCase):
                 try:
                     with open(path) as fh:
                         json.loads(fh.read())
-                except Exception as e:
-                    failures.append(repr(e))
+                    reads.append(1)
+                except ValueError as e:
+                    torn.append(repr(e))
                     return
+                except OSError as e:
+                    denied.append(repr(e))
 
         watcher = threading.Thread(target=reader)
         watcher.start()
+        written = lost = 0
         try:
-            for i in range(150):
-                session.write_meta(self.tmp, {"state": "live", "pad": "y" * (100000 + i % 3)})
+            with mock.patch.object(session, "META_RETRY_DELAY", 0):
+                for i in range(150):
+                    try:
+                        session.write_meta(self.tmp,
+                                           {"state": "live", "pad": "y" * (100000 + i % 3)})
+                        written += 1
+                    except PermissionError:
+                        lost += 1
         finally:
             stop.set()
             watcher.join()
-        self.assertEqual(failures, [], "a reader saw a partial meta.json")
+
+        self.assertEqual(torn, [], "a reader saw a partial meta.json")
+        self.assertTrue(reads, "the reader never read anything; the test asserted nothing")
+        self.assertTrue(written, "every write was refused; the test asserted nothing")
+        if POSIX:
+            # Neither sharing failure exists here, and if one ever appears it is news.
+            self.assertEqual(denied, [], "a reader was refused the file on a platform that "
+                                         "has no sharing violations")
+            self.assertEqual(lost, 0, "a write was refused on a platform where rename over an "
+                                      "open file always works")
+
+    def test_a_replace_the_listener_refuses_is_retried(self):
+        """WINDOWS.md §4, W3a: `os.replace` onto a file another process has open.
+
+        `read_meta` opens, parses and closes in microseconds, and the listener does it once a
+        tick — but `os.replace` over a target held by any handle without `FILE_SHARE_DELETE`
+        is a `PermissionError` on Windows, and the moment it matters is the one write that
+        carries the URL. Measured on this box (W3a) a listener polling at `bot.SESSION_POLL`
+        refused 22 of 150 writes outright; five tries 20ms apart lost none, three runs running.
+        """
+        calls = []
+        real = os.replace
+
+        def refused_twice(source, target):
+            calls.append(target)
+            if len(calls) <= 2:
+                raise PermissionError(13, "Permission denied")
+            real(source, target)
+
+        slept = []
+        with mock.patch.object(session.os, "replace", refused_twice), \
+                mock.patch.object(session.time, "sleep", slept.append):
+            session.write_meta(self.tmp, {"state": "live", "url": CAPTURED})
+
+        self.assertEqual(len(calls), 3, "it did not retry")
+        self.assertEqual(slept, [session.META_RETRY_DELAY] * 2, "it waited the wrong amount")
+        self.assertEqual(session.read_meta(self.tmp)["url"], CAPTURED)
+        self.assertEqual(os.listdir(self.tmp), ["meta.json"], "a temporary file was left behind")
+
+    def test_a_replace_that_works_first_time_does_not_wait(self):
+        slept = []
+        with mock.patch.object(session.time, "sleep", slept.append):
+            session.write_meta(self.tmp, {"state": "starting"})
+        self.assertEqual(slept, [], "it slept on the happy path")
+
+    def test_it_gives_up_rather_than_retrying_forever(self):
+        """Five tries and 80ms of waiting, then the error is the caller's.
+
+        The runner's read loop is the session's life (§2) and this is called from inside it, so
+        the retry is bounded at something a terminal read can afford to miss. Giving up is not
+        silent: `write_meta` raises what `os.replace` raised, `bot.py`'s caller already catches
+        `OSError`, and the temporary file is cleaned up so the next write is not confused by it.
+        """
+        always = mock.Mock(side_effect=PermissionError(13, "Permission denied"))
+        with mock.patch.object(session.os, "replace", always), \
+                mock.patch.object(session.time, "sleep", lambda _: None):
+            with self.assertRaises(PermissionError):
+                session.write_meta(self.tmp, {"state": "live"})
+        self.assertEqual(always.call_count, session.META_RETRY_TRIES)
+        self.assertEqual(os.listdir(self.tmp), [],
+                         "the abandoned temporary file was left in the session directory")
 
     def test_a_missing_record_reads_as_nothing(self):
         self.assertIsNone(session.read_meta(os.path.join(self.tmp, "nope")))
@@ -1092,6 +1175,30 @@ class TestTheTranscriptDoesNotGrowForever(unittest.TestCase):
         t = self.transcript(cap=1024)
         t.write(b"h" * 100)
         self.assertTrue(os.path.exists(self.path + ".1"))
+
+    def test_the_transcript_is_closed_before_it_is_renamed(self):
+        """Tidy on the Mac, load-bearing here. WINDOWS.md §4.
+
+        POSIX will rename a file that is still open and the handle follows it, so the order of
+        these two lines has never mattered on the Mac. On Windows a rename of a file open
+        without `FILE_SHARE_DELETE` — which is every handle Python's `open` hands out — fails
+        with `PermissionError`, and `rotate` catches that by switching the cap off for the rest
+        of the session. So the wrong order here is not a crash; it is a transcript that quietly
+        stops being bounded, which is the whole of what slice 10 exists to prevent.
+        """
+        t = self.transcript(cap=1024)
+        saw = {}
+
+        def recording(source, target):
+            saw["closed"] = t.fh.closed
+            os.replace(source, target)
+
+        t.replace = recording
+        t.write(b"x" * 1100)
+        self.assertTrue(saw, "the transcript never rotated; the test asserted nothing")
+        self.assertTrue(saw["closed"],
+                        "rotate() renamed pty.log while it was still open — on Windows that is "
+                        "a PermissionError and the cap switches itself off")
 
     def test_a_rotation_that_cannot_be_done_does_not_stop_the_session(self):
         """The runner's read loop is the session's life: it holds the pty open (§2), and a

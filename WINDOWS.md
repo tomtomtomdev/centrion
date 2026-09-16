@@ -8,8 +8,8 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **W2b done (2026-09-16); W3a next.** The suite runs natively on Windows since W1c:
-514 tests, 444 pass, 69 skipped as the Mac's (each skip names its reason or the slice that
+Status: **W3a done (2026-09-16); W3b next.** The suite runs natively on Windows since W1c:
+518 tests, 449 pass, 68 skipped as the Mac's (each skip names its reason or the slice that
 un-gates it), one expected failure (W3h's). Since W2b it is run from the venv —
 `.venv\Scripts\python -m unittest -q` — because `config.py`'s secrecy check needs pywin32;
 `requirements-win.txt` exists as of that slice. The go/no-go question is answered *go*: under
@@ -183,13 +183,43 @@ and `SIGHUP`. Also handle `CTRL_BREAK_EVENT` the same way for tidiness; it costs
 **`Transcript.rotate()`** — today closes then `os.replace`s. That order is already right for
 Windows (a rename of an open file fails with `PermissionError` unless it was opened with
 `FILE_SHARE_DELETE`, which Python's `open` does not set). Keep the order; add a test that
-asserts it, because it is now load-bearing rather than tidy.
+asserts it, because it is now load-bearing rather than tidy. *W3a: done —
+`test_the_transcript_is_closed_before_it_is_renamed` asserts `self.fh.closed` from inside a
+recording `replace`. It passed before anything changed, as predicted, so it was checked by
+mutation instead: swap the two lines and it fails here with the cap silently switching itself
+off, which is the failure it exists to catch and is not a crash.*
 
 **`write_meta()`** — `os.replace` onto a file the *listener* may have open. `read_meta` opens,
 reads, closes in microseconds, but the race is real on Windows and the failure is a
-`PermissionError` at the moment the runner is writing `live` with the URL in it. Wrap the
-replace in a short retry (five tries, 20ms apart) on Windows. `read_meta` already returns
-`None` on any error, so the listener side needs nothing.
+`PermissionError` at the moment the runner is writing `live` with the URL in it. The replace is
+wrapped in a short retry, five tries 20ms apart. `read_meta` already returns `None` on any
+error, so the listener side needs nothing.
+
+*W3a measured all of this rather than assuming it, and the numbers decide two things the plan
+left open.* Against a reader polling at `bot.SESSION_POLL` — the listener — **22 of 150 writes
+were refused outright without the retry, and none at all with it**, three runs running, for
+about 0.2s of waiting across the whole run. The retry is not insurance; it is load-bearing at
+the ordinary poll rate. Against a reader that never pauses, though, **nothing wins**: five
+tries 20ms apart lost 147 of 150 and ten tries 50ms apart still lost 95 while costing half a
+second per write, inside the loop that has to keep reading the terminal. So the bound stays at
+five, sized for the real reader and deliberately not widened for the pathological one.
+
+Two things are *not* available as fixes, and both were tried:
+
+- **Opening the reader's handle with `FILE_SHARE_DELETE` does not help.** The obvious reading
+  of the rule says a share-delete handle should let the rename through. Measured: `os.replace`
+  onto a target held by a `CreateFileW` handle with
+  `FILE_SHARE_READ|WRITE|DELETE` fails with `PermissionError`, **winerror 5**, exactly as it
+  does against a plain `open()`. `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` wants more than
+  delete-sharing on the target. There is no reader-side fix, so the writer-side retry is the
+  whole of the answer.
+- **Widening the retry does not help**, per the numbers above.
+
+Giving up stays what it always was — `write_meta` raises what `os.replace` raised, and
+`bot.py`'s caller already catches `OSError` — with one repair W3a found on the way: the
+temporary file is now unlinked when the last try fails. Its name is fixed by the pid, so before
+this every abandoned write left a stale record in the session directory for the next write to
+land on top of.
 
 **`child_env()`** — the Mac version replaces `PATH` with a POSIX list and sets `HOME`, `SHELL`,
 `TERM`. On Windows: keep the inherited `PATH` and every `SYSTEMROOT`/`COMSPEC`/`APPDATA`/
@@ -789,7 +819,7 @@ the Mac when the slice touched shared or posix code.
 | W1c imports on Windows | done | 2026-09-15 | 12100d6, ef04618 | **492 ran: 422 pass, 69 skip, 1 xfail**, 5.9s · **not run** | **First Windows-green run.** `python -c "import bot, session"` → `procs = session_win`. Skips by file — `test_session` 31 (26 fork/pty/signal, 3 import `session_posix`, 1 → W3a, 1 → W3g), `test_bot` 23 (16 fork/shell/`ps`, 3 plist-vs-checkout → W5b, 3 symlink, 1 `chmod` → W2b), `test_config` 7 (4 modes → W2b, 2 → W2a, 1 symlink), `test_projects` 8 (6 symlink, 1 premise, 1 realpath case); every skip names its reason or its slice, and the plan's guess of ~40/~30 was 31/23. The full-suite hang was `TestSpawningForReal` alone — its stub child dies on `os.getsid` and the test waits for output that never comes; no other class blocks on Windows. Two assertions were Mac-*shaped* rather than Mac-only and are now portable: `tilde()`'s expected string (`os.path.join("~", …)`) and the read of `bot.py` as UTF-8 (the Windows default codec is cp1252, which has no 0x81). `test_config.Base` stands the 0600 check down on win32 so the other thirty rules run (W2b). `tests/support.py` is new: `POSIX`, and `needs_symlinks`, which skips for the *account* — this one cannot create symlinks (error 1314; Developer Mode is off) — so 10 §3 boundary tests skip here and run again the moment the privilege exists; whether they then pass on NTFS is unverified. Windows `realpath` returns the on-disk spelling (`resolve("BEACON")` → `…\beacon`), so the miscased-name note test is the Mac's. `scratch\run_win_tests.py` retired. Mac: not run — see Pending. |
 | W2a `claude_bin` default, drive rule | done · Mac pending | 2026-09-15 | 1355e76 | **499 ran: 429 pass, 69 skip, 1 xfail**, 5.9s · **not run** | **The drive rule was not a tidy-up; it was a live hole.** `resolve("C:foo")` refused before this slice only by falling through to check 4's "no project by that name exists" — so the red test had to assert check 1's wording, and `create("C:foo")`, which inverts check 4, made the directory. Measured: `ntpath.join` drops the `C:` when the root is on the same drive (`C:foo` → `<root>\foo`, a name laundered into a different one that check 3 accepts) and keeps it whole when the root is on another drive (`C:foo` resolved against C:'s per-drive cwd, outside the root — §10.4 broken, and live the day `projects_root` is not on C:). `splitdrive` returns the whole of `\\srv\share` as the drive too, so one clause covers UNC. §5.3 amended with the table. `shutil.which` has a `None` case the plan did not: with Claude Code not installed the Windows default *is* the lookup, so `_binary` now says so by name instead of falling through to "`claude_bin` must be a string" (§5.2 amended). Run step: the literal command gave W2b's 0600 error as predicted; with the mode check stood down, `claude_bin` resolved to the winget exe and not to the stale `.local\bin` copy, and the three drive shapes were refused against the real `~\Projects`. +7 tests, no skip count change: the two W2a-gated posix tests now have win32 twins, and the twin for `X_OK` was green before the code changed — `os.access(X_OK)` here is `F_OK` under another name, so removing the call changes no answer, only what the code claims. The placeholder `.telegram.json` the run step needed was deleted after; W2b's run step writes its own. |
 | W2b DACL check | done · Mac pending | 2026-09-16 | 382c534 | **514 ran: 444 pass, 69 skip, 1 xfail**, 14.8s · **not run** | **The plan's fix line did not fix it, and the plan's rule failed open.** Both found by tests that had to do the real thing rather than mock one. `/inheritance:r /grant:r "%USERNAME%":F` removes *inherited* entries only, so against the explicit `Users` grant this error is printed about it changed nothing — the message named a command that did not work. `config._fix` now builds the line from the principals it just read off the file (`/remove:g "BUILTIN\Users"`), and the test extracts the printed line from the exception, runs it through `cmd` so `%USERNAME%` expands, and loads the file: the message is documentation that is executed. The rule itself went from the plan's deny-list of three well-known SIDs to an allow-list — current user, SYSTEM, Administrators, OWNER RIGHTS — because `config.py`'s first paragraph says it fails closed and a deny-list cannot: `Guests`, a second local account and a domain group are all as readable and on none of the three lists. §5.1 rewritten. Three ACE shapes needed separating and each is a test: a deny ACE is not a grant (and denying `Users` denies *us* — the test denies `Guests`), a traverse-only mask (`0x100020` on `%USERPROFILE%`, `0x20` from `icacls /grant X:(X)`) reads no bytes, and an object ACE is refused rather than skipped. **§5.1's prediction that a fresh install hits this once was wrong**: the profile root, `~\Projects` and this checkout all grant only SYSTEM, Administrators and the user, and the run step's placeholder loaded first time — then was refused after `icacls /grant Users:(R)`, then loaded again after the printed line. Un-gated: `test_config.Base`'s `REQUIRED_MODE` stand-down is gone and the thirty other rules are tested on Windows for the first time; `TestPermissions` keeps `skipUnless(POSIX)` because a file mode is the Mac's mechanism, and its reason now says so instead of naming this slice. `test_bot`'s `chmod 0500` root gets its win32 twin via `icacls /deny <user>:(W)`, which does stop `mkdir` where the read-only attribute does not, and `config.create` catches WinError 5 as the OSError it already caught. `pywin32==312` and `requirements-win.txt` are new, so **the suite is run from `.venv` on Windows from here**; `import config` still works without pywin32 (the import is inside the check) but no config loads, which is the fail-closed answer. +15 tests, no skip count change. Mac: not run — see Pending. |
-| W3a rotate order, `write_meta` retry | todo | | | | |
+| W3a rotate order, `write_meta` retry | done · Mac pending | 2026-09-16 |  | **518 ran: 449 pass, 68 skip, 1 xfail**, 7.0s · **not run** | **The retry is load-bearing, and no retry could have un-gated the test it was supposed to.** Measured against a reader polling at `bot.SESSION_POLL`: 22 of 150 writes refused without it, 0 with it (three runs), ~0.2s of waiting total. Against a reader that never pauses: 5×20ms lost 147/150, 10×50ms lost 95/150 at half a second a write — so five stays, sized for the listener and not for the spin. **`FILE_SHARE_DELETE` on the reader's handle does not let the rename through** — `PermissionError` winerror 5, same as a plain `open()`; the obvious reader-side fix does not exist and the writer-side retry is the whole answer. So `test_a_reader_never_sees_a_partial_record` was un-gated by fixing the *test*, not by widening anything: its reader recorded every exception alike, and the two failures are not the same failure — `PermissionError` is a sharing artifact that happens on both sides and is transient (`read_meta` already answers `None`, `write_meta` now retries), while a torn record is a `ValueError` out of `json` and is the only thing the test is about. **Torn reads across every run of the spike and the suite: zero, on both platforms.** The test now counts the three outcomes separately, asserts no torn reads on either platform and no refusals at all on posix, and patches `META_RETRY_DELAY` to nothing because against its own reader the retry can only add 15s of stalling to a 6s suite. `rotate`'s order was already right, as the plan said, so its new test passed before any code changed and was checked by mutation instead — swapped, it fails, with the cap switching itself off rather than crashing. One repair found on the way: `write_meta` now unlinks its temporary file when the last try fails; the name is fixed by the pid, so every abandoned write used to leave a stale record in the session directory. +4 tests, one skip returned to the suite. Mac: not run — see Pending. |
 | W3b `Terminal` and `spawn` on ConPTY | todo | | | | |
 | W3c command-line quoting | todo | | | | |
 | W3d `pump` without `select` | todo | | | | |
@@ -835,6 +865,10 @@ verified until then, and W1c's first Windows-green run is not a substitute.
 | W2b | `/usr/bin/python3 -m unittest -q` | green, and **`TestPermissions` must still run there, all four**. It is the Mac's half of the secrecy pair, not a leftover: the whole of W2b is downstream of the fact that its 0600 check cannot be ported, so a skip on the Mac means `_secret` was bound to the wrong function. `TestTheWindowsDacl` (13) and the `_on_windows` creation twin skip whole, by design. The count is W2a's plus 15. |
 | W2b | `python3 -c "import config; print(config.load())"` | loads, exactly as before — `_secret` is `_secret_by_mode` off win32 and the mode check moved into it *verbatim*, message included. A `chmod 644 .telegram.json` there must still say `mode is 0644, must be 0600` and name `chmod 600`, not `icacls`. |
 | W2b | `/usr/bin/python3 -c "import config"` with pywin32 absent (it is) | no error. The import is inside `_win32security()`, reached only on win32; if the Mac ever raises ImportError from `config`, the platform split leaked out of the function. |
+| W3a | `/usr/bin/python3 -m compileall -q .` | clean — 3.9; the retry loop is plain `for`/`try`, but nothing here has compiled it with 3.9 |
+| W3a | `/usr/bin/python3 -m unittest -q` | green, and **one fewer skip than W2b**: `test_a_reader_never_sees_a_partial_record` is portable now and must *run* there. The count is W2b's plus 4. |
+| W3a | the same test, watched | on the Mac it must reach the end with `denied == []` and `lost == 0` — the two assertions that only run under `POSIX`. A refusal there would mean rename-over-an-open-file is not what this has always assumed it is. |
+| W3a | `python3 session.py --foreground --cwd <project> --name w3a`, then Ctrl-C | a link, and `meta.json` at `ended`. `write_meta` is on every state change, so this is the path the retry sits in; the Mac must never take the retry branch at all. |
 
 ### Decisions changed by evidence
 
@@ -914,6 +948,30 @@ Appended, dated, when a run step contradicts the plan above and a section was am
   on the first try. Windows' default is already owner-only here; the Mac's first-run
   `chmod 600` friction has no counterpart. `TestTheWindowsDacl.test_a_fresh_file_is_accepted`
   is the tripwire if that is ever untrue somewhere else.
+- **2026-09-16, W3a → §4.** The plan expected the `write_meta` retry to be belt-and-braces
+  and the gated test to be the hard case. It is the other way round. At the listener's actual
+  poll rate the retry saves 22 writes in 150 — without it the URL is lost about one time in
+  seven, which is not a rare path, it is a broken one. Against the gated test's spinning
+  reader no policy wins at any size worth paying for. The retry stays at five tries because
+  the number that matters is the first one, not the last.
+- **2026-09-16, W3a → §4.** `FILE_SHARE_DELETE` on the reading handle does *not* let
+  `os.replace` through. Measured with `CreateFileW` and
+  `FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE` held on the target: `PermissionError`,
+  winerror 5, identical to a plain `open()`. Recorded because it is the first thing anyone
+  reaching for a reader-side fix will try, and it does not work — `MoveFileExW` with
+  `MOVEFILE_REPLACE_EXISTING` wants more of the target than delete-sharing.
+- **2026-09-16, W3a → §8.** `test_a_reader_never_sees_a_partial_record` was gated because its
+  reader recorded every exception as the same failure. It is two failures: a `PermissionError`
+  is a sharing artifact, it happens on *both* sides on Windows, it is transient, and both
+  sides already handle it; a `ValueError` out of `json` is a torn record and is the property.
+  Separating them un-gated the test on its own, which is the §8 rule from W1c arriving again —
+  a test only gets a platform decorator when the mechanism it exercises is the platform's, and
+  atomicity is not. Torn reads measured across every run of the spike and the suite: zero.
+- **2026-09-16, W3a → §4.** `write_meta` leaked its temporary file on failure. The name is
+  `meta.json.<pid>.tmp`, fixed for the life of the runner, so an abandoned write left a stale
+  record in the session directory that the next write would land on top of. It is unlinked on
+  the last try now. Found by asserting `os.listdir` in the give-up test rather than by
+  anything going wrong.
 - **2026-09-16, W2b → §9 ritual, §3.** `requirements-win.txt` exists, with `pywin32==312` and
   the `pywinpty==3.0.5` that has been in `.venv` since W0a. The Windows suite is run from the
   venv from here (`.venv\Scripts\python -m unittest -q`); under the system interpreter
