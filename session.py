@@ -609,7 +609,19 @@ class Runner:
                 self.log("session %s: %s is not empty — leaving §9.3's dialog alone"
                          % (self.sid, self.project))
 
-        pid, master = spawn(self.argv, self.cwd, child_env())
+        # §4.6, and WINDOWS.md W3b: a terminal that cannot be started is a `failed` session
+        # with a reason in it, not a traceback. On the Mac this branch is close to unreachable
+        # — the fork succeeds whatever the binary is, and the child reports the exec failure on
+        # the pty, where it becomes ordinary output and the tail the phone gets. Windows has no
+        # such child: CreateProcess fails before one exists, so without this the runner dies
+        # here leaving meta.json saying `starting` for a session that will never start, which
+        # the listener can only wait out.
+        try:
+            pid, master = spawn(self.argv, self.cwd, child_env())
+        except OSError as e:
+            self.log("session %s: could not start the terminal: %s" % (self.sid, e))
+            self.update(state=FAILED, error=str(e))
+            return FAILED
         self.update(claude_pid=pid)
         self.log("spawned pid %d in %s" % (pid, self.cwd))
 

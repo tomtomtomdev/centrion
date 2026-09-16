@@ -735,10 +735,18 @@ class TestMetaIsWrittenAtomically(unittest.TestCase):
         `ValueError` out of `json`, it is the only thing this test is about, and measured over
         every run of this spike it has never happened on either platform.
 
-        The retry delay is patched to nothing because this reader is not the listener: it never
-        pauses, so it holds the file open essentially always, and W3a measured that no retry
-        policy wins against it — 5 x 20ms lost 147 of 150 writes and 10 x 50ms lost 95. What is
-        asserted here is the reader's view. The retry's own timing is two tests up.
+        The retry delay is patched to nothing because this reader is not the listener: it holds
+        the file open nearly always, and W3a measured that no retry policy wins against it —
+        5 x 20ms lost 147 of 150 writes and 10 x 50ms lost 95. What is asserted here is the
+        reader's view. The retry's own timing is two tests up.
+
+        **The millisecond between reads is what makes the Windows half assert anything** (W3b).
+        Without it the reader holds the file so continuously that 0 to 8 of the 150 replaces
+        land, and in 3 of 32 measured runs *none* did — so `written` was a coin toss, and the
+        run it came up tails on was a full suite under the load of W3b's ConPTY tests, failing
+        on the guard rather than on the property. With the pause 38 to 42 land, every run, busy
+        or idle. It is still nothing like the listener's quarter-second poll, and the reader is
+        still open across the whole of every `json.loads` — which is the part that matters.
         """
         path = os.path.join(self.tmp, "meta.json")
         session.write_meta(self.tmp, {"state": "starting", "pad": "x" * 100000})
@@ -756,6 +764,7 @@ class TestMetaIsWrittenAtomically(unittest.TestCase):
                     return
                 except OSError as e:
                     denied.append(repr(e))
+                time.sleep(0.001)          # see the docstring: the writer needs a way in
 
         watcher = threading.Thread(target=reader)
         watcher.start()
@@ -969,6 +978,25 @@ class TestTheRunner(unittest.TestCase):
         meta = session.read_meta(r.dir)
         self.assertEqual(meta["state"], session.FAILED)
         self.assertIsNone(meta["claude_pid"], "it spawned something anyway")
+
+    def test_a_terminal_that_cannot_be_started_is_failed_not_a_traceback(self):
+        """WINDOWS.md W3b: a spawn that raises leaves a record, not a stack trace.
+
+        On the Mac `spawn` barely has a failure: the fork succeeds whatever the binary is, and
+        the child reports the exec failure on the pty itself (session_posix.spawn writes it to
+        fd 2 and exits 126), so it arrives as ordinary output and §4.6 sends it to the phone.
+        Windows has no such child — `CreateProcess` fails before one exists and
+        `session_win.spawn` raises `OSError` — and without this the runner dies with a
+        traceback, leaving meta.json saying `starting` for a session that will never start:
+        the listener waits out its full timeout and the phone is told nothing.
+        """
+        r = self.runner("true")
+        with mock.patch.object(session, "spawn", side_effect=OSError("could not start it")):
+            self.assertEqual(r.run(), session.FAILED)
+        meta = session.read_meta(r.dir)
+        self.assertEqual(meta["state"], session.FAILED)
+        self.assertIn("could not start it", meta["error"])
+        self.assertIsNone(meta["claude_pid"], "it recorded a pid for a child that never was")
 
     @posix_only
     def test_a_miscased_project_still_passes_the_recheck(self):
