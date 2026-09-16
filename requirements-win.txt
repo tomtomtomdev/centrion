@@ -1,0 +1,24 @@
+# What centrion needs on Windows that the stdlib does not have. WINDOWS.md §3.
+#
+# The Mac keeps its zero-dependency stack — SPEC.md §3's "stdlib only" was a defence against
+# brew churn and it still holds there. It does not survive the ConPTY problem here, and the
+# honest answer is a venv with a lockfile rather than three optional imports. Every one of
+# these is a wheel; nothing compiles on install. `windows\install.ps1` (W5a) builds the venv
+# from this file, and on this box the suite is run with `.venv\Scripts\python -m unittest -q`.
+#
+# Pinned to what was measured on this box, not to a range: a compiled wheel that changes under
+# a bot which starts bypass-permissions shells is not something to find out about on a Monday.
+
+# W2b — the config file's secrecy check. NTFS has no mode bits, so `stat.S_IMODE` answers 0666
+# for every file and the Mac's 0600 check cannot be ported; the answer is in the DACL, and
+# win32security is how it is read. config.py imports it lazily, inside the check, so `import
+# config` still works without it — but a config file will not load, because a permission
+# check that cannot read the permissions has to fail closed.
+pywin32==312
+
+# W0a, and load-bearing from W3b — the ConPTY binding. The stdlib has none, and window size
+# must be set before the child exists (WINDOWS.md §6), which this does as a constructor
+# argument. Installed since the W0a spike; nothing shipped imports it yet.
+pywinpty==3.0.5
+
+# W4a adds psutil here, for `alive` and `started` — the two halves of §4's pid-reuse guard.

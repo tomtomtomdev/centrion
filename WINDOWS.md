@@ -8,9 +8,11 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **W2a done (2026-09-15); W2b next.** The suite runs natively on Windows since W1c:
-499 tests, 429 pass, 69 skipped as the Mac's (each skip names its reason or the slice that
-un-gates it), one expected failure (W3h's). The go/no-go question is answered *go*: under
+Status: **W2b done (2026-09-16); W3a next.** The suite runs natively on Windows since W1c:
+514 tests, 444 pass, 69 skipped as the Mac's (each skip names its reason or the slice that
+un-gates it), one expected failure (W3h's). Since W2b it is run from the venv —
+`.venv\Scripts\python -m unittest -q` — because `config.py`'s secrecy check needs pywin32;
+`requirements-win.txt` exists as of that slice. The go/no-go question is answered *go*: under
 a 200x50 ConPTY, `claude.exe --remote-control` printed its link 6.2 seconds after spawn, as one
 contiguous run, and today's `Scrape` finds it unmodified at every chunk size
 (`tests/fixtures/rc_startup_win.log`). Two Ctrl-C bytes on the ConPTY input ended it in 1.7
@@ -101,7 +103,7 @@ Windows Update cannot break at 3am.
 | Detach | `os.setsid()` in the runner | **`Popen(creationflags=DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP)`** in the listener — and **not** `CREATE_BREAKAWAY_FROM_JOB` | *W0c, verified 2026-09-14:* Task Scheduler does put the task in a job, with `LimitFlags = 0` — so `BREAKAWAY` is refused with "Access is denied" and the runner would never start. It is also unnecessary: `Stop-ScheduledTask` terminated the parent and left both a flagless child and a detached child running. The runner survives the listener on Windows by default; the two remaining flags give it no shared console and no inherited Ctrl-C. |
 | Lock | `lockf` on fd 9 across an `exec` | **a named mutex, `Local\centrion-<sha1 of config path>`**, taken in `bot.py --serve` before the first `getUpdates` | The kernel releases a mutex when its owner dies, so like `lockf` there is no stale lock to clear. No shell, no inherited fd, and so no equivalent of §8's "the runner must close fd 9" trap — child processes do not inherit a mutex handle unless asked to. |
 | Supervision | launchd `KeepAlive` + `RunAtLoad` | **Task Scheduler, at-logon trigger, running `windows\bot.cmd`, which is a restart loop** | See §7. Task Scheduler's own restart-on-failure is capped and slow; a ten-line loop in the wrapper is the honest `KeepAlive`. |
-| Config secrecy | `stat` mode 0600 | **DACL check**: refuse if any ACE grants `Everyone`, `Users`, or `Authenticated Users` | See §5.1. |
+| Config secrecy | `stat` mode 0600 | **DACL check**: refuse any ACE that grants a read or a write to anyone but us, SYSTEM or Administrators | *W2b amended this row:* an allow-list, not the deny-list of three well-known SIDs it used to name. See §5.1. |
 
 Dependencies: `pywinpty`, `psutil`, `pywin32`. Three packages, pinned in `requirements-win.txt`,
 installed into `.venv`. All three are wheels; nothing compiles on install. The Mac keeps its
@@ -201,18 +203,57 @@ terminal size.
 ## 5. Config on Windows
 
 **5.1 — the 0600 check.** `stat.S_IMODE` on Windows reports `0666` for every ordinary file, so
-today's check refuses every config file unconditionally. Replace it, on Windows only, with a
-DACL read (`win32security.GetFileSecurity` → `GetSecurityDescriptorDacl`) that refuses when any
-ACE grants access to the well-known `Everyone` (S-1-1-0), `Users` (S-1-5-32-545), or
-`Authenticated Users` (S-1-5-11) SIDs. The fix string in the error message becomes:
+today's check refuses every config file unconditionally. It is replaced, on Windows only, by a
+DACL read (`win32security.GetFileSecurity` → `GetSecurityDescriptorDacl`). *Built in W2b, and
+two of the three things this section said about it were wrong; the corrected version follows.*
+
+**Who is allowed, not who is forbidden.** The plan named `Everyone` (S-1-1-0), `Users`
+(S-1-5-32-545) and `Authenticated Users` (S-1-5-11), which are the three that arrive by
+accident. Refusing only those is a deny-list, and a deny-list fails *open*: a grant to a second
+local account, to a domain group, to `Guests`, is exactly as readable and is on none of the
+three lists. `config.py`'s first paragraph says everything in it fails closed, so the rule is
+inverted. An ACE may name the current user, `NT AUTHORITY\SYSTEM` (S-1-5-18),
+`BUILTIN\Administrators` (S-1-5-32-544), or `OWNER RIGHTS` (S-1-3-4); anything else is a
+refusal, by name. The last two of those are the machine's root, which the Mac's `chmod 600`
+does not exclude either. `OWNER RIGHTS` is how the owner's own access is spelled on a file
+under `%TEMP%`, in place of their SID.
+
+**An ACE is a bitmask, and half of them are denials.** Three ways to read the list wrongly,
+all of which look like the check working:
+
+| Entry | What it is | What the check does |
+|---|---|---|
+| type 1, `ACCESS_DENIED_ACE_TYPE` | `icacls /deny` — takes access away | Not a grant. Skipped. Reading it as one would refuse every *hardened* file. |
+| mask `0x100020` | SYNCHRONIZE \| FILE_TRAVERSE — the AppContainer ACE on `%USERPROFILE%`; `icacls /grant X:(X)` writes a bare `0x20` | Cannot read a byte. Ignored. Only `SECRET_BITS` counts: read/write/append data, DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_ALL/WRITE/READ. |
+| types 5–11 | object ACEs; `GetAce` returns a longer tuple with a GUID | Refused, not skipped. An entry we cannot parse is a grant we would have silently dropped. |
+
+A NULL DACL (`GetSecurityDescriptorDacl` → `None`) is refused too: it is not an *empty* list,
+which grants nobody anything — it means the object has no discretionary control at all, which
+is everyone, everything. So is a descriptor that cannot be read, and so is a missing pywin32.
+None of those mean "it is private"; they mean the question went unanswered.
+
+**The fix line, which the first version of got wrong.**
 
 ```
-icacls .telegram.json /inheritance:r /grant:r "%USERNAME%":F
+icacls "<path>" /inheritance:r /remove:g "BUILTIN\Users" /grant:r "%USERNAME%":F
 ```
 
-which strips inherited ACEs and leaves the owner. A file created under `%USERPROFILE%` normally
-inherits `Users`-readable ACEs from the profile root, so a fresh install *will* hit this
-error once, on purpose — the same first-run friction the Mac's `chmod 600` gives.
+`/inheritance:r` removes only the *inherited* entries. Measured (W2b): against an explicit
+`Users` grant — the only kind of file this error is ever printed about — the plan's line left
+the grant exactly where it was, so the message told you to run something that did not work.
+Explicit entries come off with `/remove:g`, and `config._fix` builds the line naming the
+principals it just read off this file, so it is both true and minimal. The test runs the
+printed line through `cmd` and then loads the file, which makes the message documentation that
+is executed.
+
+**And a fresh install does not hit this.** The plan said a file created under `%USERPROFILE%`
+inherits `Users`-readable ACEs from the profile root and so every install would meet this error
+once, on purpose. Measured on this box, it does not: `C:\Users\tommy`, `~\Projects` and this
+checkout all grant SYSTEM, Administrators and the user, and nothing else, and a
+`.telegram.json` written there loads first time. The first-run friction the Mac's `chmod 600`
+gives has no counterpart here — which is an argument for the check being an allow-list rather
+than a deny-list, not against it: nothing about the default makes the error common, so the
+error is worth being right when something has genuinely gone wrong.
 
 **5.2 — `claude_bin`.** `DEFAULT_CLAUDE_BIN = "~/.local/bin/claude"` becomes
 `shutil.which("claude")` on Windows, which today resolves to the winget `claude.exe`. The
@@ -398,13 +439,15 @@ Every slice, in this order, no skipping:
 2. **Green.** Write the least code that passes them. Platform tests are decorated
    `@unittest.skipUnless(sys.platform == "win32", ...)` or `!= "win32"`; portable tests are
    not decorated at all.
-3. **Build.** `python -m compileall -q .` on Windows. On the Mac, the same with
+3. **Build.** `.venv\Scripts\python -m compileall -q .` on Windows. On the Mac, the same with
    `/usr/bin/python3` — the Mac is 3.9 and Windows is 3.12, so a 3.10+ construct (`match`,
    `X | Y` in annotations, parenthesised context managers) is a Mac break that Windows tests
    will never see.
 4. **Run.** The hand-run named in the slice, on the real thing, and read the output. A slice
    with no runnable surface says so.
-5. **Test.** The whole suite: `python -m unittest -q` on Windows. For slices that touch
+5. **Test.** The whole suite: `.venv\Scripts\python -m unittest -q` on Windows — from the
+   venv since W2b, where `config.py` grew a check that needs pywin32; the system
+   interpreter still *imports* everything and fails 41 config tests. For slices that touch
    posix code or shared code, also on the Mac (`/usr/bin/python3 -m unittest -q`) before the
    commit, not after.
 6. **Commit.** One commit per slice, message `W<n>: <what>`, body naming the tests added.
@@ -745,7 +788,7 @@ the Mac when the slice touched shared or posix code.
 | W1b `bot.py` through `procs` | done · Mac pending | 2026-09-14 | 42fb3d4 | 15 pass (stubbed run: W1b's 10 + W1a's 6, one shared) · **not run** | `Sessions.alive` → `procs.alive` + `procs.started`; `process_started` moved to `session_posix.started` verbatim, alias kept for the real-process tests; `start()` passes `**procs.spawn_flags()`; `serve()` takes `procs.Lock(LOCK)` before constructing `Telegram`, exits 0 when refused; `bot.LOCK = var/.bot.lock`, the file lock.sh uses. `errno` import gone from bot.py. First red run caught that a module-level alias is not patchable — `alive` calls `procs.started` directly. |
 | W1c imports on Windows | done | 2026-09-15 | 12100d6, ef04618 | **492 ran: 422 pass, 69 skip, 1 xfail**, 5.9s · **not run** | **First Windows-green run.** `python -c "import bot, session"` → `procs = session_win`. Skips by file — `test_session` 31 (26 fork/pty/signal, 3 import `session_posix`, 1 → W3a, 1 → W3g), `test_bot` 23 (16 fork/shell/`ps`, 3 plist-vs-checkout → W5b, 3 symlink, 1 `chmod` → W2b), `test_config` 7 (4 modes → W2b, 2 → W2a, 1 symlink), `test_projects` 8 (6 symlink, 1 premise, 1 realpath case); every skip names its reason or its slice, and the plan's guess of ~40/~30 was 31/23. The full-suite hang was `TestSpawningForReal` alone — its stub child dies on `os.getsid` and the test waits for output that never comes; no other class blocks on Windows. Two assertions were Mac-*shaped* rather than Mac-only and are now portable: `tilde()`'s expected string (`os.path.join("~", …)`) and the read of `bot.py` as UTF-8 (the Windows default codec is cp1252, which has no 0x81). `test_config.Base` stands the 0600 check down on win32 so the other thirty rules run (W2b). `tests/support.py` is new: `POSIX`, and `needs_symlinks`, which skips for the *account* — this one cannot create symlinks (error 1314; Developer Mode is off) — so 10 §3 boundary tests skip here and run again the moment the privilege exists; whether they then pass on NTFS is unverified. Windows `realpath` returns the on-disk spelling (`resolve("BEACON")` → `…\beacon`), so the miscased-name note test is the Mac's. `scratch\run_win_tests.py` retired. Mac: not run — see Pending. |
 | W2a `claude_bin` default, drive rule | done · Mac pending | 2026-09-15 | 1355e76 | **499 ran: 429 pass, 69 skip, 1 xfail**, 5.9s · **not run** | **The drive rule was not a tidy-up; it was a live hole.** `resolve("C:foo")` refused before this slice only by falling through to check 4's "no project by that name exists" — so the red test had to assert check 1's wording, and `create("C:foo")`, which inverts check 4, made the directory. Measured: `ntpath.join` drops the `C:` when the root is on the same drive (`C:foo` → `<root>\foo`, a name laundered into a different one that check 3 accepts) and keeps it whole when the root is on another drive (`C:foo` resolved against C:'s per-drive cwd, outside the root — §10.4 broken, and live the day `projects_root` is not on C:). `splitdrive` returns the whole of `\\srv\share` as the drive too, so one clause covers UNC. §5.3 amended with the table. `shutil.which` has a `None` case the plan did not: with Claude Code not installed the Windows default *is* the lookup, so `_binary` now says so by name instead of falling through to "`claude_bin` must be a string" (§5.2 amended). Run step: the literal command gave W2b's 0600 error as predicted; with the mode check stood down, `claude_bin` resolved to the winget exe and not to the stale `.local\bin` copy, and the three drive shapes were refused against the real `~\Projects`. +7 tests, no skip count change: the two W2a-gated posix tests now have win32 twins, and the twin for `X_OK` was green before the code changed — `os.access(X_OK)` here is `F_OK` under another name, so removing the call changes no answer, only what the code claims. The placeholder `.telegram.json` the run step needed was deleted after; W2b's run step writes its own. |
-| W2b DACL check | todo | | | | |
+| W2b DACL check | done · Mac pending | 2026-09-16 |  | **514 ran: 444 pass, 69 skip, 1 xfail**, 14.8s · **not run** | **The plan's fix line did not fix it, and the plan's rule failed open.** Both found by tests that had to do the real thing rather than mock one. `/inheritance:r /grant:r "%USERNAME%":F` removes *inherited* entries only, so against the explicit `Users` grant this error is printed about it changed nothing — the message named a command that did not work. `config._fix` now builds the line from the principals it just read off the file (`/remove:g "BUILTIN\Users"`), and the test extracts the printed line from the exception, runs it through `cmd` so `%USERNAME%` expands, and loads the file: the message is documentation that is executed. The rule itself went from the plan's deny-list of three well-known SIDs to an allow-list — current user, SYSTEM, Administrators, OWNER RIGHTS — because `config.py`'s first paragraph says it fails closed and a deny-list cannot: `Guests`, a second local account and a domain group are all as readable and on none of the three lists. §5.1 rewritten. Three ACE shapes needed separating and each is a test: a deny ACE is not a grant (and denying `Users` denies *us* — the test denies `Guests`), a traverse-only mask (`0x100020` on `%USERPROFILE%`, `0x20` from `icacls /grant X:(X)`) reads no bytes, and an object ACE is refused rather than skipped. **§5.1's prediction that a fresh install hits this once was wrong**: the profile root, `~\Projects` and this checkout all grant only SYSTEM, Administrators and the user, and the run step's placeholder loaded first time — then was refused after `icacls /grant Users:(R)`, then loaded again after the printed line. Un-gated: `test_config.Base`'s `REQUIRED_MODE` stand-down is gone and the thirty other rules are tested on Windows for the first time; `TestPermissions` keeps `skipUnless(POSIX)` because a file mode is the Mac's mechanism, and its reason now says so instead of naming this slice. `test_bot`'s `chmod 0500` root gets its win32 twin via `icacls /deny <user>:(W)`, which does stop `mkdir` where the read-only attribute does not, and `config.create` catches WinError 5 as the OSError it already caught. `pywin32==312` and `requirements-win.txt` are new, so **the suite is run from `.venv` on Windows from here**; `import config` still works without pywin32 (the import is inside the check) but no config loads, which is the fail-closed answer. +15 tests, no skip count change. Mac: not run — see Pending. |
 | W3a rotate order, `write_meta` retry | todo | | | | |
 | W3b `Terminal` and `spawn` on ConPTY | todo | | | | |
 | W3c command-line quoting | todo | | | | |
@@ -788,6 +831,10 @@ verified until then, and W1c's first Windows-green run is not a substitute.
 | W2a | `python3 -c "import config; print(config.load())"` | a Config whose `claude_bin` is still `~/.local/bin/claude` expanded and **not** resolved through the version symlink — §5.2's split must not have moved the Mac's default |
 | W2a | `python3 -c "import config; print(config.resolve('C:foo', '<root>'))"` | `ProjectError` only if a directory of that name is absent; `posixpath.splitdrive` finds no drive, so on the Mac this is an ordinary name and check 4 is what refuses it. A check-1 refusal there means the rule was applied portably by mistake. |
 | W1c | `/usr/bin/python3 -m unittest -q` | green, and **nothing newly skipped**: every W1c decorator is `skipUnless(POSIX)` or `needs_symlinks`, and the Mac can create symlinks. The count is W1b's plus `TestEverythingImportsHere` (2). A skip on the Mac means a decorator landed on the wrong test. |
+| W2b | `/usr/bin/python3 -m compileall -q .` | clean — 3.9 again; nothing new reaches past it, and nothing on this box can check that |
+| W2b | `/usr/bin/python3 -m unittest -q` | green, and **`TestPermissions` must still run there, all four**. It is the Mac's half of the secrecy pair, not a leftover: the whole of W2b is downstream of the fact that its 0600 check cannot be ported, so a skip on the Mac means `_secret` was bound to the wrong function. `TestTheWindowsDacl` (13) and the `_on_windows` creation twin skip whole, by design. The count is W2a's plus 15. |
+| W2b | `python3 -c "import config; print(config.load())"` | loads, exactly as before — `_secret` is `_secret_by_mode` off win32 and the mode check moved into it *verbatim*, message included. A `chmod 644 .telegram.json` there must still say `mode is 0644, must be 0600` and name `chmod 600`, not `icacls`. |
+| W2b | `/usr/bin/python3 -c "import config"` with pywin32 absent (it is) | no error. The import is inside `_win32security()`, reached only on win32; if the Mac ever raises ImportError from `config`, the platform split leaked out of the function. |
 
 ### Decisions changed by evidence
 
@@ -845,4 +892,31 @@ Appended, dated, when a run step contradicts the plan above and a section was am
 - **2026-09-15, W1c → W2b.** `stat.S_IMODE` reports `0666` for every file on Windows, so
   the 0600 check refused every `test_config` case and hid the other thirty rules. Until
   the DACL check exists, `test_config.Base` stands the check down on win32 and
-  `TestPermissions` is the Mac's; W2b removes both.
+  `TestPermissions` is the Mac's; W2b removes both. *Done: the stand-down is gone and those
+  thirty rules now run here. `TestPermissions` keeps its decorator — a file mode is the Mac's
+  mechanism, which is the §8 rule, not a gate waiting on a slice.*
+- **2026-09-16, W2b → §5.1, §3.** The plan refused an ACE for `Everyone`, `Users` or
+  `Authenticated Users`. That is a deny-list, and it fails open: a grant to `Guests`, to a
+  second local account, or to a domain group is exactly as readable and on none of the three
+  lists. `config.py`'s first paragraph promises the opposite, and a bot token is not the place
+  to spend the promise. The rule is now an allow-list — current user, SYSTEM, Administrators,
+  OWNER RIGHTS — and every other principal is refused by name. The three well-known SIDs are
+  still what the tests use, because they are still what actually turns up.
+- **2026-09-16, W2b → §5.1.** The fix line in the error message was wrong, and would have
+  shipped wrong, because nothing had run it. `/inheritance:r` drops inherited entries only;
+  the file this error is printed about has an *explicit* `Users` grant, which survived it
+  untouched. The line is now built per-file from the principals just read off it, with
+  `/remove:g`, and the test pulls the line out of the exception text and executes it through
+  `cmd`. Any message that names a command should be tested by running that command.
+- **2026-09-16, W2b → §5.1.** "A fresh install *will* hit this error once, on purpose" is not
+  true on this box. `%USERPROFILE%`, `~\Projects` and this checkout grant SYSTEM,
+  Administrators and the user and nothing else, and a config written into the checkout loaded
+  on the first try. Windows' default is already owner-only here; the Mac's first-run
+  `chmod 600` friction has no counterpart. `TestTheWindowsDacl.test_a_fresh_file_is_accepted`
+  is the tripwire if that is ever untrue somewhere else.
+- **2026-09-16, W2b → §9 ritual, §3.** `requirements-win.txt` exists, with `pywin32==312` and
+  the `pywinpty==3.0.5` that has been in `.venv` since W0a. The Windows suite is run from the
+  venv from here (`.venv\Scripts\python -m unittest -q`); under the system interpreter
+  everything still imports — `win32security` is imported inside the check, not at module
+  level — but no config file loads, 41 tests fail, and that refusal is the correct answer to
+  "I cannot read the permissions" rather than a bug to route around.

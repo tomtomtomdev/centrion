@@ -50,6 +50,7 @@ Stdlib only, no network: `/usr/bin/python3 -m unittest discover -s tests -t . -v
 """
 import ast
 import errno
+import getpass
 import json
 import os
 import plistlib
@@ -2764,12 +2765,38 @@ class TestCreatingAProjectFromThePhone(Base):
         self.assertTrue(os.path.isdir(self.created()),
                         "stopping the session removed the project")
 
-    @unittest.skipUnless(POSIX, "chmod 0500 does not make a directory read-only on Windows; a DACL would (WINDOWS.md W2b)")
+    @unittest.skipUnless(POSIX, "chmod 0500 is the Mac's way to make a root unwritable; the "
+                         "Windows half of this pair is below (WINDOWS.md §5.1)")
     def test_a_creation_that_fails_is_answered_rather_than_raised(self):
         """§7: the poll loop survives everything. A read-only root, a full disk, a name the
         filesystem will not take — the phone gets a sentence and the daemon keeps polling."""
         os.chmod(self.projects, 0o500)
         self.addCleanup(os.chmod, self.projects, 0o700)
+        self.assert_the_refusal_is_a_sentence()
+
+    @unittest.skipIf(POSIX, "the Windows half of the pair above (WINDOWS.md §5.1)")
+    def test_a_creation_that_fails_is_answered_rather_than_raised_on_windows(self):
+        """The same property, reached the only way this platform offers.
+
+        `os.chmod(d, 0o500)` on Windows sets the directory's read-only *attribute*, and that
+        attribute has never stopped anything being created inside — the `mkdir` would succeed
+        and the test would pass while asserting nothing. Permissions here live in the DACL
+        (WINDOWS.md §5.1), so this denies the account the right to add anything to the root and
+        `os.mkdir` comes back with WinError 5, which `config.create` catches as the OSError it
+        already catches on the Mac.
+
+        The deny entry comes off again in cleanup, or the temp directory could not be removed.
+        """
+        user = getpass.getuser()
+        self.icacls(self.projects, "/deny", "%s:(W)" % user)
+        self.addCleanup(self.icacls, self.projects, "/remove:d", user)
+        self.assert_the_refusal_is_a_sentence()
+
+    def icacls(self, path, *args):
+        out = subprocess.run(["icacls", path] + list(args), capture_output=True, text=True)
+        assert out.returncode == 0, "icacls failed: %s%s" % (out.stdout, out.stderr)
+
+    def assert_the_refusal_is_a_sentence(self):
         tg = self.deliver(message("new scratchpad"))
         self.assertEqual(len(tg.sent), 1)
         self.assertEqual(self.sessions.started, [])

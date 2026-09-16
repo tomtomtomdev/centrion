@@ -35,7 +35,35 @@ if sys.platform == "win32":
 else:
     DEFAULT_CLAUDE_BIN = "~/.local/bin/claude"
 DEFAULT_MAX_SESSIONS = 2          # SPEC.md §3: 8 GB on this box.
-REQUIRED_MODE = 0o600
+REQUIRED_MODE = 0o600             # The Mac's secrecy check. Windows has no mode; see below.
+
+#: Windows: the principals that may appear in the config file's DACL. Everyone else is a
+#: refusal, including principals nobody thinks of as a leak — `Guests`, a second local
+#: account, a domain group. WINDOWS.md §5.1 named the three that arrive by accident
+#: (`Everyone`, `Users`, `Authenticated Users`) and refusing only those is a deny-list, which
+#: fails *open*: the first line of this module says the opposite, and a token is exactly the
+#: thing you do not get a second chance at. So the rule is an allow-list of "us, or already
+#: root here": the current user, plus these three.
+#:   S-1-5-18     NT AUTHORITY\SYSTEM   — the machine; the Mac's 0600 does not exclude root either
+#:   S-1-5-32-544 BUILTIN\Administrators — likewise
+#:   S-1-3-4      OWNER RIGHTS           — "whoever owns this", which under %TEMP% is how the
+#:                                         owner's own access is spelled instead of by SID
+ALWAYS_ALLOWED_SIDS = frozenset({"S-1-5-18", "S-1-5-32-544", "S-1-3-4"})
+
+#: Windows: the access bits that would let a principal read the token or take the file over.
+#: An ACE is a bitmask, not a yes/no — %USERPROFILE% carries an AppContainer ACE for
+#: SYNCHRONIZE|FILE_TRAVERSE and `icacls /grant X:(X)` writes a bare FILE_EXECUTE, neither of
+#: which can read a byte. Refusing those would refuse ordinary machines for nothing.
+#:   FILE_READ_DATA 0x1 · FILE_WRITE_DATA 0x2 · FILE_APPEND_DATA 0x4 · DELETE 0x10000
+#:   WRITE_DAC 0x40000 (grant yourself the read) · WRITE_OWNER 0x80000 (same, the long way)
+#:   GENERIC_ALL 0x10000000 · GENERIC_WRITE 0x40000000 · GENERIC_READ 0x80000000
+SECRET_BITS = 0x1 | 0x2 | 0x4 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000 | 0x80000000
+
+ACCESS_ALLOWED_ACE_TYPE = 0
+ACCESS_DENIED_ACE_TYPE = 1
+
+#: The line the Windows refusal tells you to run, built by `_fix` below. WINDOWS.md §5.1.
+ICACLS_FIX = 'icacls "%s" /inheritance:r%s /grant:r "%%USERNAME%%":F'
 
 KNOWN_KEYS = frozenset({
     "bot_token", "allowed_chat_ids", "projects_root", "claude_bin", "max_sessions",
@@ -78,11 +106,7 @@ def _raw(path):
     except OSError as e:
         raise ConfigError("%s: cannot stat (%s)" % (path, e.strerror)) from None
 
-    mode = stat.S_IMODE(st.st_mode)
-    if mode & ~REQUIRED_MODE:
-        raise ConfigError(
-            "%s: mode is %04o, must be 0600 — it holds the bot token, which is shell access to "
-            "this machine. Fix with: chmod 600 %s" % (path, mode, path))
+    _secret(path, st)
 
     try:
         with open(path, encoding="utf-8") as fh:
@@ -95,6 +119,147 @@ def _raw(path):
     if not isinstance(data, dict):
         raise ConfigError("%s: must be a JSON object, found %s" % (path, type(data).__name__))
     return data
+
+
+def _fix(path, offenders=()):
+    r"""The icacls line that lands this file at owner-only, given who is on it right now.
+
+    `/inheritance:r` drops the *inherited* entries and nothing else. WINDOWS.md §5.1's line
+    stopped there, and measured (W2b), that leaves an explicit `Users` grant exactly where it
+    was — so in the one case the message is ever printed, it told you to run something that
+    did not fix it. Explicit entries come off with `/remove:g`, and the principals to name are
+    the ones we just read off the file, so the line is both true and minimal.
+    """
+    return ICACLS_FIX % (path, "".join(' /remove:g "%s"' % who for who in offenders))
+
+
+def _secret_by_mode(path, st):
+    """The Mac: nobody but the owner may read or write it, and `stat` says so plainly."""
+    mode = stat.S_IMODE(st.st_mode)
+    if mode & ~REQUIRED_MODE:
+        raise ConfigError(
+            "%s: mode is %04o, must be 0600 — it holds the bot token, which is shell access to "
+            "this machine. Fix with: chmod 600 %s" % (path, mode, path))
+
+
+def _win32security():
+    """The module the DACL check needs. A function so the ImportError has one place to be
+    raised from, and so a test can take the module away without uninstalling anything."""
+    import win32security
+    return win32security
+
+
+def _descriptor(path):
+    """The file's security descriptor. Its own function for the same reason as above: the
+    interesting case is the one where this fails, and no unreadable file is needed to test it."""
+    win32security = _win32security()
+    return win32security.GetFileSecurity(path, win32security.DACL_SECURITY_INFORMATION)
+
+
+def _dacl(sd):
+    """The discretionary ACL, or None. None means NULL — see the caller; it is not 'empty'."""
+    return sd.GetSecurityDescriptorDacl()
+
+
+def _aces(dacl):
+    """Every entry in the ACL, in order, as GetAce returns them."""
+    return [dacl.GetAce(i) for i in range(dacl.GetAceCount())]
+
+
+def _me(win32security):
+    """This process's own user SID, as a string."""
+    import win32api
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32security.TOKEN_QUERY)
+    try:
+        sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+    finally:
+        win32api.CloseHandle(token)
+    return win32security.ConvertSidToStringSid(sid)
+
+
+def _principal(win32security, sid, text):
+    """A name for the error message. Unresolvable SIDs are named by their string, which is
+    still enough to hand to icacls."""
+    try:
+        name, domain, _ = win32security.LookupAccountSid(None, sid)
+    except Exception:
+        return text
+    return "%s\\%s" % (domain, name) if domain else name
+
+
+def _secret_by_dacl(path, st):
+    r"""Windows: nobody but us may read it, and `stat` is no help at all in saying so.
+
+    `st` is unread here, and is in the signature so that `_secret` is one shape on both
+    platforms; on this one the `os.stat` it comes from is only how "not found" is answered.
+
+    `stat.S_IMODE` answers 0666 for every ordinary file on NTFS — a number invented for
+    programs that insist on asking — so the Mac's check ported verbatim refuses a private file
+    and accepts a world-readable one with equal confidence. The DACL is where the answer is.
+    WINDOWS.md §5.1.
+
+    Everything here fails closed, because a check that cannot read the permissions and shrugs
+    is worse than no check: a missing `win32security`, an unreadable descriptor, a NULL DACL,
+    an ACE in a shape this does not parse. None of those mean "it is private"; they mean the
+    question was not answered, and the token does not get the benefit of the doubt.
+    """
+    try:
+        win32security = _win32security()
+    except ImportError:
+        raise ConfigError(
+            "%s: cannot check who may read this file — pywin32 is not installed, and on "
+            "Windows it is the only way to ask. Install it with: pip install -r "
+            "requirements-win.txt" % path) from None
+
+    try:
+        me = _me(win32security)
+        sd = _descriptor(path)
+        dacl = _dacl(sd)
+    except Exception as e:
+        # pywintypes.error is not an OSError, and a descriptor we could not read is a refusal
+        # whatever the exception's class. `strerror` is absent on some of them.
+        raise ConfigError(
+            "%s: cannot read its permissions (%s) — it holds the bot token, so an unanswered "
+            "question is a refusal" % (path, getattr(e, "strerror", None) or e)) from None
+
+    if dacl is None:
+        # A NULL DACL is not an empty one. An empty ACL grants nobody anything; NULL means the
+        # object has no discretionary control at all, which is to say everyone, everything.
+        raise ConfigError(
+            "%s: has no access-control list, which on Windows grants everyone full access — "
+            "it holds the bot token, which is shell access to this machine. Fix with: %s"
+            % (path, _fix(path)))
+
+    allowed = ALWAYS_ALLOWED_SIDS | {me}
+    readers, seen = [], set()     # One principal can hold several ACEs; name it once.
+    for ace in _aces(dacl):
+        (ace_type, _flags) = ace[0]
+        if ace_type == ACCESS_DENIED_ACE_TYPE:
+            continue                      # A deny entry grants nothing; it is not a reader.
+        if ace_type != ACCESS_ALLOWED_ACE_TYPE or len(ace) != 3:
+            # Object ACEs (types 5-11) come back from GetAce as a longer tuple with a GUID
+            # in it. Skipping an entry we cannot parse would be skipping a grant.
+            raise ConfigError(
+                "%s: carries an access-control entry of type %d that this check does not "
+                "understand, so it cannot say who may read the file. Read the list with "
+                "`icacls \"%s\"`, or throw it away and start again: `icacls \"%s\" /reset`, "
+                "then %s" % (path, ace_type, path, path, _fix(path)))
+        mask, sid = ace[1], ace[2]
+        if not mask & SECRET_BITS:
+            continue                      # Traverse, synchronise, read-attributes: not the bytes.
+        text = win32security.ConvertSidToStringSid(sid)
+        if text not in allowed and text not in seen:
+            seen.add(text)
+            readers.append(_principal(win32security, sid, text))
+
+    if readers:
+        raise ConfigError(
+            "%s: %s may read it — it holds the bot token, which is shell access to this "
+            "machine. Fix with: %s" % (path, ", ".join(readers), _fix(path, readers)))
+
+
+#: Same question on both platforms, asked of the only thing that can answer it there.
+_secret = _secret_by_dacl if sys.platform == "win32" else _secret_by_mode
 
 
 def _keys(path, data):

@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -35,14 +36,6 @@ class Base(unittest.TestCase):
         with open(self.claude, "w") as fh:
             fh.write("#!/bin/sh\n")
         os.chmod(self.claude, 0o755)
-        if not POSIX:
-            # WINDOWS.md 5.1, W2b: stat.S_IMODE is 0666 for every ordinary file on Windows,
-            # so the 0600 check refuses everything and no other rule in this file could be
-            # tested. Stood down here until the DACL check replaces it; TestPermissions is
-            # the Mac's until then, and W2b's tests are the Windows secrecy check.
-            stood_down = mock.patch.object(config, "REQUIRED_MODE", 0o666)
-            stood_down.start()
-            self.addCleanup(stood_down.stop)
 
     def valid(self, **over):
         d = {"bot_token": TOKEN, "allowed_chat_ids": [987654321],
@@ -87,8 +80,8 @@ class TestFileItself(Base):
         self.refuses(None, "object", raw="[1, 2, 3]")
 
 
-@unittest.skipUnless(POSIX, "stat modes are the Mac's secrecy check; Windows reports 0666 for "
-                     "every file and the DACL check is WINDOWS.md W2b")
+@unittest.skipUnless(POSIX, "the file mode is the Mac's half of the secrecy pair; the Windows "
+                     "half is TestTheWindowsDacl below (WINDOWS.md 5.1)")
 class TestPermissions(Base):
     def test_a_world_readable_config_is_refused(self):
         # 0644 in ~/Library or a synced folder is how a token gets read by something else.
@@ -106,6 +99,167 @@ class TestPermissions(Base):
         # Stricter than required is not an error.
         cfg = config.load(self.write(self.valid(), mode=0o400))
         self.assertEqual(cfg.bot_token, TOKEN)
+
+
+@unittest.skipIf(POSIX, "the DACL is the Windows half of the secrecy pair above: WINDOWS.md 5.1")
+class TestTheWindowsDacl(Base):
+    """W2b: what "nobody else can read this" means on a filesystem with no mode bits.
+
+    `stat.S_IMODE` answers 0666 for every ordinary file on NTFS, so the Mac's check cannot be
+    ported -- it would refuse a perfectly private file and accept a world-readable one, both
+    for the same reason: it is reading a number Windows made up. The DACL is where the answer
+    actually lives, and these tests write real ACEs with `icacls` rather than mocking one,
+    because the thing under test is whether we read the real list correctly.
+    """
+
+    def icacls(self, path, *args):
+        out = subprocess.run(["icacls", path] + list(args), capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, "icacls failed: %s%s" % (out.stdout, out.stderr))
+
+    def grant(self, path, sid, right="(R)"):
+        """Add an allow ACE for a well-known SID, the way a careless copy or a sync would."""
+        self.icacls(path, "/grant", "*%s:%s" % (sid, right))
+
+    def test_a_fresh_file_is_accepted(self):
+        """The baseline -- and the reason this is not merely first-run friction.
+
+        WINDOWS.md 5.1 predicted that a file under %USERPROFILE% inherits `Users`-readable ACEs
+        and so a fresh install would hit this error once, on purpose. Measured, it does not:
+        the profile root grants SYSTEM, Administrators and the user, and nothing else. If this
+        test ever fails, the prediction was right after all and 5.1's note is what to re-read.
+        """
+        cfg = config.load(self.write(self.valid()))
+        self.assertEqual(cfg.bot_token, TOKEN)
+
+    def test_a_users_readable_config_is_refused(self):
+        path = self.write(self.valid())
+        self.grant(path, "S-1-5-32-545")
+        with self.assertRaises(config.ConfigError) as cm:
+            config.load(path)
+        msg = str(cm.exception)
+        self.assertIn("Users", msg, "the refusal did not name who can read it: %r" % msg)
+        self.assertIn("icacls", msg, "the refusal did not say how to fix it: %r" % msg)
+        self.assertNotIn(TOKEN, msg)
+
+    def test_an_everyone_readable_config_is_refused(self):
+        path = self.write(self.valid())
+        self.grant(path, "S-1-1-0")
+        with self.assertRaises(config.ConfigError) as cm:
+            config.load(path)
+        self.assertIn("Everyone", str(cm.exception))
+
+    def test_an_authenticated_users_readable_config_is_refused(self):
+        path = self.write(self.valid())
+        self.grant(path, "S-1-5-11")
+        with self.assertRaises(config.ConfigError) as cm:
+            config.load(path)
+        self.assertIn("Authenticated Users", str(cm.exception))
+
+    def test_a_grant_to_any_other_principal_is_refused_too(self):
+        """Fail closed, which a list of three well-known SIDs does not.
+
+        WINDOWS.md 5.1 named `Everyone`, `Users` and `Authenticated Users`. Those are the three
+        that arrive by accident, but the property config.py claims in its first paragraph is
+        that it fails closed, and a deny-list cannot: a grant to a second local account, to a
+        domain group, or to `Guests` is exactly as readable and is on none of the three lists.
+        The check allows the principals that are us or are already root on this box -- the
+        current user, SYSTEM, Administrators, OWNER RIGHTS -- and refuses everything else.
+        """
+        path = self.write(self.valid())
+        self.grant(path, "S-1-5-32-546")          # Guests: on no well-known list.
+        with self.assertRaises(config.ConfigError) as cm:
+            config.load(path)
+        self.assertIn("Guests", str(cm.exception))
+
+    def test_a_deny_ace_is_not_a_grant(self):
+        """A DACL is not a list of names; some of its entries take access away.
+
+        Denying `Users` would also deny us -- we are in `Users` -- so this denies `Guests`, who
+        we are not. Reading the ACE type wrongly turns every hardened config file into a
+        refusal, which is the failure mode that looks exactly like the check working.
+        """
+        path = self.write(self.valid())
+        self.icacls(path, "/deny", "*S-1-5-32-546:(R)")
+        cfg = config.load(path)
+        self.assertEqual(cfg.bot_token, TOKEN)
+
+    def test_a_traverse_only_ace_is_not_a_grant(self):
+        """%USERPROFILE% carries an AppContainer ACE with mask 0x100020 -- SYNCHRONIZE and
+        FILE_TRAVERSE, and no right to read a byte. A right is a bitmask, not a yes or no."""
+        path = self.write(self.valid())
+        self.grant(path, "S-1-5-32-546", "(X)")
+        cfg = config.load(path)
+        self.assertEqual(cfg.bot_token, TOKEN)
+
+    def test_the_printed_fix_actually_fixes_it(self):
+        """The message ends in a command. This runs *that* command -- the literal text, through
+        cmd, so `%USERNAME%` expands the way it will when it is pasted -- and then asserts the
+        file loads. The message is documentation that is executed, so it cannot quietly rot.
+
+        It did rot once, before it was ever shipped: WINDOWS.md 5.1's line was
+        `/inheritance:r /grant:r "%USERNAME%":F`, and `/inheritance:r` removes only *inherited*
+        entries. Against an explicit `Users` grant -- the only kind of file this error is ever
+        printed about -- it left the grant exactly where it was.
+        """
+        path = self.write(self.valid())
+        self.grant(path, "S-1-5-32-545")
+        with self.assertRaises(config.ConfigError) as cm:
+            config.load(path)
+        line = str(cm.exception).split("Fix with: ", 1)[1]
+        out = subprocess.run(line, shell=True, capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, "the printed fix would not run: %s" % line)
+        cfg = config.load(path)
+        self.assertEqual(cfg.bot_token, TOKEN)
+
+    def test_the_fix_line_names_the_principal_it_has_to_remove(self):
+        """Not a deny-list of three SIDs in a format string: the line is built from what was
+        read off this file, so it removes whoever is actually on it."""
+        path = self.write(self.valid())
+        self.grant(path, "S-1-5-32-546")
+        with self.assertRaises(config.ConfigError) as cm:
+            config.load(path)
+        self.assertIn('/remove:g "BUILTIN\\Guests"', str(cm.exception))
+
+    def test_the_mode_is_not_consulted(self):
+        """0644 here is not a fact about anything, and the file is still ours alone."""
+        cfg = config.load(self.write(self.valid(), mode=0o644))
+        self.assertEqual(cfg.bot_token, TOKEN)
+
+    def test_an_unreadable_security_descriptor_is_refused(self):
+        """Fail closed: not knowing who can read it is not the same as nobody can."""
+        path = self.write(self.valid())
+        with mock.patch.object(config, "_descriptor", side_effect=OSError(5, "Access is denied")):
+            with self.assertRaises(config.ConfigError) as cm:
+                config.load(path)
+        self.assertIn("permissions", str(cm.exception).lower())
+
+    def test_a_null_dacl_is_refused(self):
+        """A NULL DACL is not an empty one -- it grants everyone everything."""
+        path = self.write(self.valid())
+        with mock.patch.object(config, "_dacl", return_value=None):
+            with self.assertRaises(config.ConfigError) as cm:
+                config.load(path)
+        self.assertIn("everyone", str(cm.exception).lower())
+
+    def test_an_ace_shape_we_do_not_understand_is_refused(self):
+        """Object ACEs come back from GetAce as a different tuple. Guess at one, and the guess
+        is a grant quietly skipped."""
+        path = self.write(self.valid())
+        with mock.patch.object(config, "_aces", return_value=[((5, 0), 0x1F01FF, None, "more")]):
+            with self.assertRaises(config.ConfigError) as cm:
+                config.load(path)
+        self.assertIn("access-control entry", str(cm.exception).lower())
+
+    def test_pywin32_missing_is_refused_by_name(self):
+        """The check needs `win32security`. Without it there is no answer, so there is no load,
+        and the message names `requirements-win.txt` rather than an ImportError at a caller."""
+        path = self.write(self.valid())
+        with mock.patch.object(config, "_win32security", side_effect=ImportError("nope")):
+            with self.assertRaises(config.ConfigError) as cm:
+                config.load(path)
+        msg = str(cm.exception)
+        self.assertIn("requirements-win.txt", msg)
+        self.assertNotIn(TOKEN, msg)
 
 
 class TestToken(Base):
