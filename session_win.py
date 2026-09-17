@@ -209,7 +209,11 @@ def spawn(argv, cwd, env, rows, cols):
       *arguments* separately: it prepends the program itself, quoted, so this passes `argv[1:]`
       and lets `subprocess.list2cmdline` do the quoting. That is the rule Windows programs
       actually parse by, and it has to be the library's and not a hand join, because a
-      `--prompt` from a phone goes through it (§10). W3c is the hostile case.
+      `--prompt` from a phone goes through it (§10). W3c is the hostile case, and it found
+      nothing to fix here: the round trip through `list2cmdline` and the child's own parser is
+      exact for quotes, backslashes and argument boundaries alike. What W3c did find is that
+      this is the *second* such round trip and not the first — `Sessions.start` makes one too,
+      because `Popen` has no execve to hand a list to.
     - **A binary that is not there fails here**, synchronously, with nothing written to the
       terminal. §4 expected ConPTY to carry the failure onto the pty the way the Mac's forked
       child does; it cannot, because there is no child yet to write it. So `WinptyError`

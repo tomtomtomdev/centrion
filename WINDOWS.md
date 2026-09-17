@@ -8,9 +8,10 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **W3b done (2026-09-16); W3c next.** The suite runs natively on Windows since W1c:
-531 tests, 462 pass, 68 skipped as the Mac's (each skip names its reason or the slice that
-un-gates it), one expected failure (W3h's). Since W2b it is run from the venv —
+Status: **W3c done (2026-09-17); W3d next.** The suite runs natively on Windows since W1c:
+539 tests, 470 pass, 68 skipped as the Mac's (each skip names its reason or the slice that
+un-gates it), one expected failure (W3h's) — and one unidentified error seen once in 35 runs,
+which W3c's row records rather than explains. Since W2b it is run from the venv —
 `.venv\Scripts\python -m unittest -q` — because `config.py`'s secrecy check needs pywin32;
 `requirements-win.txt` exists as of that slice. The go/no-go question is answered *go*: under
 a 200x50 ConPTY, `claude.exe --remote-control` printed its link 6.2 seconds after spawn, as one
@@ -152,6 +153,12 @@ What each function in today's `session.py` becomes.
   answered after, the pseudoconsole consumes it and an interactive `cmd` never sees it. The old
   WinPTY backend does not have the wait at all (0.22s), which is how the three seconds were
   pinned on ConPTY rather than on pywinpty.
+
+*W3c, 2026-09-17 — the first bullet above is confirmed, and it was half the story.* The round
+trip is exact: a prompt carrying `"`, `^`, `%`, `&`, `|`, `<`, `>` and a trailing backslash
+reaches the child as one argument, byte for byte, and so do an empty argument, a bare quote and
+a non-ASCII one. No code changed. The half the bullet missed is that the same flattening
+happens one process earlier, in `Sessions.start`'s `Popen` — see §6.
 
 **`pump()`** — no `select`. `pywinpty` reads are `pty.read(length, blocking=False)`, which
 returns an empty string when nothing is ready, so the loop becomes: read; if empty, sleep
@@ -393,6 +400,19 @@ session: if a Windows update ever gives that job `KILL_ON_JOB_CLOSE`, every sess
 the listener, and the fix at that point is to spawn the runner through a second scheduled task
 or WMI rather than `Popen`. `reap()` stays: `Popen.poll()` works on Windows.
 
+*W3c, 2026-09-17 — this `Popen` is a quoting hop, and the plan had not noticed.* §4 says
+ConPTY takes a command line and that the quoting there has to be the library's. It is just as
+true one process earlier and this section never said so: `Popen` has no `execve` to hand a list
+to on Windows, so it joins `argv` with `subprocess.list2cmdline` itself and the runner's own C
+runtime splits it apart again before `argparse` sees anything. The prompt therefore makes the
+round trip **twice** on Windows — once here and once into ConPTY — where on the Mac it makes it
+zero times. `bot.py`'s comment claimed "there are no quoting rules to get wrong when there is
+nothing to quote for", which is a true sentence about `execve` and a false one here; it now
+says which platform it is describing. The defence itself is unchanged and still sound — no
+shell is in the chain either way, so nothing expands a `%VAR%` or acts on a `>` — but "no
+quoting to get wrong" and "quoting that has to be exactly right" are different guarantees, and
+only the second one needs a test. `TestSpawningForRealOnWindows` is that test.
+
 **The lock** — moves from `bot.sh` into `serve()`, before `Telegram()` is constructed, so a
 second copy is refused before its first `getUpdates` (§7's 409 is mutual). On the Mac the lock
 stays in `bot.sh`, and `serve()` calls `procs.Lock(...).take()`, which is a no-op on posix
@@ -500,7 +520,13 @@ Every slice, in this order, no skipping:
 
 1. **Red.** Write the tests named in the slice first. Run the suite. The new tests fail, or
    are skipped for a missing fixture — and nothing else changes colour. A slice whose tests
-   pass before its code exists has the wrong tests.
+   pass before its code exists has the wrong tests — *unless the slice's own text predicted
+   it*, which W3a's `rotate` ordering and W3c's quoting both did, because some slices exist to
+   find out whether a mechanism is already right. Those do not skip to step 3. They break the
+   thing under test on purpose and show the tests catching it (W3a swapped `rotate`'s two
+   statements; W3c replaced `list2cmdline` with `" ".join`), and the row in §11 records which
+   tests did *not* fail under the mutation, because that is the half that says whether it was
+   aimed at the right thing.
 2. **Green.** Write the least code that passes them. Platform tests are decorated
    `@unittest.skipUnless(sys.platform == "win32", ...)` or `!= "win32"`; portable tests are
    not decorated at all.
@@ -674,6 +700,30 @@ find a Windows program that is not a shell builtin.
 - Green: usually nothing beyond `list2cmdline`; if it fails, the fix is here and nowhere else.
 - Run: none.
 - Test: Windows.
+
+*W3c: done.* "Usually nothing" was right about the code and wrong about the slice. `spawn`
+needed no change — the round trip through `list2cmdline` and the child's own parser is exact
+for quotes, for backslashes before quotes, for empty arguments and for non-ASCII — so the
+eight new tests were checked the only way a green-before-the-code test can be, by mutation:
+with `list2cmdline` swapped for `" ".join`, six of the eight fail. The two that survive are
+the two that do not route through it, which is the answer that says the check worked.
+
+What the slice found instead is **a second quoting hop the plan had not counted**. §4 knew
+ConPTY takes a command line; §6 did not say that `Sessions.start`'s `Popen` takes one too,
+because on the Mac it does not — `execve` is handed the list. So a prompt off a phone is
+flattened and re-split **twice** on Windows, and the only place that was written down was a
+comment in `bot.py` asserting the opposite ("no quoting rules to get wrong when there is
+nothing to quote for"). §6 above carries the correction and `bot.py`'s comment now names the
+platform it is describing. `tests/test_bot.py::TestSpawningForRealOnWindows` is the Windows
+twin of `TestSpawningForReal`'s prompt test — same claim, other alphabet: `;` and backticks
+there, `&` `|` `>` `^` `%VAR%` here, and in both the assertion that the redirect did not
+happen is the one that matters.
+
+The case worth naming is the trailing backslash, because its failure is not mangled text but
+a **shorter argv**: `--prompt "…C:\dir\"` re-read as `…C:\dir" --trust` loses the flag §9.3
+decides trust with. The hand-run shows the rule doing its work — `C:\dir\` leaves as
+`"…C:\dir\\"`, the backslash doubled before the closing quote — and the test asserts the argv
+is still fifteen elements with `--trust` last.
 
 **W3d — `pump` without `select`.**
 - Red: portable `test_session.py::test_pump_with_fake_terminal` drives `Runner.pump` with a
@@ -864,7 +914,7 @@ the Mac when the slice touched shared or posix code.
 | W2b DACL check | done · Mac pending | 2026-09-16 | 382c534 | **514 ran: 444 pass, 69 skip, 1 xfail**, 14.8s · **not run** | **The plan's fix line did not fix it, and the plan's rule failed open.** Both found by tests that had to do the real thing rather than mock one. `/inheritance:r /grant:r "%USERNAME%":F` removes *inherited* entries only, so against the explicit `Users` grant this error is printed about it changed nothing — the message named a command that did not work. `config._fix` now builds the line from the principals it just read off the file (`/remove:g "BUILTIN\Users"`), and the test extracts the printed line from the exception, runs it through `cmd` so `%USERNAME%` expands, and loads the file: the message is documentation that is executed. The rule itself went from the plan's deny-list of three well-known SIDs to an allow-list — current user, SYSTEM, Administrators, OWNER RIGHTS — because `config.py`'s first paragraph says it fails closed and a deny-list cannot: `Guests`, a second local account and a domain group are all as readable and on none of the three lists. §5.1 rewritten. Three ACE shapes needed separating and each is a test: a deny ACE is not a grant (and denying `Users` denies *us* — the test denies `Guests`), a traverse-only mask (`0x100020` on `%USERPROFILE%`, `0x20` from `icacls /grant X:(X)`) reads no bytes, and an object ACE is refused rather than skipped. **§5.1's prediction that a fresh install hits this once was wrong**: the profile root, `~\Projects` and this checkout all grant only SYSTEM, Administrators and the user, and the run step's placeholder loaded first time — then was refused after `icacls /grant Users:(R)`, then loaded again after the printed line. Un-gated: `test_config.Base`'s `REQUIRED_MODE` stand-down is gone and the thirty other rules are tested on Windows for the first time; `TestPermissions` keeps `skipUnless(POSIX)` because a file mode is the Mac's mechanism, and its reason now says so instead of naming this slice. `test_bot`'s `chmod 0500` root gets its win32 twin via `icacls /deny <user>:(W)`, which does stop `mkdir` where the read-only attribute does not, and `config.create` catches WinError 5 as the OSError it already caught. `pywin32==312` and `requirements-win.txt` are new, so **the suite is run from `.venv` on Windows from here**; `import config` still works without pywin32 (the import is inside the check) but no config loads, which is the fail-closed answer. +15 tests, no skip count change. Mac: not run — see Pending. |
 | W3a rotate order, `write_meta` retry | done · Mac pending | 2026-09-16 | ec55e8e | **518 ran: 449 pass, 68 skip, 1 xfail**, 7.0s · **not run** | **The retry is load-bearing, and no retry could have un-gated the test it was supposed to.** Measured against a reader polling at `bot.SESSION_POLL`: 22 of 150 writes refused without it, 0 with it (three runs), ~0.2s of waiting total. Against a reader that never pauses: 5×20ms lost 147/150, 10×50ms lost 95/150 at half a second a write — so five stays, sized for the listener and not for the spin. **`FILE_SHARE_DELETE` on the reader's handle does not let the rename through** — `PermissionError` winerror 5, same as a plain `open()`; the obvious reader-side fix does not exist and the writer-side retry is the whole answer. So `test_a_reader_never_sees_a_partial_record` was un-gated by fixing the *test*, not by widening anything: its reader recorded every exception alike, and the two failures are not the same failure — `PermissionError` is a sharing artifact that happens on both sides and is transient (`read_meta` already answers `None`, `write_meta` now retries), while a torn record is a `ValueError` out of `json` and is the only thing the test is about. **Torn reads across every run of the spike and the suite: zero, on both platforms.** The test now counts the three outcomes separately, asserts no torn reads on either platform and no refusals at all on posix, and patches `META_RETRY_DELAY` to nothing because against its own reader the retry can only add 15s of stalling to a 6s suite. `rotate`'s order was already right, as the plan said, so its new test passed before any code changed and was checked by mutation instead — swapped, it fails, with the cap switching itself off rather than crashing. One repair found on the way: `write_meta` now unlinks its temporary file when the last try fails; the name is fixed by the pid, so every abandoned write used to leave a stale record in the session directory. +4 tests, one skip returned to the suite. Mac: not run — see Pending. |
 | W3b `Terminal` and `spawn` on ConPTY | done · Mac pending | 2026-09-16 | b80f4f1 | **531 ran: 462 pass, 68 skip, 1 xfail**, 11.5s · **not run** | **Three seconds of every session start were the pseudoconsole waiting for an answer nobody was giving it.** A fresh ConPTY sends `ESC[c` — DA1, *what terminal are you* — and holds the child's output for 3.04s before giving up: measured on every shape of child, every run, and 0.04s once `Terminal` replies `ESC[?1;0c`. The old WinPTY backend has no such wait (0.22s), which is what pinned it on ConPTY rather than on pywinpty. The reply is sent only after the query has been seen, because before it the bytes would be ordinary input and would reach the child; after it, the console consumes them — an interactive `cmd` driven through this never sees them. This is three of W0a's 6.2 seconds to a link, and three of the phone's forty-five. Two more corrections to §4: **pywinpty takes the program and its arguments separately** and prepends the program itself (quoted — verified against an appname with a space), so `spawn` passes `list2cmdline(argv[1:])`; passing all of argv gives the child its own path as `argv[1]`, silently. And **an exec failure does not land on the pty**, because `CreateProcess` fails before there is a child to write it: pywinpty raises, nothing reaches the terminal, so `spawn` raises `OSError` and `Runner.run` catches it around the spawn — without that a missing binary is a traceback over a record still saying `starting`. `Terminal.close()` ends the child by itself (the pseudoconsole closes with its last reference, process gone in under half a second), which is a second reason for §4's close-last order. Run step: `cmd /c echo hello` came back in 0.05s; `cmd /c mode con` answered `'mode' is not recognized`, which is `child_env()` still handing out a POSIX `PATH` — W3g's, now visible instead of predicted. One repair found on the way: **W3a's torn-read test guards itself with `assertTrue(written)`, and on Windows that was a coin toss** — its reader held the file so continuously that 0–8 of 150 replaces landed and 3 of 32 measured runs landed none. It failed exactly that way once here, under the load of these ConPTY tests. A millisecond of pause between reads takes it to 38–42 landing, every run, busy or idle — so the Windows half now exercises the property instead of asserting nothing, and the reader is still open across the whole of every `json.loads`. Torn reads: still zero. +13 tests, no skip count change here (the new file skips whole on the Mac). Mac: not run — see Pending. |
-| W3c command-line quoting | todo | | | | |
+| W3c command-line quoting | done · Mac pending | 2026-09-17 | | **539 ran: 470 pass, 68 skip, 1 xfail**, 23.3s · **not run** | **The quoting was already right; the count of places doing it was wrong.** `spawn` needed no change — a prompt carrying `"`, `^`, `%`, `&`, `\|`, `<`, `>` and a trailing backslash comes back byte-for-byte, and so do an empty argument, a bare quote, doubled backslashes and a non-ASCII string. So the eight new tests were checked by mutation instead of by a green run: with `subprocess.list2cmdline` replaced by `" ".join`, **six of the eight fail**, and the two survivors are the two that do not route through it — `test_a_program_path_with_a_space_is_still_one_program` (that quoting is pywinpty's, not ours) and `test_no_prompt_means_no_prompt_flag` (no argument with a space in it). §9's ritual and §11's rule are amended: a slice that is green at step 1 mutates rather than skipping ahead, and the row says which tests did *not* fail. **The find is a second quoting hop nobody had written down.** §4 had ConPTY; `Sessions.start`'s `Popen` does exactly the same flattening on Windows, because there is no `execve` to hand a list to — so a prompt off a phone is joined and re-split *twice* here against zero times on the Mac, and `bot.py`'s comment at that spawn asserted the opposite in as many words ("no quoting rules to get wrong when there is nothing to quote for"). True of `execve`, false of `CreateProcess`; §6 and the comment now say which. Nothing was broken and no behaviour changed — `list2cmdline` is what `Popen` already used — but the hop had no test on this platform and the documentation pointed the wrong way. Hand-run (the slice said "Run: none"; the two claims in that comment were worth seeing): `C:\dir\` leaves hop 1 as `"…C:\dir\\"`, backslash doubled before the closing quote, and both a plain child and a ConPTY child parse back the identical string — that doubling is the whole reason `--trust` still exists at the far end, which is the case the twin test pins at fifteen argv elements. Suite time doubled, 11.5s → 23.3s: the four new ConPTY tests spawn real interpreters, and an interpreter's first byte under a fresh ConPTY is the slowest thing in this suite. **One open item, honestly unresolved:** one run in the first four errored (`errors=1`) and the name was lost — that command kept only the last three lines of output. It has not come back in **34 consecutive runs since, 24 idle and 10 under four spinners**, which is the load W3b's flake needed. Every run since keeps its whole output (`scratch\w3c_flake.sh`, `scratch\w3c_flake_loaded.sh`, beside `w3c_mutate.py` and `w3c_handrun.py`), so the next occurrence names itself; until then this is an unidentified ~3% error, not a green suite, and W3d should re-read this row before trusting a single clean run. +8 tests, no skip count change. Mac: not run — see Pending. |
 | W3d `pump` without `select` | todo | | | | |
 | W3e Job Object and `terminate` | todo | | | | |
 | W3f stop marker | todo | | | | |
@@ -916,6 +966,10 @@ verified until then, and W1c's first Windows-green run is not a substitute.
 | W3b | `/usr/bin/python3 -m unittest -q` | green, and **twelve newly skipped, all in one file**: `tests/test_session_win.py` is `skipUnless(WIN)` whole — it drives a real ConPTY. The thirteenth new test is the portable one, `TestTheRunner::test_a_terminal_that_cannot_be_started_is_failed_not_a_traceback`, and it must *run* and pass there: it patches `session.spawn` to raise `OSError` and asserts the runner records `failed` rather than dying. A skip on that one means the `try` around the spawn landed behind a platform check it has no business being behind. |
 | W3b | `test_a_reader_never_sees_a_partial_record`, watched | unchanged from W3a: `denied == []`, `lost == 0`, and now `written == 150`. The `time.sleep(0.001)` added to its reader is for the Windows half, where it takes the number of replaces that land from 0–8 to 38–42; on the Mac every replace lands either way, so if this run shows a refusal or a loss the pause has changed something it was not supposed to touch. |
 | W3b | `python3 session.py --foreground --cwd <project> --name w3b`, then Ctrl-C | a link, and `meta.json` at `ended` — the same run W3a asks for, because `run()` now has a `try` around the spawn that the Mac takes the happy path of. What must *not* appear is `could not start the terminal` in the log. |
+| W3c | `/usr/bin/python3 -m compileall -q .` | clean — 3.9. The only executable change in the slice is a comment in `bot.py`, but the two new test classes are compiled there too. |
+| W3c | `/usr/bin/python3 -m unittest -q` | green, and **eight newly skipped, in two files**: `TestTheCommandLineTheChildParsesBack` (4) is `skipUnless(WIN)` and `TestSpawningForRealOnWindows` (4) is `skipIf(POSIX)`. Every one of the eight is the Windows half of a pair whose Mac half already exists and must still *run* — `TestSpawningForReal`'s four in particular. A skip in `TestSpawningForReal` means the new class was written over the old one rather than beside it. The count is W3b's plus 8. |
+| W3c | `TestSpawningForReal::test_a_prompt_is_one_argument_and_never_a_command_line`, watched | unchanged, and it is the load-bearing one here: the Mac keeps the `;`/backtick/`$()` hostile prompt and the Windows twin keeps the `&`/`|`/`>`/`%VAR%` one, because the two platforms are dangerous in different alphabets. If the Mac's version has quietly acquired Windows characters, the twin was made by copying rather than by writing. |
+| W3c | nothing to hand-run | `bot.py`'s changed comment is the whole of the Mac-visible change, and it changes no behaviour there. Named here so the row is not mistaken for an omission. |
 
 ### Decisions changed by evidence
 
@@ -1046,6 +1100,26 @@ Appended, dated, when a run step contradicts the plan above and a section was am
   every run, busy or idle. The rule this is a case of: a test whose *guard* is timing-dependent
   fails for the one reason it cannot teach anybody anything about, and the fix is to make the
   interesting thing happen reliably, not to relax what is asserted about it.
+- **2026-09-17, W3c → §6, `bot.py`.** The plan counted one place where an argv is flattened
+  into a command line on Windows, and there are two. §4 had `spawn`; nobody wrote down that
+  `Sessions.start`'s `Popen` does the same thing, because on the Mac it does not — `execve`
+  takes the list as a list. `bot.py` said so in as many words at the spawn: "there are no
+  quoting rules to get wrong when there is nothing to quote for", which is a true sentence
+  about `execve` and a false one about `CreateProcess`. Nothing was broken and nothing changed
+  in the code — `list2cmdline` is what `Popen` already uses — but the hop had no test on this
+  platform, and the comment was documentation pointing the wrong way. Both fixed. The general
+  shape, and the third time this port has hit it: a claim that is true of the Mac's *mechanism*
+  reads as a claim about the design, and survives the port unexamined because it is still a
+  true-sounding sentence.
+- **2026-09-17, W3c → §9 ritual.** Two slices now (W3a's `rotate`, W3c's quoting) have had
+  tests that passed before any code changed, which the ritual's step 1 says is the mark of the
+  wrong tests. It is not, when the slice's own text predicts it — but it does mean the tests
+  have proved nothing yet, so both were checked by mutation instead, and that is the rule from
+  here: **a slice whose tests are green at step 1 does not skip to step 3; it breaks the thing
+  under test on purpose and shows the tests catching it.** W3c's mutation is
+  `subprocess.list2cmdline = " ".join`, and it fails six of the eight. The two survivors are
+  named in §11's row, because "which tests did *not* fail" is the part that says whether the
+  mutation was aimed at the right thing.
 - **2026-09-16, W2b → §9 ritual, §3.** `requirements-win.txt` exists, with `pywin32==312` and
   the `pywinpty==3.0.5` that has been in `.venv` since W0a. The Windows suite is run from the
   venv from here (`.venv\Scripts\python -m unittest -q`); under the system interpreter

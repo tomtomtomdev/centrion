@@ -357,10 +357,19 @@ class Sessions:
 
         os.makedirs(self.root, exist_ok=True)
         # A list and no shell, which is the whole of the defence here: `project` and `prompt`
-        # arrived from a phone, and there are no quoting rules to get wrong when there is
-        # nothing to quote for (§10). stdin is /dev/null because the runner has a terminal of
-        # its own for the session and no use for launchd's; stdout and stderr are inherited, so
-        # the runner's log lines land in var/bot.log beside the listener's (§14).
+        # arrived from a phone (§10). On the Mac that is also the end of it — execve is handed
+        # the list and the child is handed the same list, with no string in between for the
+        # quoting to be got wrong in. On Windows there is no execve: Popen joins the list with
+        # `subprocess.list2cmdline` and the runner's own C runtime splits it apart again before
+        # argparse sees anything, so the defence there is one round trip rather than none. It
+        # still holds — no shell is in the chain, so nothing expands a `%VAR%` or acts on a
+        # `>` — but "nothing to quote for" was a Mac sentence, and the round trip is asserted
+        # against a real runner in TestSpawningForRealOnWindows rather than assumed: a prompt
+        # ending in a backslash is how the argument *after* it disappears (WINDOWS.md W3c).
+        #
+        # stdin is /dev/null because the runner has a terminal of its own for the session and no
+        # use for launchd's; stdout and stderr are inherited, so the runner's log lines land in
+        # var/bot.log beside the listener's (§14).
         # `spawn_flags()` is empty on the Mac — the runner detaches itself with setsid() — and
         # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP on Windows (WINDOWS.md §6).
         with open(os.devnull, "rb") as devnull:

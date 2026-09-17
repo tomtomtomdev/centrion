@@ -1423,6 +1423,99 @@ class TestSpawningForReal(unittest.TestCase):
         self.assertEqual(caught.exception.errno, errno.ESRCH)
 
 
+#: WINDOWS.md W3c. Deliberately the same shape as the hostile prompt in `TestSpawningForReal`
+#: above and not the same characters, because the two platforms are dangerous in different
+#: alphabets: there it is `;`, backticks and `$()`, the things a POSIX shell acts on; here it
+#: is `&` `|` `<` `>`, `^`, and a `%VAR%` that expands — plus the quote and the trailing
+#: backslash, which are not about shells at all but about `list2cmdline` and the child's own
+#: parser disagreeing over where an argument stops. `{out}` is a path asserted never to exist.
+WINDOWS_HOSTILE = 'fix "the" probe & echo pwned > {out} | find ^ 50% %PATH% C:\\dir\\'
+
+
+@unittest.skipIf(POSIX, "the Windows half of TestSpawningForReal: list2cmdline, not execve")
+class TestSpawningForRealOnWindows(unittest.TestCase):
+    """The Windows half of the class above: the same wiring, over the other mechanism.
+
+    `TestSpawningForReal` is `@posix_only` for three good reasons — it forks, it checks a
+    session leader, and it reads fd 9 — and none of them is the reason this file cares about
+    `Sessions.start`. The reason it cares is §10: `project` and `prompt` come off a phone and
+    go into an argv, and `bot.py` says in as many words that a list and no shell is the whole
+    of the defence because "there are no quoting rules to get wrong when there is nothing to
+    quote for".
+
+    On Windows there is something to quote for. `subprocess.Popen` has no `execve` to hand a
+    list to: it joins the list with `list2cmdline`, `CreateProcess` takes the string, and the
+    runner's own C runtime splits it up again before `argparse` ever sees it. The defence is
+    still real — nothing expands a `%VAR%` or acts on a `>` when no shell is in the chain — but
+    it is a *different* defence, and it is one round trip rather than none. This class is that
+    round trip, asserted rather than assumed.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.root = os.path.join(self.tmp, "sessions")
+        self.out = os.path.join(self.tmp, "spawned.json")
+        self.stub = os.path.join(self.tmp, "stub.py")
+        with open(self.stub, "w", encoding="utf-8") as fh:
+            fh.write("import json, os, sys\n"
+                     "with open(%r + '.tmp', 'w', encoding='utf-8') as fh:\n"
+                     "    json.dump({'argv': sys.argv[1:]}, fh)\n"
+                     "os.replace(%r + '.tmp', %r)\n" % (self.out, self.out, self.out))
+
+    def spawn(self, prompt=None, trust=False):
+        sessions = bot.Sessions(root=self.root, script=self.stub, log=lambda m: None)
+        sessions.start("3f2a91", "beacon-3f2a", self.tmp, "beacon", ME, prompt, trust)
+        self.addCleanup(self.finish, sessions)
+        deadline = time.time() + 30
+        while time.time() < deadline and not os.path.exists(self.out):
+            time.sleep(0.01)
+        self.assertTrue(os.path.exists(self.out), "the runner never wrote its argv")
+        with open(self.out, encoding="utf-8") as fh:
+            return json.load(fh)["argv"]
+
+    def finish(self, sessions):
+        for child in list(sessions.children):
+            child.wait(timeout=30)
+        sessions.reap()
+
+    def test_the_runner_is_handed_the_arguments_the_spec_names(self):
+        """§4.2's argv, over the mechanism that reassembles it from a string."""
+        argv = self.spawn(prompt="fix the probe test")
+        self.assertEqual(argv[argv.index("--sid") + 1], "3f2a91")
+        self.assertEqual(argv[argv.index("--cwd") + 1], self.tmp)
+        self.assertEqual(argv[argv.index("--name") + 1], "beacon-3f2a")
+        self.assertEqual(argv[argv.index("--project") + 1], "beacon")
+        self.assertEqual(argv[argv.index("--chat-id") + 1], str(ME))
+        self.assertEqual(argv[argv.index("--root") + 1], self.root)
+        self.assertEqual(argv[argv.index("--prompt") + 1], "fix the probe test")
+
+    def test_a_prompt_is_one_argument_and_never_a_command_line(self):
+        """The Windows twin of the test of the same name: same claim, other alphabet."""
+        pwned = os.path.join(self.tmp, "pwned.txt")
+        hostile = WINDOWS_HOSTILE.replace("{out}", pwned)
+        argv = self.spawn(prompt=hostile)
+        self.assertIn(hostile, argv)
+        self.assertEqual(argv[argv.index("--prompt") + 1], hostile)
+        self.assertFalse(os.path.exists(pwned), "a redirect in the prompt was carried out")
+
+    def test_the_prompt_does_not_run_off_the_end_of_its_own_argument(self):
+        """A trailing backslash is how a quoted argument swallows the one after it.
+
+        `--prompt "...C:\\dir\\"` re-read by the child's parser as `...C:\\dir" --trust` is not
+        a mangled string, it is a *shorter argv* — and the flag that goes missing here is the
+        one §9.3 uses to decide whether a directory has been trusted. `--trust` is last, so it
+        is the one with nothing behind it to give the loss away.
+        """
+        argv = self.spawn(prompt="ship it C:\\dir\\", trust=True)
+        self.assertEqual(argv[argv.index("--prompt") + 1], "ship it C:\\dir\\")
+        self.assertEqual(argv[-1], "--trust")
+        self.assertEqual(len(argv), 15, argv)     # six pairs, the prompt pair, and --trust
+
+    def test_no_prompt_means_no_prompt_flag(self):
+        self.assertNotIn("--prompt", self.spawn())
+
+
 class TestFittingIntoOneMessage(unittest.TestCase):
     """§7: 4096 is Telegram's cap, and going over it is a 400 rather than a truncation."""
 

@@ -21,7 +21,11 @@ this file already believed:
 
 Windows only. Every test spawns a real process and closes its terminal in a cleanup.
 """
+import json
 import os
+import shutil
+import sys
+import tempfile
 import time
 import unittest
 
@@ -202,6 +206,120 @@ class TestTheEnvironmentBlock(unittest.TestCase):
                                           os.getcwd(), env, session.ROWS, session.COLS)
         self.addCleanup(terminal.close)
         self.assertIn("[yes]", drain(terminal, until="[yes]"))
+
+
+#: A prompt shaped like the worst thing a phone can send, and every character in it is there
+#: for a reason: `&` `|` `<` `>` chain, pipe and redirect in `cmd`; `^` is its escape; `%PATH%`
+#: is a variable it would expand; the quote in the middle is what `list2cmdline` has to escape;
+#: and the trailing backslash is the classic way to get a closing quote eaten and the next
+#: argument swallowed with it. None of it should mean anything, because `CreateProcess` is not
+#: a shell — but on Windows the argv list is joined into one string and split again by the
+#: child, and that round trip is the only thing standing between a phone and this machine.
+#: `{out}` is filled in with a path the test then asserts was never created.
+HOSTILE = 'fix "the" probe & echo pwned > {out} | find ^ 50% %PATH% C:\\dir\\'
+
+#: A prompt in the language the phone is actually held in. The command line is UTF-16 all the
+#: way down on Windows, so this should be a non-event; it is here because "should be" is what
+#: this whole document keeps turning out to be wrong about.
+NON_ASCII = "réparer la sonde — 100 % \u2713"
+
+#: Writes its own argv to the file named by its first argument, and renames it into place, so
+#: a test that polls for the path never reads a half-written one. Deliberately *not* read back
+#: through the terminal: what is under test is the argv the child parsed, and a renderer at 200
+#: columns between the assertion and the answer is a second thing that can be wrong.
+ARGV_STUB = (
+    "import json, os, sys\n"
+    "with open(sys.argv[1] + '.tmp', 'w', encoding='utf-8') as fh:\n"
+    "    json.dump(sys.argv[2:], fh)\n"
+    "os.replace(sys.argv[1] + '.tmp', sys.argv[1])\n"
+)
+
+
+@unittest.skipUnless(WIN, "list2cmdline into CreateProcess: the Windows quoting round trip")
+class TestTheCommandLineTheChildParsesBack(unittest.TestCase):
+    """W3c: an argv list survives being flattened into a command line and split up again.
+
+    The Mac never has this problem. `session_posix.spawn` hands `execve` a list of strings and
+    the kernel hands the child the same list; there is no string in between and nothing to
+    quote for. ConPTY takes a command line, so on Windows every argument is joined by
+    `subprocess.list2cmdline` and taken apart again by the child's own parser, and the two have
+    to agree — about quotes, about backslashes before quotes, and about where one argument
+    stops. §10's threat model is that `--prompt` arrives from a phone, so the agreement is not
+    a tidiness question.
+
+    The child is a real interpreter reporting a real `sys.argv`, because the round trip is the
+    thing under test and a test that asserted what `list2cmdline` returned would only be
+    checking that the stdlib is the stdlib.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="centrion-w3c-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.stub = os.path.join(self.tmp, "argv stub.py")   # a space, because paths have them
+        with open(self.stub, "w", encoding="utf-8") as fh:
+            fh.write(ARGV_STUB)
+        self.out = os.path.join(self.tmp, "argv.json")
+
+    def argv_of_a_child_given(self, *args):
+        """Spawn the stub through `session_win.spawn` and return the `sys.argv[1:]` it saw."""
+        pid, terminal = session_win.spawn([sys.executable, self.stub, self.out] + list(args),
+                                          self.tmp, dict(os.environ),
+                                          session.ROWS, session.COLS)
+        self.addCleanup(terminal.close)
+        self.assertGreater(pid, 0)
+        deadline = time.time() + PATIENCE
+        while time.time() < deadline and not os.path.exists(self.out):
+            time.sleep(0.02)
+        self.assertTrue(os.path.exists(self.out),
+                        "the child never wrote its argv: %s" % drain(terminal, seconds=0.5))
+        with open(self.out, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_a_hostile_argument_arrives_as_one_argument_and_means_nothing(self):
+        """§10: the prompt comes off a phone, and here it goes through a string.
+
+        Two assertions, and the second is the one that matters. The first says the text
+        survived; the second says none of it *ran* — `> pwned.txt` would be a file in the temp
+        directory if a shell had ever seen this, and `CreateProcess` is not a shell.
+        """
+        pwned = os.path.join(self.tmp, "pwned.txt")
+        hostile = HOSTILE.replace("{out}", pwned)
+        self.assertEqual(self.argv_of_a_child_given("--prompt", hostile),
+                         ["--prompt", hostile])
+        self.assertFalse(os.path.exists(pwned), "a redirect in the prompt was carried out")
+
+    def test_the_arguments_keep_their_boundaries(self):
+        """The failure this is really about is not mangled text, it is a *different count*.
+
+        A backslash before the closing quote eats it, the next argument joins this one, and
+        `--cwd` ends up holding a project name — which is `config.resolve`'s whole subject
+        arriving pre-broken. Every string below is a shape `list2cmdline` treats differently:
+        an embedded space, an empty argument, a bare quote, one and two trailing backslashes.
+        """
+        awkward = ["a b", "", '"', "\\", "two\\\\", 'ends with "a quote"', "--flag=a b\\"]
+        self.assertEqual(self.argv_of_a_child_given(*awkward), awkward)
+
+    def test_a_non_ascii_argument_is_not_mangled(self):
+        """A Windows command line is UTF-16; nothing here should narrow it to a code page."""
+        self.assertEqual(self.argv_of_a_child_given(NON_ASCII), [NON_ASCII])
+
+    def test_a_program_path_with_a_space_is_still_one_program(self):
+        """The one piece of quoting this code does not do itself.
+
+        pywinpty prepends the program to the command line and quotes it (W3b measured that it
+        does); `spawn` passes `argv[1:]` on that promise. If the quoting ever stops, a
+        `claude_bin` under `C:\\Program Files\\` becomes the program `C:\\Program` with
+        `Files\\...` as its first argument — and the only symptom on the phone is a session
+        that never comes up.
+        """
+        room = os.path.join(self.tmp, "a directory with spaces")
+        os.makedirs(room)
+        spaced = os.path.join(room, "my cmd.exe")
+        shutil.copy(CMD, spaced)
+        _, terminal = session_win.spawn([spaced, "/c", "echo", "spaced"], self.tmp,
+                                        dict(os.environ), session.ROWS, session.COLS)
+        self.addCleanup(terminal.close)
+        self.assertIn("spaced", drain(terminal, until="spaced"))
 
 
 if __name__ == "__main__":
