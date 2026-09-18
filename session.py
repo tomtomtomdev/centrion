@@ -39,11 +39,9 @@ Runnable by hand for debugging, which is how the §12 fixture was captured:
 """
 import argparse
 import codecs
-import errno
 import json
 import os
 import re
-import select
 import sys
 import time
 
@@ -133,8 +131,10 @@ DOWN, ENTER = b"\x1b[B", b"\r"
 #: with its spacing removed and the question and the option have to be in the buffer together.
 TRUST_KEEP = 4096
 
-READ_SIZE = 65536
-TICK = 0.2            # select timeout; also how often the settle timer is checked
+#: How long `pump` waits on a terminal before going round again, and so how often the settle
+#: timers are checked. The read size that goes with it is the platform's — `session_posix`
+#: names one because `os.read` wants a length and ConPTY never asks (W3d).
+TICK = 0.2
 
 #: How long a terminating session gets between the polite signal and the hard kill — SIGTERM
 #: then SIGKILL on the Mac, Ctrl-C then a job kill on Windows (WINDOWS.md §4).
@@ -164,11 +164,15 @@ def _stderr(message):
 
 
 def spawn(argv, cwd, env, rows=ROWS, cols=COLS):
-    """Run `argv` on a real terminal of the size §6 requires. Returns (pid, master_fd).
+    """Run `argv` on a real terminal of the size §6 requires. Returns (pid, Terminal).
 
     The mechanism is the platform's (session_posix.spawn: openpty + fork + TIOCSWINSZ on the
-    slave before the exec); the size is this module's. Kept as a function here so a test that
-    patches `session.spawn` reaches the one `Runner.run` calls.
+    slave before the exec; session_win.spawn: a ConPTY); the size is this module's. Kept as a
+    function here so a test that patches `session.spawn` reaches the one `Runner.run` calls.
+
+    The second value is a `Terminal` since W3d, not a descriptor: `pump` reads it through
+    `read`/`write`/`alive`/`close` and knows nothing else about it, which is what lets one
+    loop serve a pty and a pseudoconsole.
     """
     return procs.spawn(argv, cwd, env, rows, cols)
 
@@ -617,7 +621,7 @@ class Runner:
         # here leaving meta.json saying `starting` for a session that will never start, which
         # the listener can only wait out.
         try:
-            pid, master = spawn(self.argv, self.cwd, child_env())
+            pid, terminal = spawn(self.argv, self.cwd, child_env())
         except OSError as e:
             self.log("session %s: could not start the terminal: %s" % (self.sid, e))
             self.update(state=FAILED, error=str(e))
@@ -630,14 +634,14 @@ class Runner:
         previous = self._catch_signals()
         transcript = Transcript(os.path.join(self.dir, TRANSCRIPT), log=self.log)
         try:
-            self.pump(master, transcript)
+            self.pump(terminal, transcript)
         finally:
             transcript.close()
             terminate(pid, log=self.log)
-            try:
-                os.close(master)
-            except OSError:
-                pass
+            # Last, and that order is the point on both platforms (§9.10, WINDOWS.md §4):
+            # closing this hangs up a Mac child and ends a Windows one outright, and a session
+            # that has not yet attached to its terminal survives being hung up from it.
+            terminal.close()
             self._restore_signals(previous)
 
         # §4.6: on `failed` the listener sends the tail of pty.log, which is almost always the
@@ -661,44 +665,42 @@ class Runner:
     def _signalled(self, signum, _frame):
         self.stopping = True
 
-    def pump(self, master, transcript):
-        """Read until the child hangs up. This loop is what holds the pty open (§2)."""
+    def pump(self, terminal, transcript):
+        """Read until the terminal is finished. This loop is what holds the session open (§2).
+
+        One implementation on both platforms since W3d. It used to hold a pty master fd and
+        call `select` and `os.read` on it, neither of which a pseudoconsole has — so the
+        waiting moved behind `Terminal.read(timeout)`, which each platform does its own way,
+        and what is left here is what was always portable: what to do with a chunk, when to
+        answer §9.3's dialog, and when to type the prompt.
+
+        The loop now names four calls and nothing else — `read`, `write`, `alive`, `close` —
+        which is also why it is testable without a process at all (`TestPumpOverATerminal`).
+        """
         typed_at = None
         entered = False
 
         while not self.stopping:
-            chunk = b""
-            try:
-                ready, _, _ = select.select([master], [], [], TICK)
-            except OSError as e:
-                if e.errno == errno.EINTR:
-                    continue
+            chunk = terminal.read(TICK)
+            if chunk:
+                self.absorb(chunk, transcript)
+            elif not terminal.alive():
+                # **The child's death is not the end of its output**, and on Windows that is
+                # not a nicety: W3b measured ConPTY still holding the last of what a child
+                # wrote after `alive()` had gone false, and that last part is exactly the
+                # error text §4.6 sends the phone when a session is `failed`. So an empty read
+                # against a finished terminal costs one more read before this gives up. On the
+                # Mac the extra read is always empty — EIO is both answers at once there.
+                self.absorb(terminal.read(TICK), transcript)
                 break
 
-            if ready:
-                try:
-                    chunk = os.read(master, READ_SIZE)
-                except OSError as e:
-                    # EIO is how a pty master reports the last slave closing. That is the
-                    # ordinary end of a session, not a failure.
-                    if e.errno not in (errno.EIO, errno.EBADF):
-                        raise
-                    break
-                if not chunk:
-                    break
-
-                transcript.write(chunk)
-                if not self.scrape.url and self.scrape.feed(chunk):
-                    self.update(state=LIVE, url=self.scrape.url)
-                    self.log("live: %s" % self.scrape.url)
-
-            # §9.3. Outside the `if ready` block because two of its four steps are timers, and
+            # §9.3. Outside the `if chunk` block because two of its four steps are timers, and
             # a panel that has finished drawing sends nothing more to wait for. It stops
             # mattering the moment there is a link.
             if self.trust is not None and not self.scrape.url:
                 key = self.trust.feed(chunk, time.time())
                 if key is not None:
-                    os.write(master, key)
+                    terminal.write(key)
                     if key is ENTER:
                         self.log("session %s: answered §9.3's trust dialog" % self.sid)
 
@@ -708,11 +710,26 @@ class Runner:
             # the text lands in whatever the renderer was drawing. Enter goes separately, after
             # the box has settled, for the same reason.
             if typed_at is None:
-                os.write(master, self.prompt.encode())
+                terminal.write(self.prompt.encode())
                 typed_at = time.time()
             elif not entered and time.time() - typed_at >= SETTLE:
-                os.write(master, b"\r")
+                terminal.write(b"\r")
                 entered = True
+
+    def absorb(self, chunk, transcript):
+        """One chunk onto the disk and past the scraper. Empty is nothing to do.
+
+        Its own method because `pump` does this from two places since W3d — the ordinary read
+        and the drain after the terminal has finished — and the drain being only *half* of it
+        is the bug it would have: the transcript would get the last of a failure's output and
+        a link arriving in that same chunk would never be recorded.
+        """
+        if not chunk:
+            return
+        transcript.write(chunk)
+        if not self.scrape.url and self.scrape.feed(chunk):
+            self.update(state=LIVE, url=self.scrape.url)
+            self.log("live: %s" % self.scrape.url)
 
 
 def main():

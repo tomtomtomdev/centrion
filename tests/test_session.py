@@ -65,28 +65,37 @@ def _silently_kill(pid):
         pass
 
 
-def drain(fd, deadline=10.0):
-    """Read a pty master until the child hangs up. Returns bytes.
+def trust_panel(marked=0, second="Yes, I trust this folder"):
+    """§9.3's panel as the real one renders it: words joined by cursor jumps, no spaces.
+
+    Module level since W3d, because two tests want the same panel from opposite directions —
+    `TestTheTrustDialog` feeds it straight to the matcher, and `TestPumpOverATerminal` sends
+    it through the pump the way a session delivers it. One definition, or the second one
+    quietly stops being the panel the first one proved anything about.
+    """
+    rows = ["Is\x1b[10Gthis\x1b[15Ga\x1b[17Gproject\x1b[25Gyou\x1b[29Gcreated\x1b[37Gor"
+            "\x1b[40Gone\x1b[44Gyou\x1b[48Gtrust?"]
+    for i, label in enumerate(("No, exit", second)):
+        rows.append(("❯" if i == marked else " ") + "\x1b[4G" + label)
+    return ("\r\n".join(rows) + "\r\n").encode()
+
+
+def drain(terminal, deadline=10.0):
+    """Read a `Terminal` until the child hangs up. Returns bytes.
 
     A pty master does not give a clean EOF on macOS: when the last slave fd closes, the read
-    fails with EIO. That is the normal end of a session, not an error, and any read loop over a
-    pty has to know it — including the one in session.py.
+    fails with EIO. That is the normal end of a session, not an error, and any read loop over
+    a pty has to know it — which since W3d is `session_posix.Terminal`'s job rather than every
+    caller's. So this is now the same two calls `Runner.pump` makes, and the tests below
+    exercise the real `Terminal` on the way to asking about the pty behind it.
     """
     out = b""
     end = time.time() + deadline
     while time.time() < end:
-        r, _, _ = select.select([fd], [], [], 0.2)
-        if not r:
-            continue
-        try:
-            chunk = os.read(fd, 65536)
-        except OSError as e:
-            if e.errno == errno.EIO:
-                break
-            raise
-        if not chunk:
-            break
+        chunk = terminal.read(0.2)
         out += chunk
+        if not chunk and not terminal.alive():
+            break
     return out
 
 
@@ -211,7 +220,10 @@ class TestThePlatformSeam(unittest.TestCase):
     """
 
     SURFACE = ("spawn", "terminate", "detach", "alive", "started", "spawn_flags", "Lock",
-               "request_stop", "stop_requested", "catch_signals", "restore_signals")
+               "request_stop", "stop_requested", "catch_signals", "restore_signals",
+               # W3d: `spawn` hands back one of these and `pump` knows nothing else about a
+               # terminal, so it is as much a part of the contract as the functions are.
+               "Terminal")
 
     @needs_session_posix
     def test_the_posix_module_has_the_whole_surface(self):
@@ -488,10 +500,10 @@ class TestTheTerminalSize(unittest.TestCase):
         `stty size` reads it from the kernel exactly as Claude Code's renderer does. §14 makes
         this the test to re-run after a Claude Code upgrade.
         """
-        pid, master = session.spawn(["/bin/sh", "-c", "stty size"], self.tmp,
-                                    session.child_env())
-        self.addCleanup(os.close, master)
-        out = drain(master)
+        pid, terminal = session.spawn(["/bin/sh", "-c", "stty size"], self.tmp,
+                                      session.child_env())
+        self.addCleanup(terminal.close)
+        out = drain(terminal)
         os.waitpid(pid, 0)
         self.assertEqual(out.decode().strip(), "%d %d" % (session.ROWS, session.COLS))
 
@@ -501,9 +513,9 @@ class TestTheTerminalSize(unittest.TestCase):
     def test_the_child_has_a_controlling_terminal(self):
         # Without TIOCSCTTY the pty is just three file descriptors: `stty` fails, and
         # --remote-control refuses to start an interactive session at all (§9.1).
-        pid, master = session.spawn(["/bin/sh", "-c", "tty"], self.tmp, session.child_env())
-        self.addCleanup(os.close, master)
-        out = drain(master).decode().strip()
+        pid, terminal = session.spawn(["/bin/sh", "-c", "tty"], self.tmp, session.child_env())
+        self.addCleanup(terminal.close)
+        out = drain(terminal).decode().strip()
         os.waitpid(pid, 0)
         self.assertTrue(out.startswith("/dev/"), out)
         self.assertNotIn("not a tty", out)
@@ -511,9 +523,9 @@ class TestTheTerminalSize(unittest.TestCase):
     def test_the_child_starts_in_the_directory_it_was_given(self):
         work = os.path.join(self.tmp, "somewhere")
         os.makedirs(work)
-        pid, master = session.spawn(["/bin/sh", "-c", "pwd"], work, session.child_env())
-        self.addCleanup(os.close, master)
-        out = drain(master).decode().strip()
+        pid, terminal = session.spawn(["/bin/sh", "-c", "pwd"], work, session.child_env())
+        self.addCleanup(terminal.close)
+        out = drain(terminal).decode().strip()
         os.waitpid(pid, 0)
         self.assertEqual(os.path.realpath(out), os.path.realpath(work))
 
@@ -531,10 +543,10 @@ class TestTheTerminalSize(unittest.TestCase):
         nobody holds. That window is why `terminate()` signals the process group explicitly
         instead of trusting the hangup.
         """
-        pid, master = session.spawn(["/bin/sh", "-c", "sleep 30"], self.tmp,
-                                    session.child_env())
+        pid, terminal = session.spawn(["/bin/sh", "-c", "sleep 30"], self.tmp,
+                                      session.child_env())
         time.sleep(0.3)
-        os.close(master)
+        terminal.close()
         for _ in range(60):
             done, status = os.waitpid(pid, os.WNOHANG)
             if done:
@@ -551,9 +563,9 @@ class TestTheTerminalSize(unittest.TestCase):
         A stop that arrives moments after a spawn lands exactly here, and the session it fails
         to kill is one with permissions bypassed and nobody watching it.
         """
-        pid, master = session.spawn(["/bin/sh", "-c", "sleep 30"], self.tmp,
-                                    session.child_env())
-        os.close(master)                      # no settle: the race, deliberately
+        pid, terminal = session.spawn(["/bin/sh", "-c", "sleep 30"], self.tmp,
+                                      session.child_env())
+        terminal.close()                      # no settle: the race, deliberately
         self.assertTrue(session.terminate(pid, grace=2.0, log=lambda m: None))
 
     def test_terminating_takes_the_whole_process_group(self):
@@ -562,10 +574,10 @@ class TestTheTerminalSize(unittest.TestCase):
         The child leads its own group after setsid(), so everything the session spawned is in
         the group with it — which is the point of signalling the group rather than the process.
         """
-        pid, master = session.spawn(
+        pid, terminal = session.spawn(
             ["/bin/sh", "-c", "sleep 30 & echo $!; sleep 30"], self.tmp, session.child_env())
-        self.addCleanup(os.close, master)
-        grandchild = int(drain(master, 3.0).decode().strip().splitlines()[0])
+        self.addCleanup(terminal.close)
+        grandchild = int(drain(terminal, 3.0).decode().strip().splitlines()[0])
         self.assertTrue(session.terminate(pid, grace=2.0, log=lambda m: None))
         for _ in range(40):
             try:
@@ -576,9 +588,9 @@ class TestTheTerminalSize(unittest.TestCase):
         self.fail("a process the session spawned outlived the session")
 
     def test_terminating_something_already_gone_is_not_an_error(self):
-        pid, master = session.spawn(["/bin/sh", "-c", "true"], self.tmp, session.child_env())
-        self.addCleanup(os.close, master)
-        drain(master, 3.0)
+        pid, terminal = session.spawn(["/bin/sh", "-c", "true"], self.tmp, session.child_env())
+        self.addCleanup(terminal.close)
+        drain(terminal, 3.0)
         self.assertTrue(session.terminate(pid, grace=1.0, log=lambda m: None))
         self.assertTrue(session.terminate(pid, grace=1.0, log=lambda m: None))
 
@@ -1260,7 +1272,8 @@ class TestTheTranscriptDoesNotGrowForever(unittest.TestCase):
         sizes = {n: os.path.getsize(os.path.join(r.dir, n))
                  for n in os.listdir(r.dir) if n.startswith("pty.log")}
         self.assertEqual(sorted(sizes), ["pty.log", "pty.log.1"], sizes)
-        self.assertLessEqual(sum(sizes.values()), 2 * 8192 + session.READ_SIZE, sizes)
+        import session_posix
+        self.assertLessEqual(sum(sizes.values()), 2 * 8192 + session_posix.READ_SIZE, sizes)
 
 
 def _raises(*_args):
@@ -1290,12 +1303,7 @@ class TestTheTrustDialog(unittest.TestCase):
         return t
 
     def dialog(self, marked=0, second="Yes, I trust this folder"):
-        """The panel as the real one renders it: words joined by cursor jumps, no spaces."""
-        rows = ["Is\x1b[10Gthis\x1b[15Ga\x1b[17Gproject\x1b[25Gyou\x1b[29Gcreated\x1b[37Gor"
-                "\x1b[40Gone\x1b[44Gyou\x1b[48Gtrust?"]
-        for i, label in enumerate(("No, exit", second)):
-            rows.append(("\u276f" if i == marked else " ") + "\x1b[4G" + label)
-        return ("\r\n".join(rows) + "\r\n").encode()
+        return trust_panel(marked, second)
 
     def test_nothing_is_sent_before_the_dialog_is_there(self):
         t = self.trust()
@@ -1432,3 +1440,293 @@ class TestAFreshDirectoryComesUpToALink(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+#: WINDOWS.md W3d. A `Terminal` made of a script, so `pump` can be driven without a process.
+class FakeTerminal:
+    """The four calls `pump` makes, over a list of chunks instead of a pty.
+
+    W3d's whole change is that `pump` names `read`, `write`, `alive` and `close` and nothing
+    else — no fd, no `select`, no `os.read` — so the loop that was previously reachable only
+    on the Mac behind a fork is reachable everywhere. This class is what that buys.
+
+    What it deliberately does not stand in for is how a terminal *ends*. A pty master says
+    EIO and a pseudoconsole raises `WinptyError`, and both of those are facts about the real
+    mechanisms with their own tests against real processes (`TestTheTerminalSize` here,
+    `tests/test_session_win.py` there). `gap` is the one piece of that shape this does carry,
+    because `pump` has a branch for it: on Windows the last of a child's output is still
+    readable after `alive()` has gone false (§4.6, measured in W3b), so an empty read against
+    a dead terminal is not the end of the session until one more read has come back empty too.
+    """
+
+    def __init__(self, chunks=(), tail=(), gap=0):
+        self.chunks = list(chunks)
+        self.tail = list(tail)
+        self.gap = gap
+        self.written = bytearray()
+        self.reads = 0
+        self.closed = False
+
+    def read(self, timeout=0.0):
+        self.reads += 1
+        if self.chunks:
+            return self.chunks.pop(0)
+        if self.gap:
+            self.gap -= 1
+            return b""
+        if self.tail:
+            return self.tail.pop(0)
+        return b""
+
+    def alive(self):
+        return bool(self.chunks)
+
+    def write(self, data):
+        self.written += data
+
+    def close(self):
+        self.closed = True
+
+
+class TestPumpOverATerminal(unittest.TestCase):
+    """WINDOWS.md W3d: `pump` reads a `Terminal`, and the loop is one implementation.
+
+    Until this slice `pump` held a pty master fd and called `select` and `os.read` on it, so
+    every test of it had to fork — which is why everything that reached it was `@posix_only`
+    and why the Windows half of the runner had no test of its own loop at all. The waiting
+    now lives behind `Terminal.read(timeout)` on both platforms, and what is left here is the
+    part that was always portable: what to do with a chunk, when to answer §9.3's dialog, and
+    when to type the prompt.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.sessions = os.path.join(self.tmp, "sessions")
+
+    def runner(self, **kw):
+        kw.setdefault("project", "beacon")
+        shutil.rmtree(os.path.join(self.sessions, "3f2a91"), ignore_errors=True)
+        r = session.Runner("3f2a91", self.tmp, "beacon-3f2a", root=self.sessions,
+                           argv=["/bin/true"], log=lambda m: None, **kw)
+        r.begin()
+        return r
+
+    def transcript(self, r):
+        t = session.Transcript(os.path.join(r.dir, session.TRANSCRIPT), log=lambda m: None)
+        self.addCleanup(t.close)
+        return t
+
+    def written(self, r):
+        with open(os.path.join(r.dir, session.TRANSCRIPT), "rb") as fh:
+            return fh.read()
+
+    def drive(self, terminal, **kw):
+        r = self.runner(**kw)
+        t = self.transcript(r)
+        r.pump(terminal, t)
+        t.close()
+        return r
+
+    def test_pump_with_fake_terminal(self):
+        """The slice's named test: a real capture, in chunks, and a live session out of it.
+
+        Both captures, because the two renderers are what W0a existed to tell apart — the Mac
+        fixture is the program's own bytes and the Windows one is ConPTY's redraw of them —
+        and `pump` is now the same code over either.
+        """
+        for name, path in (("mac", FIXTURE), ("win", FIXTURE_WIN)):
+            if not os.path.exists(path):
+                continue                    # the Windows capture is W0a's, on that box only
+            with self.subTest(capture=name):
+                with open(path, "rb") as fh:
+                    capture = fh.read()
+                url = session.extract_url(capture)
+                r = self.drive(FakeTerminal(
+                    [capture[i:i + 64] for i in range(0, len(capture), 64)]))
+                self.assertEqual(r.scrape.url, url)
+                meta = session.read_meta(r.dir)
+                self.assertEqual(meta["state"], session.LIVE)
+                self.assertEqual(meta["url"], url)
+                self.assertEqual(self.written(r), capture,
+                                 "the transcript is not what the terminal produced")
+
+    def test_pump_returns_when_the_terminal_is_finished(self):
+        """An empty read is not the end; an empty read against a dead terminal is — after one
+        more read, which is what the count here pins."""
+        term = FakeTerminal([b"one ", b"two"])
+        r = self.drive(term)
+        self.assertEqual(self.written(r), b"one two")
+        self.assertEqual(term.reads, 4, "two chunks, the empty read, and the drain")
+
+    def test_the_last_of_a_dead_childs_output_is_not_lost(self):
+        """§4.6, and the reason a `failed` session has anything to send the phone.
+
+        On Windows the child is gone before the pseudoconsole has handed over the last of
+        what it wrote (measured in W3b), and that last part is precisely the error text — a
+        bad flag, an expired login — the tail is made of. So a read that comes back empty
+        against a dead terminal costs one more read before the loop gives up.
+        """
+        term = FakeTerminal([b"starting\r\n"], gap=1, tail=[b"error: not logged in\r\n"])
+        r = self.drive(term)
+        self.assertEqual(self.written(r), b"starting\r\nerror: not logged in\r\n")
+
+    def test_a_link_in_the_tail_still_goes_live(self):
+        # The drain is a whole pass of the loop body and not just a write to the transcript.
+        term = FakeTerminal([b"..."], gap=1, tail=[("here %s\r\n" % CAPTURED).encode()])
+        r = self.drive(term)
+        self.assertEqual(r.scrape.url, CAPTURED)
+        self.assertEqual(session.read_meta(r.dir)["state"], session.LIVE)
+
+    def test_a_session_with_no_link_leaves_the_record_alone(self):
+        r = self.drive(FakeTerminal([b"no link here\r\n"]))
+        self.assertIsNone(r.scrape.url)
+        self.assertEqual(session.read_meta(r.dir)["state"], session.STARTING)
+
+    def test_stopping_ends_the_loop_without_reading_the_rest(self):
+        """What a signal (the Mac) or the stop marker (W3f, Windows) does to a live session."""
+        r = self.runner()
+        t = self.transcript(r)
+        term = FakeTerminal([b"a"] * 50)
+        original = term.read
+
+        def read(timeout=0.0):
+            r.stopping = True
+            return original(timeout)
+
+        term.read = read
+        r.pump(term, t)
+        t.close()
+        self.assertEqual(self.written(r), b"a", term.reads)
+
+    def test_the_prompt_is_typed_only_once_there_is_a_link(self):
+        """§4: before the session is live there is no input box, and the text lands in
+        whatever the renderer was drawing."""
+        settle, session.SETTLE = session.SETTLE, 0.0
+        self.addCleanup(setattr, session, "SETTLE", settle)
+        term = FakeTerminal([b"warming up\r\n"] + [b""] * 4
+                            + [("here %s\r\n" % CAPTURED).encode()] + [b""] * 4)
+        self.drive(term, prompt="fix the probe test")
+        self.assertEqual(bytes(term.written), b"fix the probe test\r")
+
+    def test_nothing_is_typed_into_a_session_that_never_went_live(self):
+        term = FakeTerminal([b"no link here\r\n"] + [b""] * 4)
+        self.drive(term, prompt="fix the probe test")
+        self.assertEqual(bytes(term.written), b"")
+
+    def test_enter_waits_for_the_box_to_settle(self):
+        """Separately, and after SETTLE, for the same reason the prompt waits for the link."""
+        settle, session.SETTLE = session.SETTLE, 30.0
+        self.addCleanup(setattr, session, "SETTLE", settle)
+        term = FakeTerminal([("here %s\r\n" % CAPTURED).encode()] + [b""] * 6)
+        self.drive(term, prompt="hello")
+        self.assertEqual(bytes(term.written), b"hello", "Enter went before the box settled")
+
+    def test_the_trust_dialog_is_answered_through_the_terminal(self):
+        """§9.3 over the seam: the keys go to `Terminal.write` and not to a file descriptor.
+
+        The same panel `TestTheTrustDialog` feeds the matcher directly, arriving the way a
+        session really delivers it — through the pump, in chunks, with the redraw after the
+        Down in a later one.
+        """
+        settle, session.SETTLE = session.SETTLE, 0.0
+        self.addCleanup(setattr, session, "SETTLE", settle)
+        r = self.runner()
+        r.trust = session.Trust()
+        t = self.transcript(r)
+        term = FakeTerminal([trust_panel(), b"", trust_panel(marked=1), b"", b""])
+        r.pump(term, t)
+        t.close()
+        self.assertEqual(bytes(term.written), session.DOWN + session.ENTER)
+
+    def test_pump_does_not_close_the_terminal(self):
+        """`run()`'s `finally` does, after `terminate`, and that order is §4's point."""
+        term = FakeTerminal([b"x"])
+        self.drive(term)
+        self.assertFalse(term.closed)
+
+
+@posix_only
+class TestThePosixTerminal(unittest.TestCase):
+    """WINDOWS.md W3d: the Mac's `Terminal`, which is the pty master with `select` inside it.
+
+    The `select` that used to be the first statement of `pump` is now the first statement of
+    `read`, and that is the whole of the Mac-side change — so these tests ask the one question
+    the move could have got wrong, which is when a read is *empty* and when it is *the end*.
+    Those were one answer before (a `break` either way) and are two now: `read` says what
+    arrived and `alive()` says whether more is coming, because Windows needs them separated
+    and the loop is shared.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def start(self, script):
+        pid, terminal = session.spawn(["/bin/sh", "-c", script], self.tmp, session.child_env())
+        self.addCleanup(terminal.close)
+        self.addCleanup(_silently_kill, pid)
+        return pid, terminal
+
+    def test_it_reads_what_the_child_wrote_as_bytes(self):
+        _, terminal = self.start("printf 'hello\\r\\n'")
+        got = b""
+        deadline = time.time() + 5.0
+        while time.time() < deadline and b"hello" not in got:
+            chunk = terminal.read(0.2)
+            self.assertIsInstance(chunk, bytes)
+            got += chunk
+            if not chunk and not terminal.alive():
+                break
+        self.assertIn(b"hello", got)
+
+    def test_a_read_that_times_out_is_empty_and_not_the_end(self):
+        """The distinction the shared loop is built on: nothing to read is not a hangup."""
+        _, terminal = self.start("sleep 5")
+        began = time.time()
+        self.assertEqual(terminal.read(0.2), b"")
+        self.assertGreaterEqual(time.time() - began, 0.15)
+        self.assertTrue(terminal.alive(), "an idle terminal was reported finished")
+
+    def test_it_is_finished_once_the_child_has_hung_up(self):
+        """EIO off a pty master is the ordinary end of a session, not an error (§2)."""
+        _, terminal = self.start("printf 'bye\\r\\n'")
+        deadline = time.time() + 5.0
+        while time.time() < deadline and terminal.alive():
+            terminal.read(0.1)
+        self.assertFalse(terminal.alive(), "the pty never reported the hangup")
+        self.assertEqual(terminal.read(0.05), b"", "a finished terminal kept answering")
+
+    def test_writing_reaches_the_child(self):
+        _, terminal = self.start("read line; printf 'got:%s\\r\\n' \"$line\"")
+        terminal.write(b"ping\r")
+        got = b""
+        deadline = time.time() + 5.0
+        while time.time() < deadline and b"got:ping" not in got:
+            chunk = terminal.read(0.2)
+            got += chunk
+            if not chunk and not terminal.alive():
+                break
+        self.assertIn(b"got:ping", got)
+
+    def test_closing_it_hangs_up_the_child(self):
+        """The same claim `test_closing_the_pty_hangs_up_the_child_once_it_owns_the_terminal`
+        makes about the raw fd, now that `close()` is what `run()`'s `finally` calls."""
+        pid, terminal = self.start("sleep 30")
+        time.sleep(0.3)
+        terminal.close()
+        for _ in range(60):
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done:
+                self.assertEqual(status & 0x7f, signal.SIGHUP)
+                return
+            time.sleep(0.05)
+        self.fail("the child survived the terminal being closed")
+
+    def test_closing_twice_is_not_an_error(self):
+        """It is called from a `finally` on both platforms, so it has to be idempotent."""
+        _, terminal = self.start("sleep 5")
+        terminal.close()
+        terminal.close()
+        self.assertFalse(terminal.alive())
+        self.assertEqual(terminal.read(0.01), b"")

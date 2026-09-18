@@ -324,3 +324,70 @@ class TestTheCommandLineTheChildParsesBack(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(WIN, "ConPTY: drives Runner.pump over a real pseudoconsole")
+class TestThePumpOverAConpty(unittest.TestCase):
+    """WINDOWS.md W3d — the runner's read loop, on this box, over a real child.
+
+    `TestPumpOverATerminal` in `test_session.py` drives the same loop over a scripted fake and
+    is where its branches are pinned. This is the one thing that fake cannot be asked: whether
+    a real ConPTY, with its DA1 handshake and its own redraw of whatever the child wrote,
+    actually ends up producing `live` with a URL in `meta.json`. Everything between `spawn`
+    and the record, on the mechanism, once.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.sessions = os.path.join(self.tmp, "sessions")
+
+    def runner(self, **kw):
+        kw.setdefault("project", "beacon")
+        r = session.Runner("3f2a91", self.tmp, "beacon-3f2a", root=self.sessions,
+                           argv=[CMD, "/c", "rem"], log=lambda m: None, **kw)
+        r.begin()
+        return r
+
+    def pump(self, argv, **kw):
+        r = self.runner(**kw)
+        _, terminal = session_win.spawn(argv, self.tmp, dict(os.environ),
+                                        session.ROWS, session.COLS)
+        self.addCleanup(terminal.close)
+        transcript = session.Transcript(os.path.join(r.dir, session.TRANSCRIPT),
+                                        log=lambda m: None)
+        try:
+            r.pump(terminal, transcript)
+        finally:
+            transcript.close()
+        return r
+
+    def test_pump_real_echo(self):
+        """The slice's named test: a link off a real pseudoconsole makes the session live.
+
+        `echo` rather than an interpreter for the reason at the top of this file — and because
+        what is under test is the loop and the scrape, not what printed the URL. ConPTY still
+        re-renders it, which is the part no fake covers.
+        """
+        url = "https://claude.ai/code/session_w3d_test"
+        r = self.pump([CMD, "/c", "echo", url])
+        self.assertEqual(r.scrape.url, url)
+        meta = session.read_meta(r.dir)
+        self.assertEqual(meta["state"], session.LIVE)
+        self.assertEqual(meta["url"], url)
+
+    def test_the_pump_returns_when_the_child_goes(self):
+        """It has to come back by itself: nothing else ends a session that ended on its own,
+        and a pump that sat on a dead ConPTY would hold `live` forever."""
+        began = time.time()
+        r = self.pump([CMD, "/c", "echo", "done"])
+        self.assertLess(time.time() - began, PATIENCE, "the pump outlived its child")
+        with open(os.path.join(r.dir, session.TRANSCRIPT), "rb") as fh:
+            self.assertIn(b"done", fh.read())
+
+    def test_the_transcript_holds_what_the_child_printed(self):
+        """§4.6's tail is read off this file, and on a `failed` session it is all the phone
+        gets. What ConPTY renders is not what the child wrote, but the text has to survive."""
+        r = self.pump([CMD, "/c", "echo", "centrion-w3d-marker"])
+        with open(os.path.join(r.dir, session.TRANSCRIPT), "rb") as fh:
+            self.assertIn(b"centrion-w3d-marker", fh.read())

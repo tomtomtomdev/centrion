@@ -73,10 +73,13 @@ def environment_block(env):
 class Terminal:
     """One ConPTY, and the four things `Runner.pump` does with a terminal.
 
-    The Mac's `pump` holds a master fd and calls `select` and `os.read` on it. ConPTY has no fd
+    `pump` used to hold a pty master fd and call `select` and `os.read` on it. ConPTY has no fd
     to wait on — `pywinpty.PTY.read(blocking=False)` answers immediately, with whatever is
     there or with nothing — so the waiting is a poll, and it lives here rather than in `pump`
-    so that the loop in session.py stays one implementation for both platforms (W3d).
+    so that the loop in session.py stays one implementation for both platforms. W3d did the
+    other half of that: `session_posix.Terminal` now holds the fd and the `select`, `spawn`
+    hands back one of these on either platform, and `pump` names nothing but `read`, `write`,
+    `alive` and `close`.
 
     Two conversions are this class's whole reason for existing beyond that:
 

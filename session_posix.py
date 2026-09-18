@@ -20,6 +20,7 @@ Stdlib only, same as session.py (SPEC.md §3).
 import errno
 import fcntl
 import os
+import select
 import signal
 import struct
 import subprocess
@@ -30,14 +31,104 @@ import time
 #: launchd/bot.sh's flock (SPEC.md §8). Closed before setsid, guarded for the hand-run case.
 LOCK_FD = 9
 
+#: One read off the master, and the amount the transcript cap can overshoot by (§10.7): the
+#: size is checked after a write, so a chunk this big is briefly over it either way. Here
+#: rather than in session.py since W3d, because the chunk size is the pty's business — ConPTY
+#: hands `session_win.Terminal` whatever it has and is never asked for a length.
+READ_SIZE = 65536
+
 
 def _stderr(message):
     sys.stderr.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), message))
     sys.stderr.flush()
 
 
+class Terminal:
+    """One pty master, and the four things `Runner.pump` does with a terminal. W3d.
+
+    Until W3d `pump` held this fd itself and called `select` and `os.read` on it. That loop
+    cannot exist on Windows — a pseudoconsole has no descriptor to wait on — so the waiting
+    moved in here, where each platform can do it its own way, and what is left in `pump` is
+    the part that was always portable. The `select` below is the one that used to be `pump`'s
+    first statement, unchanged.
+
+    **`read` and `alive` answer two questions that used to be one.** On a pty they arrive
+    together: EIO off the master means the last slave closed, which is the end of the output
+    *and* the end of the session, and the old loop broke on either. ConPTY separates them —
+    the child is gone while the last of its output is still buffered, and that last part is
+    the error text §4.6's tail is made of — so the shared loop needs them separated here too:
+    `read` says what arrived, `alive` says whether anything more is coming. On this platform
+    `alive` is therefore about the *terminal* and not the process: it goes false when the pty
+    hangs up, which is what `pump` is asking about, and `_reaped()` is what asks after a pid.
+    """
+
+    def __init__(self, pid, master):
+        self.pid = pid
+        self._master = master
+        self._finished = False
+
+    def read(self, timeout=0.0):
+        """Up to one chunk of output, as bytes, waiting at most `timeout` seconds for it.
+
+        Empty means nothing arrived in time — `alive()` is the only thing that says the
+        terminal is finished. An interrupted `select` is empty for the same reason it used to
+        be a `continue`: the handler that interrupted it has set `stopping`, and the loop's
+        own condition is what reads that.
+        """
+        if self._master is None:
+            return b""
+        try:
+            ready, _, _ = select.select([self._master], [], [], max(timeout, 0.0))
+        except OSError as e:
+            if e.errno == errno.EINTR:
+                return b""
+            self._finished = True
+            return b""
+        if not ready:
+            return b""
+        try:
+            chunk = os.read(self._master, READ_SIZE)
+        except OSError as e:
+            # EIO is how a pty master reports the last slave closing. That is the ordinary
+            # end of a session, not a failure.
+            if e.errno not in (errno.EIO, errno.EBADF):
+                raise
+            self._finished = True
+            return b""
+        if not chunk:
+            self._finished = True
+        return chunk
+
+    def write(self, data):
+        """Send `data` to the child: §9.3's arrow keys, and §4's prompt."""
+        if self._master is None:
+            raise ValueError("write to a closed terminal")
+        os.write(self._master, data)
+
+    def alive(self):
+        """Is there more output coming? False once the pty has hung up, and once this is
+        closed."""
+        return self._master is not None and not self._finished
+
+    def close(self):
+        """Drop the master. Idempotent, because it is called from a `finally`.
+
+        **This hangs up the child** — the kernel SIGHUPs the foreground process group about
+        100ms after the last master fd goes, but only once the child has taken the pty as its
+        controlling terminal, which is the window `terminate()` exists to cover. It is why
+        `run()` closes last, after the signals and not instead of them (§2, §9.10).
+        """
+        master, self._master = self._master, None
+        if master is None:
+            return
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+
 def spawn(argv, cwd, env, rows, cols):
-    """Run `argv` on a real terminal of the size §6 requires. Returns (pid, master_fd).
+    """Run `argv` on a real terminal of the size §6 requires. Returns (pid, Terminal).
 
     `os.openpty()` and an explicit fork rather than `pty.fork()`, because TIOCSWINSZ has to be
     set on the slave *before* the exec. Setting it on the master after pty.fork() returns does
@@ -71,7 +162,7 @@ def spawn(argv, cwd, env, rows, cols):
                 pass
             os._exit(126)
     os.close(slave)
-    return pid, master
+    return pid, Terminal(pid, master)
 
 
 def _reaped(pid):
