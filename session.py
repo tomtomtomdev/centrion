@@ -330,6 +330,14 @@ class Scrape:
     a chunk boundary, and the half-link it returns is well-formed and tappable and wrong — the
     phone gets a 404 and there is no error anywhere to notice. So a match that runs to the end
     of what has arrived is not accepted until something that cannot be part of a URL follows it.
+
+    **And that something may never be written**, which is W3i and the reason `idle` exists.
+    The Mac hid it: its renderer redraws constantly, so the next byte is always a millisecond
+    away. ConPTY emits on screen change, and once the link is on the screen nothing changes —
+    W3g measured the URL complete in the tail 1.96s after spawn and handed over at 6.43s,
+    waiting on a status footer whose clock had not ticked yet. So the wait has a second ending:
+    silence. `feed` is what the stream says, `idle` is what its absence says, and the caller
+    owes the distinction — see the contract on `idle`.
     """
 
     def __init__(self):
@@ -351,6 +359,28 @@ class Scrape:
         if len(self.tail) > KEEP:
             self.tail = self.tail[-KEEP:]
         return None
+
+    def idle(self):
+        """Nothing arrived this tick. The URL out if one has been sitting at the end of it.
+
+        **The caller's part of the contract**: say this only when a read has come back empty,
+        which on both platforms means a whole `TICK` elapsed with nothing on the stream, or
+        when the terminal is finished and there is no next byte at all. Said after every
+        chunk instead, this is `feed` without its guard, and the guard is load-bearing — a
+        match at the end of a *chunk* may be half a link with the rest already in flight
+        (`TestAChunkBoundaryInsideTheUrl`). A match at the end of a *silence* is not.
+
+        The one thing this cannot tell apart is a child that stopped mid-URL for a fifth of a
+        second, which no amount of waiting fixes and which nothing has ever been seen to do.
+        """
+        if self.url:
+            return self.url
+        found = URL_RE.search(self.tail)
+        if not found:
+            return None
+        self.url = found.group(0)
+        self.tail = ""
+        return self.url
 
 
 def child_env(base=None):
@@ -745,7 +775,14 @@ class Runner:
                 # against a finished terminal costs one more read before this gives up. On the
                 # Mac the extra read is always empty — EIO is both answers at once there.
                 self.absorb(terminal.read(TICK), transcript)
-                break
+                self.idle()         # W3i, and here it is the stronger claim: nothing at all
+                break               # is coming, so a link at the end of that is the whole one
+            else:
+                # W3i. An empty read against a live terminal is a whole `TICK` of nothing, and
+                # that is the other way a link can be known to be finished — the way this
+                # platform actually finishes one, four and a half seconds before the next byte
+                # would. `read` has already done the waiting, so the tick this costs is spent.
+                self.idle()
 
             # §9.3. Outside the `if chunk` block because two of its four steps are timers, and
             # a panel that has finished drawing sends nothing more to wait for. It stops
@@ -781,8 +818,22 @@ class Runner:
             return
         transcript.write(chunk)
         if not self.scrape.url and self.scrape.feed(chunk):
-            self.update(state=LIVE, url=self.scrape.url)
-            self.log("live: %s" % self.scrape.url)
+            self.went_live()
+
+    def idle(self):
+        """A tick with nothing on it. W3i: silence is the other thing that ends a link.
+
+        Nothing is written here — an idle tick produces no transcript — so this is the scrape
+        half of `absorb` and nothing else. `Scrape.idle` carries the contract about when the
+        loop is allowed to say it.
+        """
+        if not self.scrape.url and self.scrape.idle():
+            self.went_live()
+
+    def went_live(self):
+        """The record and the log, from either of the two ways a link is finished."""
+        self.update(state=LIVE, url=self.scrape.url)
+        self.log("live: %s" % self.scrape.url)
 
 
 def main():

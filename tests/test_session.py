@@ -484,6 +484,134 @@ class TestAChunkBoundaryInsideTheUrl(unittest.TestCase):
         self.assertEqual(found, CAPTURED)
 
 
+class TestALinkAtTheVeryEndOfTheOutput(unittest.TestCase):
+    """WINDOWS.md W3i: the holdback above needs a way to end other than more output.
+
+    The class above is the reason `feed` will not answer a match that runs to the end of
+    what has arrived: the rest of the link may still be on its way, and half a link is
+    well-formed, tappable and wrong. The cost of that caution is invisible on the Mac, whose
+    renderer keeps drawing and so is always a millisecond from the next byte. On Windows it
+    is most of the time to a link: W3g measured the URL complete in the tail **1.96s** after
+    spawn and handed over at **6.43s**, because ConPTY emits on screen change and the screen
+    did not change again for four and a half seconds.
+
+    So there is a second terminator, and it is silence. `idle()` is what the loop says when a
+    read has come back empty — a whole `TICK` with nothing on the stream — and a match sitting
+    at the end of the buffer through that is not half of anything. The caller's part of the
+    contract is that it says it only then, which `TestPumpOverATerminal` is where it is kept.
+    """
+
+    def truncated_at_the_link(self, raw, url):
+        """Everything up to and including the URL's last byte, in chunks, and nothing after.
+
+        What a session looks like at the moment the link is complete — and, for four and a
+        half seconds on Windows, what it goes on looking like.
+        """
+        end = raw.find(url.encode()) + len(url)
+        scrape = session.Scrape()
+        for i in range(0, end, 64):
+            self.assertIsNone(scrape.feed(raw[i:min(i + 64, end)]),
+                              "answered before the link was over")
+        return scrape
+
+    def test_a_link_at_the_very_end_of_the_output_is_not_held_forever(self):
+        """The slice's named test. One idle tick is the whole of the bound."""
+        with open(FIXTURE, "rb") as fh:
+            raw = fh.read()
+        scrape = self.truncated_at_the_link(raw, CAPTURED)
+        self.assertEqual(scrape.idle(), CAPTURED)
+        self.assertEqual(scrape.url, CAPTURED)
+
+    def test_the_silent_answer_is_the_one_the_next_byte_would_have_given(self):
+        """A different answer from the two endings would be worse than the wait it saves."""
+        with open(FIXTURE, "rb") as fh:
+            raw = fh.read()
+        self.assertEqual(self.truncated_at_the_link(raw, CAPTURED).idle(),
+                         session.Scrape().feed(raw))
+
+    def test_silence_before_a_link_answers_nothing(self):
+        """Every tick of a session that has not come up yet is an idle one (§4.6 waits 45s)."""
+        scrape = session.Scrape()
+        scrape.feed(b"\x1b[2J\x1b[Hstarting up\r\n")
+        for _ in range(20):
+            self.assertIsNone(scrape.idle())
+        self.assertIsNone(scrape.url)
+
+    def test_silence_does_not_answer_half_a_link_that_was_never_finished(self):
+        """The one case where the two terminators disagree, and silence has to lose.
+
+        A link cut off by a chunk boundary and then *not continued* is indistinguishable, in
+        the buffer, from a link that is complete — which is exactly why `idle()` is not the
+        same call as `feed`. What separates them is that the loop waits out a whole `TICK`
+        before saying it, so this only misreads a session that stopped writing mid-URL for a
+        fifth of a second. The assertion is about the prefix, not the pause: `session_` with
+        nothing after it is not a link by the pattern, so silence cannot promote it.
+        """
+        scrape = session.Scrape()
+        self.assertIsNone(scrape.feed(b"at https://claude.ai/code/session_"))
+        self.assertIsNone(scrape.idle())
+        self.assertIsNone(scrape.url)
+
+    def test_the_holdback_is_still_there_while_output_is_flowing(self):
+        """W3h's family of bug: the guard `idle()` works around is doing real work.
+
+        `feed` must go on refusing a match at the end of a chunk, because a chunked stream
+        says nothing about whether more is coming. If this starts passing the half link
+        through, the slice has removed the guard instead of giving it a second ending.
+        """
+        scrape = session.Scrape()
+        self.assertIsNone(scrape.feed(b"at https://claude.ai/code/session_01HJK2Lh42N7"))
+        self.assertEqual(scrape.feed(b"JbfMGExJkpTF\r\n"), CAPTURED)
+
+    def test_the_answer_never_changes_once_silence_has_given_it(self):
+        with open(FIXTURE, "rb") as fh:
+            raw = fh.read()
+        scrape = self.truncated_at_the_link(raw, CAPTURED)
+        scrape.idle()
+        self.assertEqual(scrape.idle(), CAPTURED)
+        self.assertEqual(scrape.feed(b"https://claude.ai/code/session_somethingElse\r\n"),
+                         CAPTURED)
+
+
+@unittest.skipUnless(os.path.exists(FIXTURE_WIN), "no Windows capture yet (WINDOWS.md W0a)")
+class TestTheLinkAtTheEndOfTheWindowsCapture(unittest.TestCase):
+    """W3g's measurement turned into an assertion, over the bytes it was measured on.
+
+    The fixture has no clock in it, so what it can carry is the shape rather than the 4.5
+    seconds: cut at the URL's last byte, this is the buffer the runner sat on while ConPTY
+    had nothing to redraw. The bytes that do follow the link here are a cursor move and a
+    `\\r` — they arrived, eventually, which is why the old code answered at all rather than
+    never (and why the bug was a delay and not a hang).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(FIXTURE_WIN, "rb") as fh:
+            cls.raw = fh.read()
+        cls.url = session.extract_url(cls.raw)
+
+    def test_what_follows_the_link_is_a_redraw_and_not_more_of_it(self):
+        """Why the next byte was four and a half seconds away.
+
+        What comes after the URL is a carriage return and cursor moves, and the next
+        *printed* thing in the capture is the status footer — `⏱️ <1m`, the usage bars —
+        which is a clock, redrawn when the minute changes rather than when anything happens.
+        So the byte the old code was holding the link for was the next tick of a timer.
+        """
+        after = self.raw[self.raw.find(self.url.encode()) + len(self.url):]
+        self.assertTrue(after.startswith(b"\r\x1b["), repr(after[:16]))
+        self.assertNotRegex(session.strip(after).lstrip(), r"^[A-Za-z0-9_-]",
+                            "the link runs on — this is not the held case")
+        self.assertIn("Usage", session.strip(after))
+
+    def test_the_link_is_handed_over_on_the_first_silent_tick(self):
+        end = self.raw.find(self.url.encode()) + len(self.url)
+        scrape = session.Scrape()
+        for i in range(0, end, 21):     # W3h: ConPTY's median read is 21 bytes
+            self.assertIsNone(scrape.feed(self.raw[i:min(i + 21, end)]))
+        self.assertEqual(scrape.idle(), self.url)
+
+
 class TestAChunkBoundaryInsideAnEscape(unittest.TestCase):
     """§12: carry the tail, do not strip per-chunk."""
 
@@ -1771,8 +1899,65 @@ class TestPumpOverATerminal(unittest.TestCase):
         self.assertEqual(r.scrape.url, CAPTURED)
         self.assertEqual(session.read_meta(r.dir)["state"], session.LIVE)
 
+    def test_a_link_that_is_the_last_thing_written_goes_live_on_a_silent_tick(self):
+        """W3i, and the caller's half of `Scrape.idle`'s contract.
+
+        An empty chunk here is an idle tick with the terminal still alive — the same thing a
+        real `Terminal.read(TICK)` returning `b""` is, a fifth of a second of nothing. The
+        link is the last byte of the first chunk, so before this slice the session stayed
+        `starting` until something else happened to be drawn: 4.5s on Windows, and forever if
+        nothing ever was.
+        """
+        term = FakeTerminal([("live at %s" % CAPTURED).encode(), b"", b""])
+        r = self.drive(term)
+        self.assertEqual(r.scrape.url, CAPTURED)
+        meta = session.read_meta(r.dir)
+        self.assertEqual(meta["state"], session.LIVE)
+        self.assertEqual(meta["url"], CAPTURED)
+
+    def test_it_takes_one_silent_tick_and_not_several(self):
+        """The bound the slice claims, counted in reads: the chunk, then one empty one.
+
+        One tick and not two, because the waiting has already happened by the time `read`
+        answers — `Terminal.read(TICK)` comes back empty only after `TICK` of nothing, on
+        both platforms. A second tick would be another fifth of a second bought for nothing.
+        """
+        term = FakeTerminal([("live at %s" % CAPTURED).encode()] + [b""] * 4)
+        r = self.runner()
+        t = self.transcript(r)
+        live_after = []
+        original = term.read
+
+        def read(timeout=0.0):
+            if r.scrape.url and not live_after:
+                live_after.append(term.reads)
+            return original(timeout)
+
+        term.read = read
+        r.pump(term, t)
+        t.close()
+        self.assertEqual(live_after, [2], "the link waited for more than one silent tick")
+
+    def test_a_link_at_the_end_of_a_dead_terminals_output_still_goes_live(self):
+        """The other ending, and the stronger one: nothing more is coming, ever.
+
+        §4.6's drain reads the last of what a child wrote after `alive()` has gone false, and
+        that chunk can end with the link — a session that came up and was killed a moment
+        later. There is no next byte to release it and no tick to wait for either.
+        """
+        term = FakeTerminal([b"...", ("live at %s" % CAPTURED).encode()])
+        r = self.drive(term)
+        self.assertEqual(r.scrape.url, CAPTURED)
+        self.assertEqual(session.read_meta(r.dir)["state"], session.LIVE)
+
     def test_a_session_with_no_link_leaves_the_record_alone(self):
         r = self.drive(FakeTerminal([b"no link here\r\n"]))
+        self.assertIsNone(r.scrape.url)
+        self.assertEqual(session.read_meta(r.dir)["state"], session.STARTING)
+
+    def test_a_silent_tick_does_not_invent_a_link(self):
+        """Every tick before the session comes up is one of these, and §4.6 waits 45s."""
+        r = self.drive(FakeTerminal([b"warming up\r\n"] + [b""] * 8))
         self.assertIsNone(r.scrape.url)
         self.assertEqual(session.read_meta(r.dir)["state"], session.STARTING)
 

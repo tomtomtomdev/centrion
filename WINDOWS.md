@@ -8,28 +8,30 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **W3h done (2026-09-19); W3i next.** The suite runs natively on Windows since W1c:
-593 tests, 518 pass, 75 skipped as the Mac's (each skip names its reason or the slice that
+Status: **W3i done (2026-09-19); W4a next.** The suite runs natively on Windows since W1c: 605
+tests, 530 pass, 75 skipped as the Mac's (each skip names its reason or the slice that
 un-gates it), and since W3h **no expected failure at all** — the one there had been was W3h's
 own. One unidentified error seen once in 35 runs remains, which W3c's row records rather than
 explains and which has not recurred since. Since W2b it is run from the venv —
 `.venv\Scripts\python -m unittest -q` — because `config.py`'s secrecy check needs pywin32;
 `requirements-win.txt` exists as of that slice. The go/no-go question is answered *go*: under
-a 200x50 ConPTY, `claude.exe --remote-control` printed its link 6.2 seconds after spawn, as one
-contiguous run, and today's `Scrape` finds it unmodified at every chunk size
+a 200x50 ConPTY, `claude.exe --remote-control` printed its link 6.2 seconds after spawn, as
+one contiguous run, and today's `Scrape` finds it unmodified at every chunk size
 (`tests/fixtures/rc_startup_win.log`) — and three of those 6.2 seconds were the pseudoconsole
-waiting to be told what terminal it had, which W3b now answers (§4). W3g measured what is left,
-by running the whole runner: **the link reaches the record 6.7 seconds after spawn, and 4.5 of
-those are `Scrape` holding a complete URL back for one more byte that ConPTY has no reason to
-send** — W3i, and the largest single thing between the phone and a link. Two Ctrl-C bytes on
-the ConPTY input ended it in 1.7 seconds with exit status 0. A child of a scheduled task survives the task being stopped, with
-no breakaway flag — which is refused there anyway. W3h adds one fact about the same stream and
-one about what is in it: ConPTY's reads are small (median 21 bytes) but never cut an escape
-sequence in half, and §9.3's trust dialog no longer appears for a new directory under
-`projects_root` at all — only outside it — so `Trust` is insurance here rather than a
-mechanism anything currently exercises (§4). Everything below that is not in §11's table
-is still plan, and the claims about Windows behaviour in it are what the API documents until a
-slice turns them into facts.
+waiting to be told what terminal it had, which W3b now answers (§4). W3g measured what is left
+by running the whole runner and found the link reaching the record 6.7 seconds after spawn,
+4.5 of them `Scrape` holding a complete URL back for one more byte; **W3i took that apart and
+it is a rare frame rather than a standing cost** — the link is in the record in 1.9–2.2s today
+with or without the fix, because ConPTY keeps writing past the URL, and the fix caps the case
+where it does not at one `TICK` instead of one redraw (§9). Two Ctrl-C bytes on the ConPTY
+input ended it in 1.7 seconds with exit status 0. A child of a scheduled task survives the
+task being stopped, with no breakaway flag — which is refused there anyway. W3h adds one fact
+about the same stream and one about what is in it: ConPTY's reads are small (median 21 bytes)
+but never cut an escape sequence in half, and §9.3's trust dialog no longer appears for a new
+directory under `projects_root` at all — only outside it — so `Trust` is insurance here rather
+than a mechanism anything currently exercises (§4). Everything below that is not in §11's
+table is still plan, and the claims about Windows behaviour in it are what the API documents
+until a slice turns them into facts.
 
 Facts about this box (2026-09-14): Windows 11 Pro 22621, Python 3.12.10 with pip 25.0.1, no
 third-party packages installed (`pywinpty`, `psutil`, `pywin32` all absent). Claude Code
@@ -1016,7 +1018,12 @@ run, and it is the largest thing left in the time to a link.
   Measured through the real runner: **the link is complete in the tail at 1.96s and `Scrape`
   hands it over at 6.43s**, because ConPTY emits on screen change and the screen does not
   change again for four and a half seconds. The Mac has never shown this: its renderer keeps
-  drawing, so the next byte is always along in milliseconds.
+  drawing, so the next byte is always along in milliseconds. *Amended by W3i:* the condition
+  is real and rare, not standing. Eight runs on this box, four with the pre-slice code, put
+  the link in the record at 1.9–2.2s with **no hold at all** — 404 characters follow the URL
+  inside the same ConPTY read, five runs out of five — so W3g caught a frame that ended at the
+  link and this slice cannot reproduce one. What the hold costs when it does happen is the
+  measurement below.
 - Red: portable `test_session.py::test_a_link_at_the_very_end_of_the_output_is_not_held_for
   ever` — feed the W0a fixture truncated to end exactly at the URL, then feed nothing, and
   assert the link is reported within a bounded number of idle ticks. The Windows twin is the
@@ -1027,6 +1034,12 @@ run, and it is the largest thing left in the time to a link.
   the guard for the chunked case; it is doing real work (`CARRY_LIMIT` and W3h are the same
   family of bug).
 - Run: the acceptance run again, and the time to link has to come down by about four seconds.
+  *Amended by W3i:* it did — 6.7s to 2.3s — and **none of it is this slice's doing**, because
+  the same code with the fix disabled is just as fast today. A prediction written from one
+  run, where the run was the rare case. The measurement that does answer the slice provokes
+  W3g's condition on a live ConPTY instead of waiting for it: cut the read at the URL's last
+  byte and withhold the rest for 5s, which is what "the screen does not change again" is.
+  Three runs each way: **held 5.00s without the fix and 0.20s — one `TICK` — with it**.
 - Test: both platforms — this is `Scrape`, which is the most portable code in the program.
 
 ### W4 — the listener
@@ -1169,7 +1182,7 @@ the Mac when the slice touched shared or posix code.
 | W3f stop marker | done · Mac pending | 2026-09-19 | 0c7514e | **586 ran: 511 pass, 74 skip, 1 xfail**, 35.3s · **not run** | **The plan's "each tick" was the sentence to get right, and `SIGTERM` is dropped for the opposite of the obvious reason.** A check that only looks for the marker on an *idle* tick stops every session except the ones producing output, which is the session `stop` is for; so it is checked on every pass, and the cost that made that look expensive is 5.7µs of `stat` against a 23.6µs pass of `pump` over a fake terminal doing nothing else — five a second on an idle session, and a smaller share of any real one. No throttle. `SIGTERM` is not absent on Windows, it is *undeliverable*: `signal.signal(SIGTERM)` is accepted and `os.kill(pid, SIGTERM)` is `TerminateProcess`, so a handler registers and can never run — which is the actual reason `stop` is a file. Left: `SIGINT` and `SIGBREAK`, for `--foreground` only; in service `DETACHED_PROCESS` means there is no console to interrupt from. POSIX honours the marker now as well, so the runner has one place that hears a stop and the tests are one set. Mutation, for the five tests green before the slice (`request_stop`/`stop_requested` shipped in W1c): disabling either fails 9 of the 10 stop tests, the survivor being the one asserting a negative; `O_CREAT\|O_EXCL` instead of the append fails the two idempotence tests; **`"ab"` → `"wb"` is caught by nothing** — the marker is empty, so nothing pins the append. And the mutation found a real hole in the slice's own named test: `FakeTerminal(forever=True)`'s patience let `test_stop_marker_ends_pump` reach `ended` five seconds late with the marker disabled entirely. `assertTrue(term.alive())` is the assertion that makes it about the stop. |
 | W3g `child_env`, runner acceptance run | done · Mac pending | 2026-09-19 | 66d93b2 | **592 ran: 516 pass, 75 skip, 1 xfail**, 30.3s · **not run** | **The runner works end to end on this box, and four and a half of its seven seconds to a link are ours.** Acceptance run, twice: `session.py --foreground` produced a link, a 3.3 KB `pty.log`, exit status 0 1.8s after the console control event, `meta.json` at `ended`, and no claude left behind — but **time to link 6.7s**, which is W0a's 6.2 with three seconds supposedly removed by W3b. Both halves of that turned out to be true. W3b's saving is real and re-measured here against the same binary minutes apart: **2.0s with the DA1 answer, 5.0s with it suppressed**, twice each. The rest is `Scrape`: instrumented through the real `Runner`, **the link is complete in the tail at 1.96s and `Scrape` returns it at 6.43s**, because `feed` holds a URL until one more character arrives and ConPTY emits only on screen change — the screen does not change again for four and a half seconds. The Mac has never shown it: its renderer keeps drawing. New slice **W3i**. The other finding is about the suite, not the code: every test in `test_session_win.py` builds its own `dict(os.environ)`, so `test_spawn_reports_size` was green on `cmd /c mode con` for the whole week that the same command answered `'mode' is not recognized` through `child_env` — the new `test_the_environment_the_runner_really_passes_can_find_a_program` closes that, and fails with the Mac's `PATH` put back (mutation-checked). `mode con` now answers, and answers `Lines: 50 / Columns: 200`, which is W3b's size claim confirmed by the tool rather than by pywinpty. `cmd /c set` read back through the ConPTY shows all nine essentials present once each, no duplicate spelling, no `CLAUDE*`, no `AI_AGENT`, `COLUMNS`/`LINES` intact. The config this box had never needed until now: `.telegram.json` with a placeholder token, `projects_root` the parent of this checkout, and the W2b DACL check passed it unmodified. +6 tests, +1 skip (the Mac's shell variables). Mac: not run — see Pending. |
 | W3h `Trust` carries a partial escape | done · Mac pending | 2026-09-19 | 0c8350e | **593 ran: 518 pass, 75 skip, 0 xfail**, 35.1s · **not run** | **The bug is real, the sizes that trigger it are real, and the live path was never hitting it — and the slice only knows that because it took a run step it was excused from.** `Stripper` is the green: `strip` over a stream, holding a trailing partial escape bounded by `CARRY_LIMIT` and decoding incrementally, and both `Scrape` and `Trust` now hold one instead of `Scrape` owning the only copy of the rule. The red was wider than the row it replaces said: not "64, 16, 1" but **127 of the first 199 chunk sizes on the Mac panel and 116 of the first 299 on the Windows capture** — the passing sizes in between are the cuts that happen to miss an escape, which is why sampling three sizes made it look like a threshold. After: **every size from 1 to 399 answers the dialog, on both fixtures**, and `Scrape` returns the same link at 1, 7, 64, 512, 4096 and whole. Run step, and it is two findings. **One:** ConPTY's real reads are small — 26 chunks, min 3 bytes, median 21, three quarters ≤64 — but **0 of 26 ended inside an escape sequence**, because it flushes whole renders, so the pre-W3h `Trust` answered the live panel too (2.84s against 2.71s, both reaching `done` and a link). The plan had measured the input's size and reasoned about where it was cut; those are different measurements and only one of them was taken. **Two, and it is the one that changes a later slice:** §9.3's dialog **no longer appears at all** for a new directory under `projects_root` — empty, one file, a git repo and a `.claude\settings.json` all came straight up to a link, each getting a `projects` entry saying `hasTrustDialogAccepted: false` without being asked — while the same directory under `%TEMP%` raises it every time and `Trust` answers it. Where, not what. So `Trust` is unexercised on the only path that turns it on, W4e cannot confirm `new+trust` by watching, and §4 now says both. No code changed for either finding; the honest response to "the mechanism is currently unreachable" is not to delete the code that handles it. Test count +1 and **the suite's one expected failure is gone** — 592/1 xfail becomes 593/0, the first slice since W0a where that line reads clean. Two consecutive full runs, 35.0s and 35.1s; **W3c's unidentified ~3% error did not recur** (it stays open, now ~22 clean runs on from W3d's twenty). Mac: not run — see Pending. |
-| W3i the link is held for a byte that is not coming | todo | | | | time to link, before 6.7s / after: |
+| W3i the link is held for a byte that is not coming | done · Mac pending | 2026-09-19 |  | **605 ran: 530 pass, 75 skip, 0 xfail**, 35.9s · **not run** | **The hold is real, the fix is one tick, and the four and a half seconds it was sized from are not there any more.** `Scrape.idle()` is the green: `feed` is what the stream says and `idle` is what its absence says, and the loop may only say it after a read has come back empty — a whole `TICK` of nothing — or against a finished terminal, where the claim is stronger still. The guard `feed` keeps is untouched, because a match at the end of a *chunk* may be half a link with the rest in flight and a match at the end of a *silence* may not. **But the live path is not taking it.** Eight sessions, four of them with `Runner.idle` stubbed back out to the pre-slice code, all reached the record in 1.9–2.2s with **zero hold**; the read that completes the URL carried **404 more characters after it, five runs out of five**, and reads kept arriving every ~0.1s after. So W3g caught a frame that happened to end at the link, and this box will not produce one to order — the same shape as W3h's finding one slice earlier, and the second time running that a number measured once has been read as a constant. Both amendments are in §9. What answers the slice is the condition provoked on a live ConPTY rather than waited for: cut the read at the URL's last byte and withhold the rest for 5s, which is exactly "the screen does not change again". Three runs each way — **held 5.00s without the fix, 0.20s with it**, which is one `TICK` and is the bound the tests assert. The acceptance run came down from W3g's 6.7s to **2.3s**, exit 0 1.7s after the console control event, `pty.log` 4.1 KB, `meta.json` at `ended`, nothing left behind — and **none of those four seconds are this slice's**, which the A/B is the only reason anyone knows. +12 tests, **no skip count change** — every one runs here; on the Mac the two fixture-gated Windows ones will skip. W3c's unidentified ~3% error did not recur. Mac: not run — see Pending. |
 | W4a `alive`/`started` via psutil | todo | | | | |
 | W4b `Sessions.stop` | todo | | | | |
 | W4c runner outlives listener | todo | | | | |
@@ -1242,6 +1255,11 @@ verified until then, and W1c's first Windows-green run is not a substitute.
 | W3h | `/usr/bin/python3 -m unittest -q` | green, and **one expected failure fewer**: `test_the_answer_does_not_depend_on_chunking` was an `expectedFailure` on both platforms and is now an ordinary test in both `TestTheWindowsTrustDialog` (fixture-gated, so it runs there too) and `TestTheTrustDialog`. The count is W3g's plus 1, with `expectedFailures=0` — if the Mac still reports one, the decorator was removed on a class the Mac skips. |
 | W3h | `TestTheTrustDialog`, whole class | **the portable half of the slice is the whole of it**: `Stripper` is in `session.py`, so the Mac's `Trust` and `Scrape` changed too, and this class is where a carry that eats a character instead of holding it would show. `test_it_does_not_hold_the_whole_session_in_memory` is the one to watch — the carry is a second buffer and `CARRY_LIMIT` is the only thing bounding it. |
 | W3h | a fresh empty directory, `python3 session.py --foreground --cwd <it> --name w3h --trust` | **does the Mac still get the dialog at all?** Windows stopped raising it under `projects_root` (§4), which would be a property of Claude Code rather than of the platform — so the Mac is the control, and the answer decides whether W4e's `new+trust` check can be observed anywhere. A link with `Trust` never leaving `waiting` is the no. |
+| W3i | `/usr/bin/python3 -m compileall -q .` | clean — 3.9. `Scrape.idle` and `Runner.idle`/`went_live` are plain methods and nothing in them is new syntax, but the Mac is still the only interpreter that can say so. |
+| W3i | `/usr/bin/python3 -m unittest -q` | green, and **two newly skipped against ten newly run**. `TestTheLinkAtTheEndOfTheWindowsCapture` (2) is gated on `rc_startup_win.log`, which is not on that box; everything else in `TestALinkAtTheVeryEndOfTheOutput` (6) and the four new ones in `TestPumpOverATerminal` are portable and must *run* there — this is `Scrape`, the most portable code in the program. The count is W3h's plus 12. |
+| W3i | `TestALinkAtTheVeryEndOfTheOutput`, watched | **the Mac is the control for the claim that it has never needed this.** `test_a_link_at_the_very_end_of_the_output_is_not_held_forever` feeds the *Mac* fixture truncated at the URL, so if `idle()` answers something other than `CAPTURED` there the shared code is wrong and not just unexercised. |
+| W3i | `python3 session.py --foreground --cwd <project> --name w3i`, then Ctrl-C | a link, `pty.log`, `meta.json` at `ended` — and **the time to link is the thing to read**: this box now says 2.3s with the hold absent. The Mac's renderer keeps drawing, so its number should be unchanged by this slice in either direction; a Mac that got *faster* would mean it had been taking the hold all along, which §9's W3i says it never does. |
+| W3i | nothing else changed on the Mac | `session.py` only, and `absorb`'s body moved into `went_live` without changing what it does. Named here so the row is not mistaken for an omission. |
 
 ### Decisions changed by evidence
 
@@ -1435,3 +1453,4 @@ Appended, dated, when a run step contradicts the plan above and a section was am
   `Trust` exists for is currently unreachable on the path that uses it — found only because
   the run step was taken on a slice marked "Run: none", which is the argument for the ritual's
   step 4 having no exemption.
+- **2026-09-19, W3i → §9's W3i.** The hold was measured once, in W3g, and sized as a standing cost: 4.5 of 6.7 seconds. It is a rare frame, not a property. Eight sessions here — four with the pre-slice code — hold for **0.00s**, because the read that completes the URL carries 404 more characters after it every time, and the acceptance run came down to 2.3s **without the fix contributing any of it**. The fix is still right and its own measurement says so under the condition provoked: 5.00s of hold becomes 0.20s. **Two slices running, a number taken once has been read as a constant** (W3h was the other), and both times the correction cost a run step rather than a rewrite — so the rule the ritual is missing is not "take the run step", which it already says, but *take it twice, or say in the row that you did not*.
