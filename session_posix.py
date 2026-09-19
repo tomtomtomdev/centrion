@@ -373,12 +373,17 @@ class Lock:
 def request_stop(directory):
     """Ask the runner in `directory` to stop: create the marker. Idempotent.
 
-    A second way of saying what SIGTERM says here, not a replacement for it — `bot.py` on this
-    platform still signals, and a runner that is anywhere other than `pump` hears only that.
-    What the marker buys the Mac is that the runner has one place where a stop is heard
-    (`Runner.pump`) instead of one per platform, and that the tests for it are one set. See
-    WINDOWS.md W3f, and `session_win.request_stop`, which is this function and is the whole
-    channel on the platform that has no deliverable signal.
+    A second way of saying what SIGTERM says here, not a replacement for it — and since W4b it
+    is the way `bot.py` says it *first* on this platform, with the signal behind it. The order
+    is what changed, not the mechanism: `Sessions.stop` asks here, waits out `STOP_GRACE`, and
+    only then calls `terminate`, whose first act is still the SIGTERM it always was. A runner
+    in `pump` never notices the difference, because it hears the marker within a tick; a runner
+    anywhere else — inside `spawn`, inside the trust dialog — hears only the signal, and now
+    waits for it. That cost is the Mac's half of W4b and it is taken on purpose: what it buys
+    is that the runner has one place where a stop is heard (`Runner.pump`) instead of one per
+    platform, that the tests for it are one set, and that a `stop` means the same thing on both
+    sides. See WINDOWS.md W3f and §6, and `session_win.request_stop`, which is this function
+    and is the whole channel on the platform that has no deliverable signal.
     """
     with open(os.path.join(directory, STOP), "ab"):
         pass

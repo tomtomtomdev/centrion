@@ -137,13 +137,18 @@ TOKENISH = re.compile(r"\d{5,}:[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{12,}")
 #: What replaces the middle of a reply too long to send. See fit().
 ELISION = "\n… %d characters elided …\n"
 
-#: §9.11: **the two grace periods nest.** Ending a runner is two kills in sequence, not one —
-#: the runner catches SIGTERM and then spends up to its own `session.GRACE` ending claude,
+#: §9.11: **the two grace periods nest.** Ending a runner is two acts in sequence, not one —
+#: the runner hears the stop and then spends up to its own `session.GRACE` ending claude,
 #: which was measured at over five seconds for a real session on this box. A caller that
-#: allowed it the same budget would SIGKILL it in the middle of that, orphaning the session
+#: allowed it the same budget would kill it in the middle of that, orphaning the session
 #: and leaving meta.json saying `live` for something already gone. Three times over, so the
 #: multiple is visible rather than a number that looks arbitrary a year from now.
 STOP_GRACE = session.GRACE * 3
+
+#: How often `stop` asks whether the runner has gone yet, while it waits out the above. A
+#: fifth of `session.TICK`, so the answer is never more than a poll behind the runner noticing
+#: the marker; the wait it divides is measured in seconds, so nothing here is hot.
+STOP_POLL = 0.05
 
 #: §4: `pid reuse is theoretically possible between reboots; started is in the record, so
 #: compare it against the process start time.` The runner writes its record within a moment of
@@ -538,14 +543,58 @@ class Sessions:
         return ended
 
     def stop(self, record, grace=STOP_GRACE):
-        """SIGTERM the runner, which SIGTERMs claude. §5's `stop`, §9.10's signalling.
+        """Ask the runner to end its session; kill it if it will not. §5's `stop`, §9.10.
 
-        Thin on purpose: session.terminate() is where the two hard-won details live — signal
-        the process *group* as well as the process, and ask both `waitpid` and `kill(pid, 0)`
-        whether it worked — and slice 7 shipped bugs against both of them.
+        **Ask, wait, force** — and W4b moved the first of those three from a signal to a file
+        (WINDOWS.md §6). The ask is `procs.request_stop`, the marker `Runner.pump` looks for
+        every tick, because Windows has no catchable signal to send a detached process: its
+        only way of reaching another process is `TerminateProcess`, which the runner cannot
+        hear and cannot act on, and a session ended that way leaves claude's tree to the
+        pseudoconsole and the job object with nothing written down about any of it.
+
+        On the Mac the marker is a second way of saying what SIGTERM says, and SIGTERM is
+        still said — it is the first half of `session.terminate` below, which is now the
+        *force* rather than the ask. That is a real change to this platform's timing and it is
+        one way round rather than the other on purpose: a runner anywhere but `pump` hears
+        only the signal, so the Mac pays `grace` before being reached at all, where it used to
+        be reached at once. What it buys is that the stop a session actually gets is the same
+        stop on both platforms, and that the process which knows what the session was doing is
+        the one that ends it — `terminate` here is for the runner that did not answer.
+
+        Thin on purpose past that: session.terminate() is where the hard-won details live —
+        the process *group* as well as the process on the Mac, the Ctrl-C and the job on
+        Windows — and slice 7 shipped bugs against two of them.
         """
         if not self.alive(record):
             return True              # already gone is the outcome `stop` was asking for
+
+        sid = record.get("sid")
+        # A record with no usable sid has no directory, and the marker is a file in one. §3
+        # always writes it, so this is a corrupt record — the same case `alive`'s type guard
+        # is about, and the same answer: it is still a session with permissions bypassed and
+        # `stop` is still the only thing that can reach it, so skip the ask and take the pid.
+        asked = isinstance(sid, str) and bool(sid)
+        if not asked:
+            self.log("session record %r has no sid: stopping pid %r without asking first"
+                     % (sid, record.get("runner_pid")))
+        else:
+            try:
+                procs.request_stop(self.directory(sid))
+            except OSError as e:
+                # A full disk, or a session directory deleted under us. The ask was not made,
+                # so there is nothing to wait for — `claim()` draws the same line one file
+                # away, for the same reason: what cannot be written did not happen.
+                self.log("could not ask session %s to stop: %s" % (sid, e))
+                asked = False
+
+        if asked:
+            deadline = time.monotonic() + grace
+            while time.monotonic() < deadline:
+                # Slept first: the runner needs a tick to notice the marker, and `alive` was
+                # asked a moment ago at the top of this function.
+                time.sleep(STOP_POLL)
+                if not self.alive(record):
+                    return True
         return session.terminate(record.get("runner_pid"), grace=grace, log=self.log)
 
 

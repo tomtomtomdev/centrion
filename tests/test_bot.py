@@ -51,6 +51,7 @@ Stdlib only, no network: `/usr/bin/python3 -m unittest discover -s tests -t . -v
 import ast
 import errno
 import getpass
+import inspect
 import json
 import os
 import plistlib
@@ -1710,14 +1711,78 @@ class TestTheListenerUsesThePlatformSeam(unittest.TestCase):
     def test_process_started_is_the_platforms(self):
         self.assertIs(bot.process_started, bot.procs.started)
 
-    def test_stop_goes_through_session_terminate_with_the_nested_grace(self):
-        # §9.11: a runner is given STOP_GRACE, which exceeds its own GRACE, or it is
-        # hard-killed halfway through ending claude.
-        with mock.patch.object(self.sessions, "alive", return_value=True), \
+    def test_stop_asks_through_the_marker_before_it_reaches_for_a_kill(self):
+        """W4b, §6: the listener's polite stop is a file now, on both platforms.
+
+        The Mac could signal and does still signal — as the force below, where the SIGTERM
+        has always been half of `terminate` anyway. Windows cannot signal a detached process
+        at all, so the marker is the *whole* of the ask there and there is nothing else for
+        this to be. What is pinned here is the order — asked, then waited out — and that a
+        runner which hears it is never killed for it.
+        """
+        with mock.patch.object(bot.procs, "request_stop") as ask, \
+             mock.patch.object(self.sessions, "alive", side_effect=[True, False]), \
+             mock.patch.object(session, "terminate") as terminate:
+            self.assertTrue(self.sessions.stop(self.record(sid="3f2a91")))
+        ask.assert_called_once_with(self.sessions.directory("3f2a91"))
+        terminate.assert_not_called()
+
+    def test_a_runner_that_never_hears_it_is_terminated_with_the_nested_grace(self):
+        """§9.11's nesting, and where W4b moves it: after the ask rather than instead of it.
+
+        The wait has to exceed the runner's own `GRACE` plus the two Ctrl-C settles it spends
+        ending claude, or the listener kills a runner halfway through doing what it was asked
+        — which is §9.10's failure wearing a marker instead of a signal.
+        """
+        with mock.patch.object(bot.procs, "request_stop"), \
+             mock.patch.object(self.sessions, "alive", return_value=True), \
              mock.patch.object(session, "terminate", return_value=True) as terminate:
+            self.assertTrue(self.sessions.stop(self.record(sid="3f2a91"), grace=0.3))
+        terminate.assert_called_once_with(4242, grace=0.3, log=self.sessions.log)
+        self.assertEqual(inspect.signature(bot.Sessions.stop).parameters["grace"].default,
+                         bot.STOP_GRACE)
+        self.assertGreater(bot.STOP_GRACE, session.GRACE + 2 * session.SETTLE)
+
+    def test_a_session_that_is_already_gone_is_not_asked_and_not_killed(self):
+        """`stop` on a corpse is `True` and nothing else: no marker written into a directory
+        nobody is reading any more, and no kill aimed at a pid that may be somebody else's by
+        now — which is the whole reason `alive` asks two questions rather than one."""
+        with mock.patch.object(bot.procs, "request_stop") as ask, \
+             mock.patch.object(self.sessions, "alive", return_value=False), \
+             mock.patch.object(session, "terminate") as terminate:
             self.assertTrue(self.sessions.stop(self.record()))
-        terminate.assert_called_once_with(4242, grace=bot.STOP_GRACE, log=self.sessions.log)
-        self.assertGreater(bot.STOP_GRACE, session.GRACE)
+        ask.assert_not_called()
+        terminate.assert_not_called()
+
+    def test_a_marker_that_cannot_be_written_is_a_kill_and_not_a_wait(self):
+        """A full disk, or a session directory deleted under the listener. `claim()` takes the
+        same line one file away: an ask that could not be made was not made, so waiting out
+        `STOP_GRACE` for an answer to it is fifteen seconds of a phone being told nothing, and
+        the honest response is the force that would have followed it anyway."""
+        with mock.patch.object(bot.procs, "request_stop", side_effect=OSError(28, "no space")), \
+             mock.patch.object(self.sessions, "alive", return_value=True), \
+             mock.patch.object(session, "terminate", return_value=True) as terminate, \
+             mock.patch.object(bot.time, "sleep") as slept:
+            self.assertTrue(self.sessions.stop(self.record(sid="3f2a91"), grace=30))
+        terminate.assert_called_once_with(4242, grace=30, log=self.sessions.log)
+        slept.assert_not_called()
+
+    def test_a_record_with_no_sid_is_stopped_by_its_pid_and_not_waited_for(self):
+        """The marker is a file in a session directory, and a record without a sid names no
+        directory. §3 writes one on every record, so this is a corrupt one — and it is the
+        same answer `alive`'s type guard gives: a session with permissions bypassed that `ls`
+        can see is one `stop` has to be able to reach, so the ask is skipped and the pid is
+        taken. Waiting out `STOP_GRACE` for an answer to a question nobody was asked is the
+        bug this is here to prevent."""
+        with mock.patch.object(bot.procs, "request_stop") as ask, \
+             mock.patch.object(self.sessions, "alive", return_value=True), \
+             mock.patch.object(session, "terminate", return_value=True) as terminate, \
+             mock.patch.object(bot.time, "sleep") as slept:
+            for bad in (None, "", 3, b"3f2a91"):
+                self.assertTrue(self.sessions.stop(self.record(sid=bad), grace=30), repr(bad))
+        ask.assert_not_called()
+        slept.assert_not_called()
+        self.assertEqual(terminate.call_count, 4)
 
     def test_start_passes_the_platform_flags_to_popen(self):
         fake = mock.Mock(pid=777)
@@ -1748,6 +1813,131 @@ class TestTheListenerUsesThePlatformSeam(unittest.TestCase):
         # One lock file for both the shell's lockf and the Windows mutex named after it.
         self.assertEqual(os.path.relpath(bot.LOCK, bot.HERE).replace(os.sep, "/"),
                          "var/.bot.lock")
+
+
+#: WINDOWS.md W4b. The runner `TestStoppingARealRunnerOnWindows` starts: the real
+#: `session.Runner`, over a substitute for claude. `session.py` itself is not used because its
+#: `main()` wants a config file and a login to build the argv from, and the constructor takes
+#: that argv directly — which is the whole of the substitution. Everything else is the shipped
+#: path: `begin`, `recheck`, a real ConPTY, a real job object, `pump`'s marker check every
+#: tick, and `terminate`'s two Ctrl-Cs before the job goes.
+RUNNER_HARNESS = '''\
+import sys
+sys.path.insert(0, %(root)r)
+import session
+
+flags = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+log = open(%(log)r, "a", buffering=1, encoding="utf-8")
+runner = session.Runner(flags["--sid"], flags["--cwd"], flags["--name"],
+                        root=flags["--root"], project=flags["--project"],
+                        chat_id=int(flags["--chat-id"]), argv=%(argv)r,
+                        projects_root=%(projects_root)r,
+                        log=lambda m: log.write(m + "\\n"))
+sys.exit(0 if runner.run() == session.ENDED else 1)
+'''
+
+
+@unittest.skipIf(POSIX, "WINDOWS.md W4b: the listener's stop over ConPTY and a job object")
+class TestStoppingARealRunnerOnWindows(unittest.TestCase):
+    """`Sessions.stop` against a runner that is really there. WINDOWS.md §6, W4b.
+
+    The portable tests above pin the shape over a fake `procs`; this one is the only place in
+    the suite where the two processes say the whole thing to each other. It matters here more
+    than it would on the Mac, because on this platform the listener has *no* way to reach a
+    detached runner except the file it writes — there is no signal to fall back to that the
+    runner could catch, only `TerminateProcess`, which catches nothing and would leave
+    meta.json saying `live` for a session the phone has been told is over.
+
+    So the assertion that carries the slice is the record: a session that says `ended` was
+    ended *by its own runner*, which means the marker was heard. A kill would have left the
+    word `live` on disk. The pids underneath it are the other half — §5's `stop` must not
+    leave a dev server behind, and `ping` stands in for one because W3e measured that it
+    ignores the Ctrl-C exactly as a build does, so only the job object can reach it.
+    """
+
+    URL = "https://claude.ai/code/session_w4bw4bw4bw4b"
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        # A direct child of `projects_root`, because the runner re-checks §3's rule itself.
+        self.cwd = os.path.join(self.tmp, "beacon")
+        os.makedirs(self.cwd)
+        self.root = os.path.join(self.tmp, "sessions")
+        self.logfile = os.path.join(self.tmp, "runner.log")
+        self.script = os.path.join(self.tmp, "runner.py")
+        # `echo` puts a link on the terminal so the session reaches `live`, which is the only
+        # state a `stop` is ever aimed at; `ping` then holds the session open and ignores
+        # every Ctrl-C sent to it.
+        argv = ["cmd", "/c", "echo", self.URL, "&", "ping", "-n", "60", "127.0.0.1"]
+        with open(self.script, "w", encoding="utf-8") as fh:
+            fh.write(RUNNER_HARNESS % {"root": ROOT, "log": self.logfile, "argv": argv,
+                                       "projects_root": self.tmp})
+
+    def tail(self):
+        """The runner's own log, for a failure message. It is a detached process, so this is
+        the only thing it can say to a test that is watching it from outside."""
+        try:
+            with open(self.logfile, encoding="utf-8") as fh:
+                return "\n-- the runner said --\n" + fh.read()
+        except OSError:
+            return "\n-- the runner said nothing --"
+
+    def live_session(self):
+        sessions = bot.Sessions(root=self.root, script=self.script, log=lambda *_: None)
+        sid = "w4b001"
+        sessions.start(sid, "beacon-w4b", self.cwd, "beacon", ME)
+        self.addCleanup(self.cleanup, sessions, sid)
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            record = sessions.read(sid) or {}
+            if record.get("state") == session.LIVE:
+                return sessions, record
+            if record.get("state") == session.FAILED:
+                self.fail("the session failed instead of coming up" + self.tail())
+            time.sleep(0.05)
+        self.fail("no session came up in 45s" + self.tail())
+
+    def descendants(self, pid):
+        """The pids under the ConPTY's child — `ping`, once `cmd` has got round to it."""
+        import psutil
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            try:
+                kids = [p.pid for p in psutil.Process(pid).children(recursive=True)]
+            except psutil.Error:
+                kids = []
+            if kids:
+                return kids
+            time.sleep(0.05)
+        return []
+
+    def cleanup(self, sessions, sid):
+        for key in ("claude_pid", "runner_pid"):
+            pid = (sessions.read(sid) or {}).get(key)
+            if isinstance(pid, int) and session.procs.alive(pid):
+                session.terminate(pid, grace=0.5, log=lambda *_: None)
+        sessions.reap()
+
+    def test_a_stop_ends_the_runner_the_session_and_everything_under_it(self):
+        sessions, record = self.live_session()
+        left_behind = self.descendants(record["claude_pid"])
+        self.assertTrue(left_behind, "nothing was started under the session to be left behind")
+
+        began = time.monotonic()
+        self.assertTrue(sessions.stop(record), "the listener could not stop it" + self.tail())
+        took = time.monotonic() - began
+
+        ended = sessions.read(record["sid"]) or {}
+        self.assertEqual(ended.get("state"), session.ENDED,
+                         "the record says %r, so the runner did not end itself%s"
+                         % (ended.get("state"), self.tail()))
+        self.assertLess(took, bot.STOP_GRACE,
+                        "the wait ran out, which means this was the kill and not the marker")
+        self.assertFalse(session.procs.alive(record["runner_pid"]), "the runner is still there")
+        self.assertFalse(session.procs.alive(record["claude_pid"]), "the session is still there")
+        for pid in left_behind:
+            self.assertFalse(session.procs.alive(pid), "pid %d outlived the session" % pid)
 
 
 class TestTheLockGuardsTheToken(unittest.TestCase):

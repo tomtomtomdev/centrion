@@ -8,8 +8,9 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **W4a done (2026-09-19); W4b next.** The suite runs natively on Windows since W1c: 614
-tests, 539 pass, 75 skipped as the Mac's (each skip names its reason or the slice that
+Status: **W4b done (2026-09-19); W4c next — and W4c's red and green are already on disk (§9),
+so it starts with its run step.** The suite runs natively on Windows since W1c: 619
+tests, 544 pass, 75 skipped as the Mac's (each skip names its reason or the slice that
 un-gates it), and since W3h **no expected failure at all** — the one there had been was W3h's
 own. One unidentified error seen once in 35 runs remains, which W3c's row records rather than
 explains and which has not recurred since. Since W2b it is run from the venv —
@@ -33,7 +34,13 @@ than a mechanism anything currently exercises (§4). W4a opens the listener's ha
 pid-reuse guard has both platforms' answers now — and found that Windows never *refuses* to
 date a process (0 of 208, including the 109 whose owner psutil cannot read) but answers `0.0`
 for pids 0 and 4, so a corrupt record naming pid 4 reads as a live runner here exactly as one
-naming pid 1 does on the Mac (§6). Everything below that is not in §11's
+naming pid 1 does on the Mac (§6). **W4b closes the listener's other half**: a `stop` is *ask,
+wait, force* on both platforms now, the ask being W3f's marker, and the A/B it ran against a
+real session says the hard kill it replaces was **not** leaving processes behind — the job and
+the pseudoconsole take all three pids in 0.00s — it was skipping the session's own ending,
+which is claude's clean exit and a `meta.json` that does not say `live` for something already
+gone (§6). The price is the Mac's: `SIGTERM` is the fallback there now rather than the first
+act. Everything below that is not in §11's
 table is still plan, and the claims about Windows behaviour in it are what the API documents
 until a slice turns them into facts.
 
@@ -562,6 +569,30 @@ tree (W3e, measured). Without the flag this line would have left a dev server ru
 session the phone was told had stopped. §9.11's nesting rule carries over unchanged: the
 listener's grace must exceed the runner's `GRACE` plus the two Ctrl-C settles, or the listener
 kills a runner that was halfway through ending claude cleanly.
+
+*W4b, 2026-09-19 — done as written, and the fallback turns out not to be the leak this
+paragraph implies.* Both halves of the sentence above were measured against a real session on
+the same box, one after the other: the marker path ends a live session in **5.70s** with
+`meta.json` at `ended`, and the fallback — `stop` with the wait skipped, which is exactly what
+this function did before the slice — returns in **0.00s** and takes the runner, the ConPTY's
+child and the `ping` under it **just as completely**. So the flag and the pseudoconsole really
+do cover the hard kill, as the sentence above says, and the cost of taking it is not a stray
+process. **What the hard kill loses is the ending, not the tree**: nothing sends claude the two
+Ctrl-Cs it exits cleanly on (W0b: status 0 in 1.71s), and `meta.json` is left saying `live` by
+the one process that knew otherwise — the listener's `halt` writes `ended` a moment later
+through `finish`, so the phone is told the truth either way, and `stop` on its own is not. The
+5.70s is the runner spending its whole `GRACE` on a child that ignores a Ctrl-C, which is the
+`ping` standing in for a build; a real session is W0b's 1.71s.
+
+**The ask is portable and the Mac's timing changed for it.** `stop` is now *ask, wait, force* on
+both platforms — the marker, `STOP_GRACE` of polling, then `session.terminate` — which moves the
+Mac's `SIGTERM` from the first act to the second. It is still sent (it is the first half of
+`session_posix.terminate`), and a runner in `pump` never notices the difference, because it hears
+the marker within a tick either way. What pays is a Mac runner that is *anywhere else* — inside
+`spawn`, inside the trust dialog — which used to be reached at once by a signal and now waits out
+`STOP_GRACE` first. Taken deliberately: the alternative is a `stop` that means two different
+things on the two platforms, and the process that knows what the session was doing is the one
+that should end it. Unverified on the Mac, like everything since W1a.
 
 **`Sessions.start()`** — `Popen(argv, stdin=DEVNULL, cwd=HERE, close_fds=True,
 creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)`. No `CREATE_BREAKAWAY_FROM_JOB`
@@ -1098,6 +1129,29 @@ W4b–W4c should read it that way.
 - Run: none beyond the tests.
 - Test: both platforms.
 
+*W4b, 2026-09-19 — the green is three lines and the shape around them is four branches, and
+the test hook this entry offered a choice about did not need to be built.* `Runner.__init__`
+has taken an `argv` since slice 6, so the real-runner test hands it
+`cmd /c echo <link> & ping -n 60 127.0.0.1` through a twelve-line harness of its own and
+`session.py` grows no debug flag — **no `--argv` on the shipped program**, which is the right
+answer for a launcher whose whole defence is that the argv is built and never accepted (§10).
+The test lives in `test_bot.py` as `TestStoppingARealRunnerOnWindows`, beside the portable
+class rather than in a `test_bot_win.py`, which is W3c's twin-beside-it pattern and what W4a
+said this slice should copy. `echo` is in that command line because a `stop` is only ever aimed
+at a **live** session, and `live` is a state the runner reaches by scraping a link — the
+substitute has to produce one or the test is about `failed`, which is a different path. The
+entry's "asserts `ended` in `meta.json`" is the assertion that carries the slice, and for a
+reason it does not give: a session that says `ended` was ended *by its own runner*, so the
+marker was heard. A kill leaves the word `live` on disk, which is what the red run showed.
+
+What the entry does not mention, and what the code needed, is the **three ways the ask cannot
+be made**: a record with no usable `sid` (no directory, so no marker), an `OSError` writing it
+(a full disk, a directory deleted under the listener), and the session that is already gone.
+The first two skip the wait and go straight to the force — waiting out fifteen seconds for an
+answer to a question nobody was asked is the bug — and the third asks nothing and kills
+nothing. Four of the slice's six tests are those branches and the fifth is the fallback's
+grace; all six were mutation-checked (§11).
+
 **W4c — the runner outlives the listener.**
 - Red: W0c's tests already pass from a console; the new red is
   `test_bot.py::test_start_uses_the_platform_flags` (portable, fake `procs`) asserting
@@ -1111,6 +1165,17 @@ W4b–W4c should read it that way.
   and `ls` shows the session as live, same pids.
 - Test: both platforms.
 
+*Noted from W4b, 2026-09-19 — read this before starting: **W4c's red and green are both
+already on disk**, and what is left of the slice is its run step.* The portable red is
+`test_bot.py::test_start_passes_the_platform_flags_to_popen`, which shipped in **W1b**; the
+Windows one is `test_procs_win.py::test_breakaway_is_not_among_the_flags`, which shipped in
+**W0c** under a name this entry did not predict; `session_win.spawn_flags()` returns the two
+flags and `Sessions.start` already spreads it into `Popen`. This is the third slice in a row
+(W4a, and W4b's `--argv`) whose stated work was partly done by an earlier one — the pattern is
+that W1b built the seam's *portable* half wholesale, so every W4 entry that names a portable
+fake-`procs` test is naming something that exists. W4c should therefore start by running its
+hand-run, and its row should say what that showed and which tests it found already green.
+
 **W4d — the mutex.**
 - Red: `test_procs_win.py::test_second_lock_refused`; `test_lock_released_on_owner_death`
   (a subprocess takes it and is killed; retake succeeds within 1s);
@@ -1119,6 +1184,12 @@ W4b–W4c should read it that way.
   constructing `Telegram`.
 - Run: two consoles both running `bot.py --serve`; the second prints the refusal and exits 0.
 - Test: both platforms.
+
+*Noted from W4b, 2026-09-19 —* the third red here,
+`test_bot.py::test_serve_exits_zero_when_lock_refused`, also shipped in **W1b**, as
+`test_serve_takes_the_lock_before_it_touches_telegram`. The other two and the green are real
+work: `session_win.Lock.take()` is still the `_later("W4d")` stub, so this is the last
+`NotImplementedError` left in the seam.
 
 **W4e — end to end from the phone.** No new code expected.
 - Red: the acceptance checklist written into §11 before the run: `claude <project>` → link
@@ -1217,7 +1288,7 @@ the Mac when the slice touched shared or posix code.
 | W3h `Trust` carries a partial escape | done · Mac pending | 2026-09-19 | 0c8350e | **593 ran: 518 pass, 75 skip, 0 xfail**, 35.1s · **not run** | **The bug is real, the sizes that trigger it are real, and the live path was never hitting it — and the slice only knows that because it took a run step it was excused from.** `Stripper` is the green: `strip` over a stream, holding a trailing partial escape bounded by `CARRY_LIMIT` and decoding incrementally, and both `Scrape` and `Trust` now hold one instead of `Scrape` owning the only copy of the rule. The red was wider than the row it replaces said: not "64, 16, 1" but **127 of the first 199 chunk sizes on the Mac panel and 116 of the first 299 on the Windows capture** — the passing sizes in between are the cuts that happen to miss an escape, which is why sampling three sizes made it look like a threshold. After: **every size from 1 to 399 answers the dialog, on both fixtures**, and `Scrape` returns the same link at 1, 7, 64, 512, 4096 and whole. Run step, and it is two findings. **One:** ConPTY's real reads are small — 26 chunks, min 3 bytes, median 21, three quarters ≤64 — but **0 of 26 ended inside an escape sequence**, because it flushes whole renders, so the pre-W3h `Trust` answered the live panel too (2.84s against 2.71s, both reaching `done` and a link). The plan had measured the input's size and reasoned about where it was cut; those are different measurements and only one of them was taken. **Two, and it is the one that changes a later slice:** §9.3's dialog **no longer appears at all** for a new directory under `projects_root` — empty, one file, a git repo and a `.claude\settings.json` all came straight up to a link, each getting a `projects` entry saying `hasTrustDialogAccepted: false` without being asked — while the same directory under `%TEMP%` raises it every time and `Trust` answers it. Where, not what. So `Trust` is unexercised on the only path that turns it on, W4e cannot confirm `new+trust` by watching, and §4 now says both. No code changed for either finding; the honest response to "the mechanism is currently unreachable" is not to delete the code that handles it. Test count +1 and **the suite's one expected failure is gone** — 592/1 xfail becomes 593/0, the first slice since W0a where that line reads clean. Two consecutive full runs, 35.0s and 35.1s; **W3c's unidentified ~3% error did not recur** (it stays open, now ~22 clean runs on from W3d's twenty). Mac: not run — see Pending. |
 | W3i the link is held for a byte that is not coming | done · Mac pending | 2026-09-19 | d57ac3f | **605 ran: 530 pass, 75 skip, 0 xfail**, 35.9s · **not run** | **The hold is real, the fix is one tick, and the four and a half seconds it was sized from are not there any more.** `Scrape.idle()` is the green: `feed` is what the stream says and `idle` is what its absence says, and the loop may only say it after a read has come back empty — a whole `TICK` of nothing — or against a finished terminal, where the claim is stronger still. The guard `feed` keeps is untouched, because a match at the end of a *chunk* may be half a link with the rest in flight and a match at the end of a *silence* may not. **But the live path is not taking it.** Eight sessions, four of them with `Runner.idle` stubbed back out to the pre-slice code, all reached the record in 1.9–2.2s with **zero hold**; the read that completes the URL carried **404 more characters after it, five runs out of five**, and reads kept arriving every ~0.1s after. So W3g caught a frame that happened to end at the link, and this box will not produce one to order — the same shape as W3h's finding one slice earlier, and the second time running that a number measured once has been read as a constant. Both amendments are in §9. What answers the slice is the condition provoked on a live ConPTY rather than waited for: cut the read at the URL's last byte and withhold the rest for 5s, which is exactly "the screen does not change again". Three runs each way — **held 5.00s without the fix, 0.20s with it**, which is one `TICK` and is the bound the tests assert. The acceptance run came down from W3g's 6.7s to **2.3s**, exit 0 1.7s after the console control event, `pty.log` 4.1 KB, `meta.json` at `ended`, nothing left behind — and **none of those four seconds are this slice's**, which the A/B is the only reason anyone knows. +12 tests, **no skip count change** — every one runs here; on the Mac the two fixture-gated Windows ones will skip. W3c's unidentified ~3% error did not recur. Mac: not run — see Pending. |
 | W4a `alive`/`started` via psutil | done · Mac pending | 2026-09-19 | d131849 | **614 ran: 539 pass, 75 skip, 0 xfail**, 35.3s · **not run** | **Two thirds of the slice was already on disk, and the third that was not is two branches nobody had tested on this platform.** The entry's portable red test shipped in **W1b** as `test_a_pid_that_started_after_the_record_is_somebody_else`, and `psutil` entered `requirements-win.txt` in **W3e**; the green is therefore two functions and nine tests. `alive` is `psutil.pid_exists` — the same line `session_posix` draws with EPERM, since it asks whether the process has *exited* rather than whether it is ours — and `started` is `Process(pid).create_time()`, epoch seconds on the same clock the record's `started` is written from. What was actually missing: of the eight properties `TestWhetherARunnerIsStillThere` asserts, three had fake-`procs` twins and three are the platform's, and **two had neither** — a record with no usable `started`, and a pid the platform will not date. Both are `Sessions.alive` branches returning `True`, both untested here, and since both new tests were green before any code changed (the ritual's step-1 rule), each was mutated: `return True` → `return False` in either branch is caught by **exactly one test in the whole 614**, the one this slice added. **Run step, and §6's prediction is wrong in both directions.** `AccessDenied` from `create_time` **does not happen**: 0 of the 208 processes on this box refused, including the **109 whose `username()` psutil cannot read**, because it needs only `PROCESS_QUERY_LIMITED_INFORMATION` and every account has that for everything — so §4's `began is None` branch is reachable here only by a pid that dies between the two calls, and the handler is insurance (kept, and now with a test that would notice if Windows tightened the check). What the two genuinely unopenable pids answer instead is **`0.0`** — the epoch, not the boot time and not an error — so pid 4 arrives at `Sessions.alive` as a timestamp older than every record that could exist and **reads as a live runner** for as long as a corrupt record names it. Not patched: the Mac reaches the same place for pid 1 by an honest route (launchd really did start at boot) and its own test asserts pid 1 alive on purpose, `Sessions.alive` cannot tell the two apart, and a record's pid is one the listener wrote from its own `Popen`. §6 and §9's W4a are amended. **Nothing was un-gated, and that word is the entry's other mistake**: `TestWhetherARunnerIsStillThere` and `TestSpawningForReal` stay `@posix_only` because `/bin/sleep`, EPERM, fd 9 and `getsid` are the Mac's mechanisms — the shape that works is W3c's twin-beside-it, not a decorator removed, and W4b–W4c should copy that. `test_procs_win.pid_alive` also stays on `tasklist` rather than moving to psutil now that it could: those tests ask whether a detached child survived, and answering that with the library under test in the same file is not an answer. +9 tests (7 Windows real-process, 2 portable), **no skip count change** — every one runs here; on the Mac the 7 will skip. Two consecutive full runs, 35.3s both; W3c's unidentified ~3% error did not recur. Mac: not run — see Pending. |
-| W4b `Sessions.stop` | todo | | | | |
+| W4b `Sessions.stop` | done · Mac pending | 2026-09-19 | | **619 ran: 544 pass, 75 skip, 0 xfail**, 37.1s · **not run** | **The listener asks with a file now, on both platforms — and the kill it replaces was not leaking anything, which is not what §6 led this slice to expect.** `stop` is *ask, wait, force*: `procs.request_stop`, then `STOP_GRACE` of polling `alive` at `STOP_POLL`, then `session.terminate` for the runner that did not answer. **Run step, and it is an A/B on one box** (`scratch\w4b_handrun.py`, a real `Runner` over a real ConPTY with a `ping` under it): the marker path ends the session in **5.70s** with `meta.json` at `ended` and all three pids gone; the path it replaces — the same call with the wait skipped, which is exactly the old body — returns in **0.00s** and takes **all three pids just as completely**. So W3e's `KILL_ON_JOB_CLOSE` and the pseudoconsole really do cover a hard kill, and §6's worry about what the fallback leaves behind is answered: nothing. **What the old path lost was the ending, not the tree** — nobody sends claude the two Ctrl-Cs it exits 0 on (W0b, 1.71s), and `meta.json` is left saying `live` by the only process that knew better, which is precisely what the red run printed (`'live' != 'ended'`). On the shipped path `Listener.halt` writes `ended` through `finish` a moment later, so the phone was told the truth before this slice too; `stop` on its own was not, and the 5.70s is the runner spending its whole `GRACE` on a child that ignores a Ctrl-C. **The Mac's timing changes and it is the cost of the slice**: `SIGTERM` moves from the first act to the fallback, so a runner anywhere but `pump` — inside `spawn`, inside the trust dialog — now waits out `STOP_GRACE` before anything it can hear arrives. Taken on purpose (§6), and it is the one thing in this slice the Mac has to check. Three things the entry did not name and the code needed: a record with **no usable `sid`** has no directory and so no marker, an `OSError` writing it is an ask that was not made, and both skip the wait rather than paying fifteen seconds for an answer to a question nobody heard. No `--argv` was added to `session.py`: `Runner` has taken an `argv` since slice 6, so the real-runner test builds its own harness and the launcher keeps the property that its argv is built and never accepted (§10). **Mutation, for the four tests green before the green step:** seven mutations, every one caught — no ask at all (3 tests), waiting although nothing was asked (2), no early return when the runner goes (2), no corpse guard (**1, and only the test this slice added**), the ask aimed at the root instead of the session directory (2), the runner given its own `GRACE` instead of the nested one (2), and `STOP_GRACE = GRACE` (3). +5 tests net (6 new, 1 rewritten away), **no skip count change** — the one Windows test runs here and will skip on the Mac. Two consecutive full runs, 37.9s and 37.1s against W4a's 35.3s: the real-runner test is ~6s of that and is the only end-to-end stop this suite has. W3c's unidentified ~3% error did not recur. Mac: not run — see Pending. |
 | W4c runner outlives listener | todo | | | | |
 | W4d mutex | todo | | | | |
 | W4e end to end from the phone | todo | | | | checklist: link ≤45s · ls · stop · new+trust (W3h: no dialog appears under `projects_root` on this box — check whether that still holds, do not assume `Trust` ran) · cap · failed tail |
@@ -1297,6 +1368,10 @@ verified until then, and W1c's first Windows-green run is not a substitute.
 | W4a | `TestWhetherARunnerIsStillThere`, whole class | **unchanged, and that is the claim**: no posix code moved in this slice, so its eight must pass exactly as before. The two new portable tests are twins of two of them, so a Mac failure in the pair is the twin being wrong about a branch the Mac has always exercised — read `test_a_record_with_no_start_time_falls_back_to_the_pid_alone` beside it. |
 | W4a | `python3 -c "import session, os; print(session.procs.started(1))"` | **the control for the 0.0 finding.** Windows answers `0.0` — the epoch — for pids 0 and 4, which makes a corrupt record naming pid 4 read as live. The Mac's pid 1 should answer launchd's real start time, i.e. approximately boot and nowhere near zero. If it is 0.0 there too, the property is shared for one reason rather than two and §6's paragraph should say so instead of calling the Mac's route honest. |
 | W4a | nothing to hand-run | `session_win.py` and two test files are the whole change; no posix or shared code moved. Named here so the row is not mistaken for an omission. |
+| W4b | `/usr/bin/python3 -m unittest -q` | green, and **one newly skipped against five newly run**. `TestStoppingARealRunnerOnWindows` (1) is `skipIf(POSIX)`. The five in `TestTheListenerUsesThePlatformSeam` are portable and must *run* there — they are the whole of the slice's logic, and `test_stop_asks_through_the_marker_before_it_reaches_for_a_kill` is the one that asserts the Mac now asks with a file too. The count is W4a's plus 5, skips plus 1 (76). |
+| W4b | **`python3 bot.py` with a real session, stopped from the phone** | **the one run step this slice cannot take here, and the one that matters.** `Sessions.stop` is shared code and the Mac's `SIGTERM` is now the *fallback* rather than the first act. An ordinary `stop` must still come back in about the time it did before — the runner hears the marker within a `TICK` either way — and the thing to watch for is a stop that takes fifteen seconds, which means `pump` is not honouring the marker there and every stop is now paying `STOP_GRACE` before the signal it used to get at once. W3f's hand-run says the marker works on the Mac; this is the listener half of the same claim. |
+| W4b | `TestStopping` and `TestTheFleetIsListed`, watched | unchanged, and that is the claim: `halt` and the listing did not move, and their fake `Sessions.stop` never reaches the new code. A failure there is the fake's signature drifting from the real one. |
+| W4b | a runner deliberately wedged outside `pump` | **the cost of the slice, if anyone wants to measure it.** Start a session, `kill -STOP` the runner, then `stop` it from the phone: this used to be `SIGTERM` immediately and `SIGKILL` at `STOP_GRACE`; it is now fifteen seconds of marker-polling *before* the `SIGTERM`. Nothing is broken by it — the session still ends — but the number is the honest price of one `stop` meaning one thing on both platforms, and §6 says it is paid on purpose. |
 
 ### Decisions changed by evidence
 
@@ -1501,5 +1576,17 @@ Appended, dated, when a run step contradicts the plan above and a section was am
   `getsid`: a platform test is not a gate, the shape that works is the twin beside it that W3c
   already built, and what the entry was really pointing at was two untested `Sessions.alive`
   branches — which is a smaller and more useful slice than the one it described.
+- **2026-09-19, W4b → §6, §9's W4b, W4c and W4d.** §6 worried, twice, about what the fallback
+  kill leaves behind — "without the flag this line would have left a dev server running". It
+  leaves nothing: killing the runner outright took the ConPTY's child *and* the `ping` under
+  it in the same A/B that measured the marker path, so W3e's job flag covers the hard kill as
+  well as the accidental death it was measured against. **What the hard kill actually loses is
+  the ending** — the two Ctrl-Cs claude exits 0 on, and a `meta.json` left saying `live` by the
+  process that knew better — and that is what this slice buys, at 5.70s against 0.00s on a
+  child that ignores the polite byte. The same paragraph now also records what the portable
+  ask costs the Mac: `SIGTERM` is the fallback rather than the first act, so a runner outside
+  `pump` waits `STOP_GRACE` before anything it can hear arrives. And W4c and W4d each carry a
+  note that a red test they name shipped in **W1b** — for W4c, so did the green, which leaves
+  that slice with nothing but its run step.
 
 - **2026-09-19, W3i → §9's W3i.** The hold was measured once, in W3g, and sized as a standing cost: 4.5 of 6.7 seconds. It is a rare frame, not a property. Eight sessions here — four with the pre-slice code — hold for **0.00s**, because the read that completes the URL carries 404 more characters after it every time, and the acceptance run came down to 2.3s **without the fix contributing any of it**. The fix is still right and its own measurement says so under the condition provoked: 5.00s of hold becomes 0.20s. **Two slices running, a number taken once has been read as a constant** (W3h was the other), and both times the correction cost a run step rather than a rewrite — so the rule the ritual is missing is not "take the run step", which it already says, but *take it twice, or say in the row that you did not*.

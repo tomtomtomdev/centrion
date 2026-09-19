@@ -3,8 +3,8 @@
 
 Slice W1c made this a stub with the whole surface, so that `import session` and `import bot`
 succeed on Windows and the portable tests run natively here. What is not built yet still
-raises NotImplementedError naming the slice that fills it in — W4 (the listener: `alive`,
-`started`, the mutex). A stub that returned
+raises NotImplementedError naming the slice that fills it in — as of W4b that is `Lock.take`
+and nothing else (W4d, the mutex). A stub that returned
 plausible values instead would let a runner get as far as writing `starting` before failing,
 which is the phone waiting out forty-five seconds for nothing; failing at the first call is
 the honest version.
@@ -467,10 +467,18 @@ def terminate(pid, grace, log=_stderr, terminal=None):
 
     Without a terminal there is neither, and the honest answer is a single hard kill and a line
     in the log saying so. That is `bot.py`'s caller (§6), which is ending a *runner* rather than
-    a session: W4b's `stop` writes the stop marker first and it is the runner's own `terminate`
-    — this function, with its terminal — that takes the tree. What must not happen there is
-    §9.10's failure in Windows dress: answering True having done nothing at all, so the phone is
-    told a session stopped while it is still running.
+    a session: `stop` writes the marker first and it is the runner's own `terminate` — this
+    function, with its terminal — that takes the tree. What must not happen there is §9.10's
+    failure in Windows dress: answering True having done nothing at all, so the phone is told a
+    session stopped while it is still running.
+
+    *W4b measured that fallback against a live session, and it is less of a wreck than the
+    paragraph above expects.* Killing the runner with no terminal took the ConPTY's child and
+    the process under *it* as well, inside half a second — the job handle dies with the runner
+    and `KILL_ON_JOB_CLOSE` does the rest, which is W3e's finding arriving by a route W3e did
+    not test. So this branch does not leave a tree behind. What it does not do is give claude
+    the two Ctrl-Cs it exits 0 on, or let the runner write down that the session is over, which
+    is why `stop` asks first and reaches here only for a runner that did not answer.
     """
     job = getattr(terminal, "job", None)
     if _settled(pid, job):
