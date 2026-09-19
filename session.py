@@ -349,6 +349,15 @@ def child_env(base=None):
     No `--model` and no `--effort` either (see `claude_argv`): a launcher that quietly
     downgrades what it launches is a trap, because the difference shows up only as worse answers
     hours later.
+
+    **Two halves, since W3g.** What is written here is the part that is a decision: which
+    variables are hazards, and the two that carry this module's `ROWS`/`COLS`. A hazard is a
+    hazard on any platform — `ANTHROPIC_API_KEY` is the wrong login on Windows too — so the
+    filter is portable and is the reason this function did not simply move behind the seam.
+    What a child needs in order to *be* a child is the platform's, and `procs.child_env` adds
+    it: a chosen `PATH`, `HOME`, `SHELL` and `TERM` on the Mac; the inherited `PATH` and the
+    `SYSTEMROOT`/`COMSPEC` family on Windows, where a replaced `PATH` means a session that can
+    run nothing that is not a shell builtin (WINDOWS.md §4, and W3b's run step measured it).
     """
     env = dict(os.environ if base is None else base)
 
@@ -359,22 +368,14 @@ def child_env(base=None):
                  "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"):
         env.pop(name, None)
 
-    home = env.get("HOME") or os.path.expanduser("~")
     env.update({
-        # ~/.local/bin first: that is the version-pinned `claude` symlink (§9.8), and brew is
-        # on the path after it because the session's own Bash tool needs it to be useful.
-        "PATH": "%s/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" % home,
-        "HOME": home,
-        "USER": env.get("USER") or os.environ.get("USER", ""),
-        "SHELL": env.get("SHELL") or "/bin/zsh",
-        "LANG": "en_US.UTF-8",
-        "TERM": "xterm-256color",
         # For the shell and for tools the session runs. These do NOT size the terminal Claude
-        # Code renders into — that is the ioctl in spawn(). §6.
+        # Code renders into — that is the ioctl in spawn() on the Mac and the ConPTY's own
+        # constructor on Windows. §6, and WINDOWS.md §4 keeps them for the same reason.
         "COLUMNS": str(COLS),
         "LINES": str(ROWS),
     })
-    return env
+    return procs.child_env(env)
 
 
 def claude_argv(binary, name):

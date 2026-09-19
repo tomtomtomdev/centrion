@@ -311,6 +311,32 @@ def started(pid):
         return None
 
 
+def child_env(env):
+    """The Mac's half of the child's environment. SPEC.md §6; WINDOWS.md §4, W3g.
+
+    `session.child_env` has already taken the hazards out and put `COLUMNS`/`LINES` in. What is
+    left is everything that is a fact about *this* platform rather than about Claude Code, and
+    on the Mac that is a `PATH` chosen rather than inherited: `~/.local/bin` first because that
+    is the version-pinned `claude` symlink (§9.8), and brew after it because the session's own
+    Bash tool needs it to be useful. A `PATH` off whoever started the listener would put an
+    unpinned `claude` first on the day somebody brew-installs one.
+
+    This is today's code moved, not rewritten — the same rule W1a followed for the rest of the
+    seam — with one line changed: `HOME` is read from the environment being built rather than
+    from `os.environ`, which it already was.
+    """
+    home = env.get("HOME") or os.path.expanduser("~")
+    env.update({
+        "PATH": "%s/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" % home,
+        "HOME": home,
+        "USER": env.get("USER") or os.environ.get("USER", ""),
+        "SHELL": env.get("SHELL") or "/bin/zsh",
+        "LANG": "en_US.UTF-8",
+        "TERM": "xterm-256color",
+    })
+    return env
+
+
 def detach():
     """Leave the listener behind. SPEC.md §8, and the order matters.
 

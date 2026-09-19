@@ -226,6 +226,10 @@ class TestThePlatformSeam(unittest.TestCase):
 
     SURFACE = ("spawn", "terminate", "detach", "alive", "started", "spawn_flags", "Lock",
                "request_stop", "stop_requested", "catch_signals", "restore_signals",
+               # W3g: the child's environment is half policy and half platform. The hazard
+               # filter is SPEC.md §6 and stays in session.py; what a child needs in order to
+               # be a child at all is the platform's, and that half is this name.
+               "child_env",
                # W3d: `spawn` hands back one of these and `pump` knows nothing else about a
                # terminal, so it is as much a part of the contract as the functions are.
                "Terminal")
@@ -263,6 +267,27 @@ class TestThePlatformSeam(unittest.TestCase):
         with mock.patch.object(session.procs, "terminate", return_value=True) as terminate:
             self.assertTrue(session.terminate(4242))
             terminate.assert_called_once_with(4242, session.GRACE, session._stderr, None)
+
+    def test_child_env_is_filtered_here_and_finished_by_the_platform(self):
+        """WINDOWS.md W3g: which half of the child's environment belongs to which file.
+
+        `session.child_env` keeps the part that is a *decision* — the hazards of SPEC.md §6,
+        which are the same hazards on any platform, and `COLUMNS`/`LINES`, which are this
+        module's `ROWS`/`COLS`. What it hands on is an environment with nothing dangerous left
+        in it and nothing platform-shaped added yet; the module that knows what a child needs
+        in order to start adds that. Asserted on both platforms because the division is the
+        contract, not either side's answer.
+        """
+        with mock.patch.object(session.procs, "child_env",
+                               side_effect=lambda env: dict(env, PLATFORM_RAN="1")) as half:
+            env = session.child_env({"CLAUDE_PID": "1", "AI_AGENT": "1", "KEPT": "2"})
+        handed = half.call_args[0][0]
+        self.assertEqual([k for k in handed if k.startswith("CLAUDE")], [],
+                         "the platform half was handed variables the filter should have taken")
+        self.assertNotIn("AI_AGENT", handed)
+        self.assertEqual(handed["KEPT"], "2")
+        self.assertEqual((handed["COLUMNS"], handed["LINES"]), ("200", "50"))
+        self.assertEqual(env["PLATFORM_RAN"], "1", "the platform half did not get the last word")
 
     def test_terminate_forwards_the_terminal_the_session_was_read_through(self):
         """WINDOWS.md W3e: on Windows a pid alone is not enough to end a session politely.
@@ -656,13 +681,80 @@ class TestTheChildEnvironment(unittest.TestCase):
     """SPEC.md §6. Every absence here is a Remote Control that starts and never connects."""
 
     def test_the_required_variables_are_set(self):
+        """What both platforms owe the child. WINDOWS.md W3g split the rest of it in two.
+
+        `COLUMNS`/`LINES` are `session.py`'s constants on either side — they are for the shell
+        and the tools the session runs, not for the terminal Claude Code renders into — and a
+        `PATH` the child can find a program on is the whole of what the two platforms agree
+        about. Everything else that used to be asserted here is one platform's idea of an
+        environment: see the two tests below.
+        """
+        env = session.child_env({})
+        self.assertEqual(env["COLUMNS"], "200")
+        self.assertEqual(env["LINES"], "50")
+        self.assertTrue(env["PATH"], "a child with no PATH finds nothing that is not builtin")
+
+    @posix_only
+    def test_the_mac_shell_variables_are_set(self):
+        # SPEC.md §6 on the Mac: the PATH is *replaced* with a known one, because the version
+        # -pinned `claude` has to win, and `TERM` is what the pty tells the child it is.
         env = session.child_env({})
         self.assertEqual(env["TERM"], "xterm-256color")
         self.assertEqual(env["LANG"], "en_US.UTF-8")
-        self.assertEqual(env["COLUMNS"], "200")
-        self.assertEqual(env["LINES"], "50")
         self.assertIn("/.local/bin", env["PATH"])
         self.assertIn("/opt/homebrew/bin", env["PATH"])
+
+    @unittest.skipUnless(not POSIX, "the Windows half of the child environment (WINDOWS.md W3g)")
+    def test_child_env_win_keeps_windows_essentials(self):
+        """WINDOWS.md §4 and W3g: on this platform the filter is the whole of it.
+
+        The Mac replaces `PATH` with a list it chose. Doing that here is what W3b's run step
+        hit — `cmd /c mode con` answered `'mode' is not recognized`, because the child had been
+        handed `/usr/bin:/bin` and there is nothing at those paths on this box. So the
+        inherited `PATH` stays, and with it every variable a Windows program quietly requires
+        before it will start at all.
+
+        `TERM` is the one thing the Mac sets that is not to be invented here: ConPTY does not
+        read it, so setting it is a claim to a terminfo database this box has no reason to
+        have. *Not invented* is the assertion and not *removed* — this is a filter and `TERM`
+        is not a hazard, so one inherited from a Git Bash or a Claude Code session that started
+        the listener travels on like any other variable.
+        """
+        real = dict(os.environ)
+        env = session.child_env()
+        self.assertEqual(env["PATH"], real["PATH"], "the inherited PATH was replaced")
+        for name in ("SYSTEMROOT", "COMSPEC", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "TEMP"):
+            self.assertEqual(env.get(name), real.get(name), "%s did not survive" % name)
+        self.assertEqual("TERM" in env, "TERM" in real, "TERM was invented, or taken away")
+        self.assertNotIn("TERM", session.child_env({}), "a TERM nobody asked for")
+
+    @unittest.skipUnless(not POSIX, "the Windows half of the child environment (WINDOWS.md W3g)")
+    def test_a_windows_essential_missing_from_the_base_is_filled_in(self):
+        """The twin of the Mac's `HOME` line, which has always said `or expanduser("~")`.
+
+        A base without `SYSTEMROOT` is not a child that runs with one fewer variable; it is a
+        child that does not start — most of the Windows API reads it, and `cmd.exe` cannot be
+        found without `COMSPEC` or a `PATH`. The runner's real base is `os.environ` and has all
+        of them, so this is the same kind of insurance the Mac line is, aimed at the same
+        failure: a session that starts and never connects (SPEC.md §6).
+        """
+        env = session.child_env({"CLAUDE_PID": "1"})
+        for name in ("SYSTEMROOT", "COMSPEC", "PATH", "TEMP"):
+            self.assertTrue(env.get(name), "%s was neither inherited nor filled in" % name)
+        self.assertEqual([k for k in env if k.startswith("CLAUDE")], [])
+
+    @unittest.skipUnless(not POSIX, "the Windows half of the child environment (WINDOWS.md W3g)")
+    def test_a_backfilled_name_is_not_added_twice_in_another_case(self):
+        """`os.environ` upper-cases its keys here; an arbitrary base need not.
+
+        Windows looks variables up case-insensitively, but an environment *block* is a flat
+        list of `name=value` and `session_win.environment_block` writes whatever is in the
+        dict. `SystemRoot=C:\\Windows` and `SYSTEMROOT=C:\\Windows` both in it is two entries
+        for one variable, and which of them a child sees is nobody's decision.
+        """
+        env = session.child_env({"SystemRoot": "C:\\Windows", "PATH": "C:\\nowhere"})
+        self.assertEqual([k for k in env if k.upper() == "SYSTEMROOT"], ["SystemRoot"])
+        self.assertEqual(env["PATH"], "C:\\nowhere", "a PATH that was given was overwritten")
 
     @unittest.skipUnless(POSIX, "the Mac's PATH; Windows keeps the inherited one (WINDOWS.md W3g)")
     def test_claude_is_first_on_the_path(self):

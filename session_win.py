@@ -568,6 +568,50 @@ def started(pid):
     _later("W4a")
 
 
+#: What a Windows program is entitled to assume is in its environment, and what `child_env`
+#: below fills in if the base it was handed has none. WINDOWS.md §4 names the first six and
+#: `PATH`; `TMP` and `PATHEXT` are W3g's additions and the plan is amended to match.
+#:
+#: `TMP` because nothing sets one of the temp variables without the other — the CRT reads
+#: `TMP` first and most of Windows reads `TEMP`, so a child with one of them is a child whose
+#: temporary files land in two places depending on which library asked. `PATHEXT` because it
+#: is what makes `claude` mean `claude.exe`: `CreateProcess` does not consult it, so the runner
+#: itself does not care, but every shell the session opens does, and a session whose Bash tool
+#: cannot run a `.cmd` is a session that works until the first build script.
+ESSENTIAL = ("SYSTEMROOT", "COMSPEC", "APPDATA", "LOCALAPPDATA", "USERPROFILE", "TEMP", "TMP",
+             "PATH", "PATHEXT")
+
+
+def child_env(env):
+    """Windows' half of the child's environment. WINDOWS.md §4, W3g.
+
+    `session.child_env` has taken the hazards out and put `COLUMNS`/`LINES` in, and on this
+    platform there is nothing further to *decide*: the environment a child wants is the one the
+    listener has. That is the opposite of the Mac's half, which replaces `PATH` with a list of
+    its own so that the version-pinned `claude` wins, and the difference is not a preference.
+    There is no `/usr/bin` here. W3b's run step spawned `cmd /c mode con` through a real ConPTY
+    and got `'mode' is not recognized`, because the Mac's `PATH` had been handed to a Windows
+    child, and until this function existed nothing the runner started could find a program that
+    was not a shell builtin.
+
+    So the work is only the backfill, and it is the twin of the Mac's `HOME` line: when the base
+    has no `SYSTEMROOT` the answer is not a child with one fewer variable, it is a child that
+    does not start. The comparison is case-insensitive because Windows looks variables up that
+    way while `environment_block` does not — `os.environ` upper-cases its keys here, an
+    arbitrary base need not, and `SystemRoot=` and `SYSTEMROOT=` both in one block is two
+    entries for one variable with no rule about which the child reads.
+
+    No `TERM`: ConPTY does not read one, and inventing one is a claim about a terminfo database
+    this box has no reason to have. One that was *inherited* stays, because this is a filter and
+    `TERM` is not a hazard.
+    """
+    have = set(name.upper() for name in env)
+    for name in ESSENTIAL:
+        if name not in have and os.environ.get(name):
+            env[name] = os.environ[name]
+    return env
+
+
 def detach():
     """Nothing: the listener detaches the runner at spawn (spawn_flags). W3."""
 

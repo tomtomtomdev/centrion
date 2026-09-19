@@ -8,8 +8,8 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **W3e done (2026-09-19); W3f next.** The suite runs natively on Windows since W1c:
-572 tests, 497 pass, 74 skipped as the Mac's (each skip names its reason or the slice that
+Status: **W3g done (2026-09-19); W3h next.** The suite runs natively on Windows since W1c:
+592 tests, 516 pass, 75 skipped as the Mac's (each skip names its reason or the slice that
 un-gates it), one expected failure (W3h's) — and one unidentified error seen once in 35 runs,
 which W3c's row records rather than explains. Since W2b it is run from the venv —
 `.venv\Scripts\python -m unittest -q` — because `config.py`'s secrecy check needs pywin32;
@@ -17,8 +17,11 @@ which W3c's row records rather than explains. Since W2b it is run from the venv 
 a 200x50 ConPTY, `claude.exe --remote-control` printed its link 6.2 seconds after spawn, as one
 contiguous run, and today's `Scrape` finds it unmodified at every chunk size
 (`tests/fixtures/rc_startup_win.log`) — and three of those 6.2 seconds were the pseudoconsole
-waiting to be told what terminal it had, which W3b now answers (§4); W3g measures what is left. Two Ctrl-C bytes on the ConPTY input ended it in 1.7
-seconds with exit status 0. A child of a scheduled task survives the task being stopped, with
+waiting to be told what terminal it had, which W3b now answers (§4). W3g measured what is left,
+by running the whole runner: **the link reaches the record 6.7 seconds after spawn, and 4.5 of
+those are `Scrape` holding a complete URL back for one more byte that ConPTY has no reason to
+send** — W3i, and the largest single thing between the phone and a link. Two Ctrl-C bytes on
+the ConPTY input ended it in 1.7 seconds with exit status 0. A child of a scheduled task survives the task being stopped, with
 no breakaway flag — which is refused there anyway. Everything below that is not in §11's table
 is still plan, and the claims about Windows behaviour in it are what the API documents until a
 slice turns them into facts.
@@ -75,6 +78,7 @@ Each platform module exports the same small surface:
 
 ```
 spawn(argv, cwd, env, rows, cols) -> Terminal      # .read(timeout) .write(b) .pid .close()
+child_env(env) -> env                              # the platform's half of §6's environment (W3g)
 alive(pid) -> bool                                 # something answers to this pid
 started(pid) -> float | None                       # epoch seconds, for §4's pid-reuse guard
 terminate(pid, grace, log) -> bool                 # the session and everything it spawned
@@ -366,6 +370,20 @@ land on top of.
 `CLAUDE*` prefix strip and the named-hazard list; do not set `TERM` (ConPTY does not read it).
 `COLUMNS`/`LINES` stay, for the same reason as on the Mac — tools the session runs, not the
 terminal size.
+
+*W3g built it, and split it where the seam already was.* The hazard filter is a decision about
+Claude Code and is the same on any platform, so it stays in `session.py`; what a child needs in
+order to *be* a child is the platform's, and `procs.child_env(env)` is a twelfth name on §2's
+surface. Three amendments to the paragraph above. **`TMP` and `PATHEXT` join the list**: nothing
+sets one temp variable without the other, and `PATHEXT` is what makes `claude` mean
+`claude.exe` for every shell the session opens, `CreateProcess` not being the only thing that
+resolves a program here. **The list is a backfill, not an allowlist** — it fills a name in from
+`os.environ` only when the base handed in has none, which is the exact twin of the Mac's
+`HOME or expanduser("~")`, and the comparison is case-insensitive because `os.environ`
+upper-cases its keys on this platform and `environment_block` would otherwise write
+`SystemRoot=` and `SYSTEMROOT=` into one block with no rule about which the child reads.
+**`TERM` is not invented, but an inherited one is not taken away** either: this is a filter and
+`TERM` is not a hazard, so one arriving from a Git Bash travels on like anything else.
 
 ---
 
@@ -920,6 +938,25 @@ about the stop, and the mutation is the only thing that would have found that.
   This is the runner's acceptance run; record the time-to-link in §11.
 - Test: Windows; Mac suite for the shared `pump` changes.
 
+*W3g: done.* `child_env` split at the seam (§4 above carries the three amendments), and the
+acceptance run did what it was asked: a link, `pty.log`, exit status 0, `meta.json` at `ended`,
+nothing left running. Two things it found that the plan did not predict.
+
+**The suite could not have caught the bug this slice exists to fix.** Every test in
+`test_session_win.py` builds its own environment — `dict(os.environ)`, because they are about
+ConPTY and not about `child_env` — so `test_spawn_reports_size` was green on `cmd /c mode con`
+throughout the week that the same command answered `'mode' is not recognized` in W3b's hand-run.
+The only difference between the two was the one thing neither tested. `test_the_environment_
+the_runner_really_passes_can_find_a_program` is that command asked a third time, through
+`session.child_env()`, and it is the cheapest guard there is against a `PATH` regression the
+rest of the file is constructed not to notice.
+
+**The stop is CTRL_BREAK and not CTRL_C, for a reason worth writing down.** `CTRL_C_EVENT` can
+only be addressed to process group 0 — every process sharing the console, the driver included —
+so no script can send one to a child alone; `CTRL_BREAK_EVENT` can, and `catch_signals` installs
+the same handler on `SIGINT` and `SIGBREAK`, so the path under test is the one a keystroke takes.
+The keystroke itself stays a hand check.
+
 **W3h — `Trust` carries a partial escape, like `Scrape`.** Portable; found by W0a.
 - Red: already written. `test_session.py::TestTheWindowsTrustDialog::
   test_the_answer_does_not_depend_on_chunking` is decorated `@unittest.expectedFailure`
@@ -931,6 +968,26 @@ about the stop, and the mutation is the only thing that would have found that.
   through one shared helper.
 - Run: none.
 - Test: both platforms.
+
+**W3i — the link is held for a byte that is not coming.** Portable; found by W3g's acceptance
+run, and it is the largest thing left in the time to a link.
+- The fact: `Scrape.feed` returns a URL only when `found.end() < len(self.tail)` — one more
+  character has to arrive, so that a URL still being written is never reported half-formed.
+  Measured through the real runner: **the link is complete in the tail at 1.96s and `Scrape`
+  hands it over at 6.43s**, because ConPTY emits on screen change and the screen does not
+  change again for four and a half seconds. The Mac has never shown this: its renderer keeps
+  drawing, so the next byte is always along in milliseconds.
+- Red: portable `test_session.py::test_a_link_at_the_very_end_of_the_output_is_not_held_for
+  ever` — feed the W0a fixture truncated to end exactly at the URL, then feed nothing, and
+  assert the link is reported within a bounded number of idle ticks. The Windows twin is the
+  measurement above turned into an assertion over `tests/fixtures/rc_startup_win.log`.
+- Green: the holdback needs a way to end other than more output. The shape to try first is an
+  idle flush — `pump` already knows when a read came back empty, so `Scrape` can be told
+  "nothing more is coming this tick" and release a URL that has been stable for one tick. Keep
+  the guard for the chunked case; it is doing real work (`CARRY_LIMIT` and W3h are the same
+  family of bug).
+- Run: the acceptance run again, and the time to link has to come down by about four seconds.
+- Test: both platforms — this is `Scrape`, which is the most portable code in the program.
 
 ### W4 — the listener
 
@@ -1070,7 +1127,8 @@ the Mac when the slice touched shared or posix code.
 | W3d `pump` without `select` | done · Mac pending | 2026-09-18 | 0937950 | **559 ran: 484 pass, 74 skip, 1 xfail**, 21.8s · **not run** | **The loop went where the plan said; what moved with it was a question that used to have one answer.** `pump` now calls `terminal.read(TICK)` and nothing platform-shaped: the `select` that was its first statement is the first statement of `session_posix.Terminal.read`, `spawn` returns a `Terminal` on both sides, and `Terminal` joined the seam's `SURFACE`. **`read` and `alive` are two questions now, and they do not mean the same thing on the two platforms** — on a pty EIO is the end of the output *and* of the session, so the old loop broke on either; ConPTY separates them, so `session_posix.alive()` is about the *terminal* (the flag set when the pty hangs up) and `session_win.alive()` is about the *process* (`pty.isalive()`). Both answer the only question `pump` asks, and **neither is a substitute for `_reaped()` or `procs.alive(pid)` — W3e and W4a should read that sentence before reaching for `alive`.** Second find: **the drain after the terminal finishes has to go past the scraper, not just into the transcript.** The obvious version appends the dead child's last chunk to `pty.log` and leaves, which loses a *link* arriving in it — reachable on Windows, where output outlives the child (W3b) — so both callers go through one `Runner.absorb` and `test_a_link_in_the_tail_still_goes_live` is the case. Third, measured rather than assumed: **a session's end costs two `TICK`s** — 0.401s of a 0.432s `pump` over `cmd /c echo`, one ordinary poll then the drain, against 0.031s of reading the child (`scratch\w3d_exitcost.py`). Paid after `live` is recorded, so only a `failed` session's tail waits on it; left at `TICK` because shortening it trades 0.2s against the text §4.6 exists to deliver. Run step: the W0a capture gives the same single link at chunk sizes 1, 7, 64, 512, 4096 and whole — unchanged, as predicted — and the new pump over a real ConPTY reached `live` with the URL in `meta.json` and the link in `pty.log` (`scratch\w3d_handrun.py`). `READ_SIZE` moved to `session_posix.py` with the `os.read` that wants it; `session.py` no longer imports `select` or `errno`. **W3c's open ~3% error did not recur**: 20 consecutive clean runs of the full suite after the green, plus the red and green runs themselves — it stays open and unidentified, and `scratch\w3d_flake.sh` keeps the whole output of any run that is not OK. +20 tests (12 portable over a fake `Terminal`, 6 posix over a real pty, 3 Windows over a real ConPTY), skips 68 → 74 — the six new posix ones, which is the whole of the change. Mac: not run — see Pending. |
 | W3e Job Object and `terminate` | done · Mac pending | 2026-09-19 | c00371b | **572 ran: 497 pass, 74 skip, 1 xfail**, 31.8s · **not run** | **Two sentences in the plan were true about the outcome and wrong about the mechanism, and one of them made a flag look optional.** The Ctrl-C is not a `CTRL_C_EVENT` — nothing turns it into one; it goes to whatever reads the console, so it reaches claude and reaches nothing else (`cmd`, `ping`, a sleeping python: two each, all three carry on). So `terminate` waits on the **job being empty** and not on the pid, because the ordinary session — claude exits 0 in a second, its dev server does not — is precisely what a pid-shaped wait calls finished. And `KILL_ON_JOB_CLOSE`, first left out on the grounds that a dropped handle should not end a session by accident, went back in once measured: a hard-killed runner loses claude within 0.5s regardless (the pseudoconsole, not the job), so the accident was already unavoidable and the flag's only actual effect was the grandchild it was leaving alive. `terminate` gained a `terminal` argument on both platforms — the Mac ignores it — because neither the Ctrl-C nor the job is reachable from a pid. Eleven tests in `TestEndingTheSessionAndItsTree`, all against real trees; two portable ones in `test_session.py` for the seam and for `run`'s ordering. `psutil` arrives a slice early (§`requirements-win.txt` says why). |
 | W3f stop marker | done · Mac pending | 2026-09-19 | 0c7514e | **586 ran: 511 pass, 74 skip, 1 xfail**, 35.3s · **not run** | **The plan's "each tick" was the sentence to get right, and `SIGTERM` is dropped for the opposite of the obvious reason.** A check that only looks for the marker on an *idle* tick stops every session except the ones producing output, which is the session `stop` is for; so it is checked on every pass, and the cost that made that look expensive is 5.7µs of `stat` against a 23.6µs pass of `pump` over a fake terminal doing nothing else — five a second on an idle session, and a smaller share of any real one. No throttle. `SIGTERM` is not absent on Windows, it is *undeliverable*: `signal.signal(SIGTERM)` is accepted and `os.kill(pid, SIGTERM)` is `TerminateProcess`, so a handler registers and can never run — which is the actual reason `stop` is a file. Left: `SIGINT` and `SIGBREAK`, for `--foreground` only; in service `DETACHED_PROCESS` means there is no console to interrupt from. POSIX honours the marker now as well, so the runner has one place that hears a stop and the tests are one set. Mutation, for the five tests green before the slice (`request_stop`/`stop_requested` shipped in W1c): disabling either fails 9 of the 10 stop tests, the survivor being the one asserting a negative; `O_CREAT\|O_EXCL` instead of the append fails the two idempotence tests; **`"ab"` → `"wb"` is caught by nothing** — the marker is empty, so nothing pins the append. And the mutation found a real hole in the slice's own named test: `FakeTerminal(forever=True)`'s patience let `test_stop_marker_ends_pump` reach `ended` five seconds late with the marker disabled entirely. `assertTrue(term.alive())` is the assertion that makes it about the stop. |
-| W3g `child_env`, runner acceptance run | todo | | | | time to link: |
+| W3g `child_env`, runner acceptance run | done · Mac pending | 2026-09-19 | | **592 ran: 516 pass, 75 skip, 1 xfail**, 30.3s · **not run** | **The runner works end to end on this box, and four and a half of its seven seconds to a link are ours.** Acceptance run, twice: `session.py --foreground` produced a link, a 3.3 KB `pty.log`, exit status 0 1.8s after the console control event, `meta.json` at `ended`, and no claude left behind — but **time to link 6.7s**, which is W0a's 6.2 with three seconds supposedly removed by W3b. Both halves of that turned out to be true. W3b's saving is real and re-measured here against the same binary minutes apart: **2.0s with the DA1 answer, 5.0s with it suppressed**, twice each. The rest is `Scrape`: instrumented through the real `Runner`, **the link is complete in the tail at 1.96s and `Scrape` returns it at 6.43s**, because `feed` holds a URL until one more character arrives and ConPTY emits only on screen change — the screen does not change again for four and a half seconds. The Mac has never shown it: its renderer keeps drawing. New slice **W3i**. The other finding is about the suite, not the code: every test in `test_session_win.py` builds its own `dict(os.environ)`, so `test_spawn_reports_size` was green on `cmd /c mode con` for the whole week that the same command answered `'mode' is not recognized` through `child_env` — the new `test_the_environment_the_runner_really_passes_can_find_a_program` closes that, and fails with the Mac's `PATH` put back (mutation-checked). `mode con` now answers, and answers `Lines: 50 / Columns: 200`, which is W3b's size claim confirmed by the tool rather than by pywinpty. `cmd /c set` read back through the ConPTY shows all nine essentials present once each, no duplicate spelling, no `CLAUDE*`, no `AI_AGENT`, `COLUMNS`/`LINES` intact. The config this box had never needed until now: `.telegram.json` with a placeholder token, `projects_root` the parent of this checkout, and the W2b DACL check passed it unmodified. +6 tests, +1 skip (the Mac's shell variables). Mac: not run — see Pending. |
+| W3i the link is held for a byte that is not coming | todo | | | | time to link, before 6.7s / after: |
 | W3h `Trust` carries a partial escape | red | 2026-09-14 | d6701b9 | | red test exists as an `expectedFailure`; fails at chunk sizes 64, 16, 1; passes at 128+ |
 | W4a `alive`/`started` via psutil | todo | | | | |
 | W4b `Sessions.stop` | todo | | | | |
@@ -1137,6 +1195,10 @@ verified until then, and W1c's first Windows-green run is not a substitute.
 | W3f | `TestThePlatformSeam::test_the_posix_no_ops_answer_as_the_mac_needs`, watched | it now asserts the **opposite** of what W1a wrote there: `request_stop` makes the marker and `stop_requested` finds it. That line is the only Mac-side assertion this slice inverts, and it is the one to read if the Mac run is not green. |
 | W3f | `python3 session.py --foreground --cwd <project> --name w3f`, then `touch var/sessions/<sid>/stop` from another terminal | the session ends within a tick and `meta.json` says `ended` — the Mac's first stop that is not a signal. Then the same run again ended with Ctrl-C, which must still work: `session_posix.catch_signals` is untouched and `SIGTERM`/`SIGHUP` are still caught there. |
 | W3f | nothing changed in `bot.py` | the Mac's `Sessions.stop` still sends `SIGTERM` and never writes a marker; W4b is where the listener learns to ask the other way. Named here so the row is not mistaken for an omission — the marker is reachable on the Mac today only by hand. |
+| W3g | `/usr/bin/python3 -m compileall -q .` | clean — 3.9. `session_posix.child_env` is today's `env.update` moved behind the seam and nothing in it is new syntax, but the Mac is still the only interpreter that can say so. |
+| W3g | `/usr/bin/python3 -m unittest -q` | green, and **three newly skipped against three newly run**. The three Windows twins in `TestTheChildEnvironment` are `skipUnless(not POSIX)`; what must *run* there is `test_the_mac_shell_variables_are_set` (the `TERM`/`LANG`/`PATH` assertions lifted out of `test_the_required_variables_are_set`, which is now the portable half) and `TestThePlatformSeam::test_child_env_is_filtered_here_and_finished_by_the_platform`. The count is W3f's plus 6. |
+| W3g | `TestTheChildEnvironment`, watched | **this is the one that matters on the Mac**: `child_env` is the only function in the program whose body moved *out* of `session.py` in this slice, and the Mac's half of it is the `PATH` the version-pinned `claude` depends on (§9.8). Every one of the class's ten must pass there unchanged. If `test_claude_is_first_on_the_path` fails, the move dropped a line. |
+| W3g | `python3 session.py --foreground --cwd <project> --name w3g`, then Ctrl-C | a link, `pty.log`, `meta.json` at `ended`. Same run W3d and W3f already ask for, and this time the thing to read is the **time to the link**: Windows measures 6.7s of which 4.5s is `Scrape` holding a complete URL for one more byte (W3i). The Mac's number is the control — if it is also seconds rather than milliseconds, W3i is not a Windows fix at all and its red test belongs on both boxes before the green. |
 
 ### Decisions changed by evidence
 

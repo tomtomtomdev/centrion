@@ -87,6 +87,27 @@ class TestTheConptyTerminal(unittest.TestCase):
         self.assertRegex(text, r"Lines:\s+%d\b" % session.ROWS, text)
         self.assertRegex(text, r"Columns:\s+%d\b" % session.COLS, text)
 
+    def test_the_environment_the_runner_really_passes_can_find_a_program(self):
+        """W3g, and the reason this test exists is that the suite could not see W3b's bug.
+
+        `start` above hands `dict(os.environ)` to every other test in this file, because they
+        are about ConPTY and not about the environment. The runner does not: it passes
+        `session.child_env()`, and through W3b that was still the Mac's — `/usr/bin:/bin` on a
+        box with no such directories — so the test above passed with 200 columns while the hand
+        -run of the *same command* answered `'mode' is not recognized`. The only difference
+        between them was the one thing neither of them tested.
+
+        So this is `test_spawn_reports_size` asked again through the real environment, and it
+        is the cheapest guard there is against a `PATH` regression that the rest of the file is
+        constructed not to notice.
+        """
+        pid, terminal = session_win.spawn([CMD, "/c", "mode", "con"], os.getcwd(),
+                                          session.child_env(), session.ROWS, session.COLS)
+        self.addCleanup(terminal.close)
+        text = drain(terminal, until="Code page")
+        self.assertNotIn("not recognized", text, "child_env handed the child an unusable PATH")
+        self.assertRegex(text, r"Columns:\s+%d\b" % session.COLS, text)
+
     def test_spawn_returns_pid_and_terminal(self):
         """The same `(pid, terminal)` shape session.py's posix `spawn` returns."""
         pid, terminal = self.start([CMD, "/c", "echo", "hello"])
