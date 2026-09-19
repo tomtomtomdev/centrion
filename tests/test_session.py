@@ -437,16 +437,15 @@ class TestTheWindowsTrustDialog(unittest.TestCase):
         self.assertEqual(keys, [session.DOWN, session.ENTER])
         self.assertEqual(trust.state, trust.DONE)
 
-    @unittest.expectedFailure
     def test_the_answer_does_not_depend_on_chunking(self):
-        """Fails today at 64 bytes and below, on both platforms — WINDOWS.md W3h.
+        """W3h: the dialog is answered the same way however the capture is cut up.
 
-        Trust squeezes each chunk on its own, so an escape split across two chunks leaves
-        its tail in the text and breaks the phrase it lands in. Scrape carries a partial
-        escape to the next chunk for exactly this reason; Trust does not yet. The W0a spike
+        Trust used to squeeze each chunk on its own, so an escape split across two chunks
+        left its tail in the text and broke the phrase it landed in — the dialog went
+        unrecognised at 64 bytes and below, on both platforms. Scrape carried a partial
+        escape to the next chunk for exactly this reason; Trust does now. The W0a spike
         answered the dialog because it matched against everything accumulated, not chunk by
-        chunk. Expected to fail until W3h gives Trust the same carry; the decorator comes off
-        in that slice.
+        chunk, which is why the spike never saw this.
         """
         for size in (1, 16, 64, 128, 512):
             _, keys = self.drive(size, with_redraw=True)
@@ -1497,6 +1496,36 @@ class TestTheTrustDialog(unittest.TestCase):
         t.feed(spaced, 0.0)
         self.assertEqual(t.feed(b"", session.SETTLE), session.DOWN,
                          "it only recognises one of the two spellings")
+
+    def test_the_answer_does_not_depend_on_chunking(self):
+        """W3h, the question half, against the panel this class has always used.
+
+        The bug the Windows capture found is not Windows': `squeeze` is called per chunk, so a
+        cursor jump cut in two — `\\x1b[10` then `G` — leaves `G` welded into the words either
+        side of it and the phrase stops matching. This panel is nothing *but* cursor jumps
+        between words, so every size below a row's length used to lose the dialog here too. A
+        pty delivers 4 KB at a time on a good day and one byte on a bad one; neither is the
+        capture's fault, and the answer has to be the same.
+        """
+        for size in (1, 3, 7, 16, 64, 512):
+            t = self.trust()
+            keys = []
+            now = 0.0
+
+            def feed(chunk):
+                nonlocal now
+                key = t.feed(chunk, now)
+                now += 1.0                   # every call is past SETTLE, as the twin does —
+                # `now += SETTLE` accumulates, and 2.8 - 2.4 is 0.3999999999999999, which is
+                # under the threshold. The runner passes a monotonic clock, not a sum.
+                if key is not None:
+                    keys.append(key)
+
+            for panel in (self.dialog(), self.dialog(marked=1)):
+                for i in range(0, len(panel), size):
+                    feed(panel[i:i + size])
+                feed(b"")                    # the settle tick that produces the keystroke
+            self.assertEqual(keys, [session.DOWN, session.ENTER], "chunk size %d" % size)
 
     def test_it_answers_once_and_then_stays_quiet(self):
         # The panel redraws constantly. A second Enter goes into whatever replaced it.

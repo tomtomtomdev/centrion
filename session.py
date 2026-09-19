@@ -214,6 +214,48 @@ def squeeze(text):
     return "".join(strip(text).split()).lower()
 
 
+class Stripper:
+    """`strip`, but over a stream: the escapes and the characters are allowed to arrive in
+    pieces. Both readers of the terminal want this and W3h is why there is one of it.
+
+    A chunk can end in the middle of an escape sequence. Stripping each chunk on its own —
+    the obvious implementation, and what `Trust` did until W3h — leaves the second half of
+    the sequence in the text: `\\x1b[10` and then `G`, and the `G` welds itself to the words
+    either side of it. `Scrape` has carried a trailing partial escape to the next chunk since
+    the beginning, because for it the damage lands next to a *link*; `Trust` did not, and the
+    same cut landed inside the sentence it matches on. It is not a Windows bug — the
+    fixture that found it is, because ConPTY writes a panel in 64-byte pieces where a pty
+    writes it in one — and at one byte at a time neither matcher saw anything at all.
+
+    A held run that never turns out to be an escape would hold the stream forever, so
+    `CARRY_LIMIT` releases it: better a stray `\\x1b` in the text than a link that never
+    arrives.
+
+    The decoder is incremental for the same reason at the character level: a multi-byte
+    character split across two reads is decoded rather than turned into two replacement
+    characters.
+    """
+
+    def __init__(self):
+        self.carry = ""     # a partial escape held back from the end of the last chunk
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+
+    def feed(self, chunk):
+        """One chunk in, the text a human would have seen out — minus any trailing fragment
+        that cannot be judged until the next chunk arrives."""
+        text = chunk if isinstance(chunk, str) else self._decoder.decode(chunk)
+        if not text and not self.carry:
+            return ""
+
+        clean = ANSI_RE.sub("", self.carry + text)
+        held = clean.rfind("\x1b")
+        if held == -1 or len(clean) - held > CARRY_LIMIT:
+            self.carry = ""           # nothing held, or it was never an escape
+        else:
+            self.carry, clean = clean[held:], clean[:held]
+        return clean
+
+
 class Trust:
     """§9.3's trust dialog, answered on the terminal. Slice 11.
 
@@ -247,11 +289,13 @@ class Trust:
         self.state = self.WAITING
         self.text = ""
         self.at = None
+        self._strip = Stripper()
 
     def feed(self, chunk, now):
         """Terminal output in, a keystroke out — or None, which is the usual answer."""
-        if chunk:
-            self.text = (self.text + squeeze(chunk))[-TRUST_KEEP:]
+        clean = self._strip.feed(chunk)
+        if clean:
+            self.text = (self.text + squeeze(clean))[-TRUST_KEEP:]
 
         if self.state == self.WAITING:
             if TRUST_QUESTION in self.text and TRUST_YES in self.text:
@@ -279,7 +323,8 @@ class Scrape:
     **A chunk can end inside an escape sequence.** Stripping each chunk on its own is the
     obvious implementation: `\\x1b[38;2;153` arrives, then `;153;153m`, neither half matches,
     and `;153;153m` lands in the cleaned text. Harmless until the split falls in the escape
-    immediately before the link. So a trailing partial escape is carried to the next chunk.
+    immediately before the link. So a trailing partial escape is carried to the next chunk —
+    which is `Stripper`'s job since W3h, because `Trust` needed the identical thing.
 
     **A chunk can end inside the URL.** `session_[A-Za-z0-9_-]+` is perfectly happy to stop at
     a chunk boundary, and the half-link it returns is well-formed and tappable and wrong — the
@@ -290,32 +335,14 @@ class Scrape:
     def __init__(self):
         self.url = None
         self.tail = ""      # cleaned text not yet ruled out as the start of a link
-        self.carry = ""     # a partial escape held back from the end of the last chunk
-        # Incremental, so a multi-byte character split across two reads is decoded rather than
-        # turned into replacement characters. Harmless for the ASCII URL, but pty.log's own
-        # fixture came through here and the box drawing in it should survive the trip.
-        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._strip = Stripper()
 
     def feed(self, chunk):
         """One chunk in, the URL out the first time it is complete, otherwise None."""
         if self.url:
             return self.url
 
-        text = chunk if isinstance(chunk, str) else self._decoder.decode(chunk)
-        if not text and not self.carry:
-            return None
-
-        clean = ANSI_RE.sub("", self.carry + text)
-        held = clean.rfind("\x1b")
-        if held == -1:
-            self.carry = ""
-        elif len(clean) - held > CARRY_LIMIT:
-            self.carry = ""           # not an escape after all
-        else:
-            self.carry = clean[held:]
-            clean = clean[:held]
-
-        self.tail += clean
+        self.tail += self._strip.feed(chunk)
         found = URL_RE.search(self.tail)
         if found and found.end() < len(self.tail):
             self.url = found.group(0)

@@ -8,10 +8,11 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **W3g done (2026-09-19); W3h next.** The suite runs natively on Windows since W1c:
-592 tests, 516 pass, 75 skipped as the Mac's (each skip names its reason or the slice that
-un-gates it), one expected failure (W3h's) — and one unidentified error seen once in 35 runs,
-which W3c's row records rather than explains. Since W2b it is run from the venv —
+Status: **W3h done (2026-09-19); W3i next.** The suite runs natively on Windows since W1c:
+593 tests, 518 pass, 75 skipped as the Mac's (each skip names its reason or the slice that
+un-gates it), and since W3h **no expected failure at all** — the one there had been was W3h's
+own. One unidentified error seen once in 35 runs remains, which W3c's row records rather than
+explains and which has not recurred since. Since W2b it is run from the venv —
 `.venv\Scripts\python -m unittest -q` — because `config.py`'s secrecy check needs pywin32;
 `requirements-win.txt` exists as of that slice. The go/no-go question is answered *go*: under
 a 200x50 ConPTY, `claude.exe --remote-control` printed its link 6.2 seconds after spawn, as one
@@ -22,7 +23,11 @@ by running the whole runner: **the link reaches the record 6.7 seconds after spa
 those are `Scrape` holding a complete URL back for one more byte that ConPTY has no reason to
 send** — W3i, and the largest single thing between the phone and a link. Two Ctrl-C bytes on
 the ConPTY input ended it in 1.7 seconds with exit status 0. A child of a scheduled task survives the task being stopped, with
-no breakaway flag — which is refused there anyway. Everything below that is not in §11's table
+no breakaway flag — which is refused there anyway. W3h adds one fact about the same stream and
+one about what is in it: ConPTY's reads are small (median 21 bytes) but never cut an escape
+sequence in half, and §9.3's trust dialog no longer appears for a new directory under
+`projects_root` at all — only outside it — so `Trust` is insurance here rather than a
+mechanism anything currently exercises (§4). Everything below that is not in §11's table
 is still plan, and the claims about Windows behaviour in it are what the API documents until a
 slice turns them into facts.
 
@@ -231,6 +236,36 @@ thing turned up that is *not* Windows-specific: `Trust` squeezes each chunk on i
 does not carry a partial escape to the next chunk the way `Scrape` does, so at chunk sizes of
 64 bytes and below the escape fragments land inside the phrase and nothing matches. The Mac
 gets away with it because 64 KB reads deliver the panel in a few pieces. W3h fixes it.
+
+*W3h, 2026-09-19 — and the sentence above is right about the defect and wrong about who was
+exposed to it.* The reads ConPTY really hands the runner are **small**: over a live session,
+26 chunks, 3 bytes at the smallest, median 21, and three quarters of them 64 bytes or under —
+well inside the range where the replayed fixture loses the dialog. But **none of them ended
+inside an escape sequence**: 0 of 26, because ConPTY flushes whole renders, and a boundary
+between two complete sequences is exactly the boundary that costs nothing. So the pre-W3h
+`Trust` answered the *live* dialog too, in 2.84s against the fixed one's 2.71s — the bug is
+reachable by anything that cuts the stream on a buffer of its own (a fixed-size read, a pipe,
+a replay, a fixture at 64), and was not being reached by the one reader this program has. It
+is fixed anyway, and the reason to keep it fixed is that nothing in `Trust` or `pump` promises
+that boundary and a version of `pywinpty` or ConPTY that buffers differently would not be a
+visible change.
+
+*W3h, 2026-09-19 — and "the first thing every session meets" is no longer true where the bot
+starts its sessions.* Four shapes of brand-new directory under the configured `projects_root`
+(`~\Projects\tomtomtomdev`) — empty, one file, `git init` plus a file, and a
+`.claude\settings.json` — all came straight up to a link with no dialog at all, on the same
+binary W0a met it with, and Claude Code wrote each one a `projects` entry saying
+`hasTrustDialogAccepted: false` without ever asking. The identical directory under `%TEMP%`
+raises the panel every time, immediately, and `Trust` answers it. So the variable is *where*
+the directory is and not what is in it, and the place that suppresses it is the one place
+`new` ever creates a directory. Consequences, none of them a code change: `Trust` is
+insurance on this box rather than a live mechanism, so it cannot be confirmed by watching a
+`new` from the phone (W4e's checklist item is amended to say so); the emptiness rule in
+`Runner.run` stays, because it is the half of the argument that makes answering honest and
+costs nothing when nothing asks; and the dialog is not gone, so neither is the code. What is
+*not* known is the rule Claude Code is applying — a sibling of trusted projects, a known
+parent, something in `githubRepoPaths` — and W4e should re-check it rather than assume it
+holds, because a session that meets an unanswered panel is a session the phone waits 45s for.
 
 Also learned: `pywinpty.PTY.read()` returns `str` (it decodes UTF-8 itself) and `write()`
 takes `str`. The runner's transcript must re-encode, and W3b's `Terminal.read` should return
@@ -965,8 +1000,13 @@ The keystroke itself stays a hand check.
 - Green: give `Trust.feed` the carry `Scrape.feed` has — hold a trailing `\x1b...` fragment
   (bounded by `CARRY_LIMIT`) and prepend it to the next chunk before squeezing. Same for a
   split multi-byte character: use an incremental decoder as `Scrape` does, or squeeze bytes
-  through one shared helper.
-- Run: none.
+  through one shared helper. *Done as the shared helper:* `session.Stripper` is `strip` over a
+  stream, `Scrape` and `Trust` each hold one, and neither carries its own copy of the rule.
+- Run: none. *Taken anyway, and it is the half of this slice worth reading* — "none" was
+  written when the bug looked like a property of a fixture. What ConPTY actually delivers, and
+  whether the dialog is still there to answer, are both facts, and both are in §4 above and in
+  the row: the chunks are tiny but never split an escape, and under `projects_root` there is no
+  dialog any more.
 - Test: both platforms.
 
 **W3i — the link is held for a byte that is not coming.** Portable; found by W3g's acceptance
@@ -1128,13 +1168,13 @@ the Mac when the slice touched shared or posix code.
 | W3e Job Object and `terminate` | done · Mac pending | 2026-09-19 | c00371b | **572 ran: 497 pass, 74 skip, 1 xfail**, 31.8s · **not run** | **Two sentences in the plan were true about the outcome and wrong about the mechanism, and one of them made a flag look optional.** The Ctrl-C is not a `CTRL_C_EVENT` — nothing turns it into one; it goes to whatever reads the console, so it reaches claude and reaches nothing else (`cmd`, `ping`, a sleeping python: two each, all three carry on). So `terminate` waits on the **job being empty** and not on the pid, because the ordinary session — claude exits 0 in a second, its dev server does not — is precisely what a pid-shaped wait calls finished. And `KILL_ON_JOB_CLOSE`, first left out on the grounds that a dropped handle should not end a session by accident, went back in once measured: a hard-killed runner loses claude within 0.5s regardless (the pseudoconsole, not the job), so the accident was already unavoidable and the flag's only actual effect was the grandchild it was leaving alive. `terminate` gained a `terminal` argument on both platforms — the Mac ignores it — because neither the Ctrl-C nor the job is reachable from a pid. Eleven tests in `TestEndingTheSessionAndItsTree`, all against real trees; two portable ones in `test_session.py` for the seam and for `run`'s ordering. `psutil` arrives a slice early (§`requirements-win.txt` says why). |
 | W3f stop marker | done · Mac pending | 2026-09-19 | 0c7514e | **586 ran: 511 pass, 74 skip, 1 xfail**, 35.3s · **not run** | **The plan's "each tick" was the sentence to get right, and `SIGTERM` is dropped for the opposite of the obvious reason.** A check that only looks for the marker on an *idle* tick stops every session except the ones producing output, which is the session `stop` is for; so it is checked on every pass, and the cost that made that look expensive is 5.7µs of `stat` against a 23.6µs pass of `pump` over a fake terminal doing nothing else — five a second on an idle session, and a smaller share of any real one. No throttle. `SIGTERM` is not absent on Windows, it is *undeliverable*: `signal.signal(SIGTERM)` is accepted and `os.kill(pid, SIGTERM)` is `TerminateProcess`, so a handler registers and can never run — which is the actual reason `stop` is a file. Left: `SIGINT` and `SIGBREAK`, for `--foreground` only; in service `DETACHED_PROCESS` means there is no console to interrupt from. POSIX honours the marker now as well, so the runner has one place that hears a stop and the tests are one set. Mutation, for the five tests green before the slice (`request_stop`/`stop_requested` shipped in W1c): disabling either fails 9 of the 10 stop tests, the survivor being the one asserting a negative; `O_CREAT\|O_EXCL` instead of the append fails the two idempotence tests; **`"ab"` → `"wb"` is caught by nothing** — the marker is empty, so nothing pins the append. And the mutation found a real hole in the slice's own named test: `FakeTerminal(forever=True)`'s patience let `test_stop_marker_ends_pump` reach `ended` five seconds late with the marker disabled entirely. `assertTrue(term.alive())` is the assertion that makes it about the stop. |
 | W3g `child_env`, runner acceptance run | done · Mac pending | 2026-09-19 | 66d93b2 | **592 ran: 516 pass, 75 skip, 1 xfail**, 30.3s · **not run** | **The runner works end to end on this box, and four and a half of its seven seconds to a link are ours.** Acceptance run, twice: `session.py --foreground` produced a link, a 3.3 KB `pty.log`, exit status 0 1.8s after the console control event, `meta.json` at `ended`, and no claude left behind — but **time to link 6.7s**, which is W0a's 6.2 with three seconds supposedly removed by W3b. Both halves of that turned out to be true. W3b's saving is real and re-measured here against the same binary minutes apart: **2.0s with the DA1 answer, 5.0s with it suppressed**, twice each. The rest is `Scrape`: instrumented through the real `Runner`, **the link is complete in the tail at 1.96s and `Scrape` returns it at 6.43s**, because `feed` holds a URL until one more character arrives and ConPTY emits only on screen change — the screen does not change again for four and a half seconds. The Mac has never shown it: its renderer keeps drawing. New slice **W3i**. The other finding is about the suite, not the code: every test in `test_session_win.py` builds its own `dict(os.environ)`, so `test_spawn_reports_size` was green on `cmd /c mode con` for the whole week that the same command answered `'mode' is not recognized` through `child_env` — the new `test_the_environment_the_runner_really_passes_can_find_a_program` closes that, and fails with the Mac's `PATH` put back (mutation-checked). `mode con` now answers, and answers `Lines: 50 / Columns: 200`, which is W3b's size claim confirmed by the tool rather than by pywinpty. `cmd /c set` read back through the ConPTY shows all nine essentials present once each, no duplicate spelling, no `CLAUDE*`, no `AI_AGENT`, `COLUMNS`/`LINES` intact. The config this box had never needed until now: `.telegram.json` with a placeholder token, `projects_root` the parent of this checkout, and the W2b DACL check passed it unmodified. +6 tests, +1 skip (the Mac's shell variables). Mac: not run — see Pending. |
+| W3h `Trust` carries a partial escape | done · Mac pending | 2026-09-19 |  | **593 ran: 518 pass, 75 skip, 0 xfail**, 35.1s · **not run** | **The bug is real, the sizes that trigger it are real, and the live path was never hitting it — and the slice only knows that because it took a run step it was excused from.** `Stripper` is the green: `strip` over a stream, holding a trailing partial escape bounded by `CARRY_LIMIT` and decoding incrementally, and both `Scrape` and `Trust` now hold one instead of `Scrape` owning the only copy of the rule. The red was wider than the row it replaces said: not "64, 16, 1" but **127 of the first 199 chunk sizes on the Mac panel and 116 of the first 299 on the Windows capture** — the passing sizes in between are the cuts that happen to miss an escape, which is why sampling three sizes made it look like a threshold. After: **every size from 1 to 399 answers the dialog, on both fixtures**, and `Scrape` returns the same link at 1, 7, 64, 512, 4096 and whole. Run step, and it is two findings. **One:** ConPTY's real reads are small — 26 chunks, min 3 bytes, median 21, three quarters ≤64 — but **0 of 26 ended inside an escape sequence**, because it flushes whole renders, so the pre-W3h `Trust` answered the live panel too (2.84s against 2.71s, both reaching `done` and a link). The plan had measured the input's size and reasoned about where it was cut; those are different measurements and only one of them was taken. **Two, and it is the one that changes a later slice:** §9.3's dialog **no longer appears at all** for a new directory under `projects_root` — empty, one file, a git repo and a `.claude\settings.json` all came straight up to a link, each getting a `projects` entry saying `hasTrustDialogAccepted: false` without being asked — while the same directory under `%TEMP%` raises it every time and `Trust` answers it. Where, not what. So `Trust` is unexercised on the only path that turns it on, W4e cannot confirm `new+trust` by watching, and §4 now says both. No code changed for either finding; the honest response to "the mechanism is currently unreachable" is not to delete the code that handles it. Test count +1 and **the suite's one expected failure is gone** — 592/1 xfail becomes 593/0, the first slice since W0a where that line reads clean. Two consecutive full runs, 35.0s and 35.1s; **W3c's unidentified ~3% error did not recur** (it stays open, now ~22 clean runs on from W3d's twenty). Mac: not run — see Pending. |
 | W3i the link is held for a byte that is not coming | todo | | | | time to link, before 6.7s / after: |
-| W3h `Trust` carries a partial escape | red | 2026-09-14 | d6701b9 | | red test exists as an `expectedFailure`; fails at chunk sizes 64, 16, 1; passes at 128+ |
 | W4a `alive`/`started` via psutil | todo | | | | |
 | W4b `Sessions.stop` | todo | | | | |
 | W4c runner outlives listener | todo | | | | |
 | W4d mutex | todo | | | | |
-| W4e end to end from the phone | todo | | | | checklist: link ≤45s · ls · stop · new+trust · cap · failed tail |
+| W4e end to end from the phone | todo | | | | checklist: link ≤45s · ls · stop · new+trust (W3h: no dialog appears under `projects_root` on this box — check whether that still holds, do not assume `Trust` ran) · cap · failed tail |
 | W5a `bot.cmd`, `install.ps1` | todo | | | | |
 | W5b scheduled task | todo | | | | seconds from logon to first poll: |
 | W5c restart survival | todo | | | | checklist: End → pids alive · Run → ls same pid · stop |
@@ -1199,6 +1239,9 @@ verified until then, and W1c's first Windows-green run is not a substitute.
 | W3g | `/usr/bin/python3 -m unittest -q` | green, and **three newly skipped against three newly run**. The three Windows twins in `TestTheChildEnvironment` are `skipUnless(not POSIX)`; what must *run* there is `test_the_mac_shell_variables_are_set` (the `TERM`/`LANG`/`PATH` assertions lifted out of `test_the_required_variables_are_set`, which is now the portable half) and `TestThePlatformSeam::test_child_env_is_filtered_here_and_finished_by_the_platform`. The count is W3f's plus 6. |
 | W3g | `TestTheChildEnvironment`, watched | **this is the one that matters on the Mac**: `child_env` is the only function in the program whose body moved *out* of `session.py` in this slice, and the Mac's half of it is the `PATH` the version-pinned `claude` depends on (§9.8). Every one of the class's ten must pass there unchanged. If `test_claude_is_first_on_the_path` fails, the move dropped a line. |
 | W3g | `python3 session.py --foreground --cwd <project> --name w3g`, then Ctrl-C | a link, `pty.log`, `meta.json` at `ended`. Same run W3d and W3f already ask for, and this time the thing to read is the **time to the link**: Windows measures 6.7s of which 4.5s is `Scrape` holding a complete URL for one more byte (W3i). The Mac's number is the control — if it is also seconds rather than milliseconds, W3i is not a Windows fix at all and its red test belongs on both boxes before the green. |
+| W3h | `/usr/bin/python3 -m unittest -q` | green, and **one expected failure fewer**: `test_the_answer_does_not_depend_on_chunking` was an `expectedFailure` on both platforms and is now an ordinary test in both `TestTheWindowsTrustDialog` (fixture-gated, so it runs there too) and `TestTheTrustDialog`. The count is W3g's plus 1, with `expectedFailures=0` — if the Mac still reports one, the decorator was removed on a class the Mac skips. |
+| W3h | `TestTheTrustDialog`, whole class | **the portable half of the slice is the whole of it**: `Stripper` is in `session.py`, so the Mac's `Trust` and `Scrape` changed too, and this class is where a carry that eats a character instead of holding it would show. `test_it_does_not_hold_the_whole_session_in_memory` is the one to watch — the carry is a second buffer and `CARRY_LIMIT` is the only thing bounding it. |
+| W3h | a fresh empty directory, `python3 session.py --foreground --cwd <it> --name w3h --trust` | **does the Mac still get the dialog at all?** Windows stopped raising it under `projects_root` (§4), which would be a property of Claude Code rather than of the platform — so the Mac is the control, and the answer decides whether W4e's `new+trust` check can be observed anywhere. A link with `Trust` never leaving `waiting` is the no. |
 
 ### Decisions changed by evidence
 
@@ -1383,3 +1426,12 @@ Appended, dated, when a run step contradicts the plan above and a section was am
   everything still imports — `win32security` is imported inside the check, not at module
   level — but no config file loads, 41 tests fail, and that refusal is the correct answer to
   "I cannot read the permissions" rather than a bug to route around.
+- **2026-09-19, W3h → §4, W4e.** Two of them, from a run the slice said it did not need.
+  The carry bug is real, the chunk sizes it needs are real — ConPTY's median read is 21 bytes
+  — and the live path was still never broken, because 0 of 26 real chunks ended inside an
+  escape sequence. **A measurement of the input's *size* is not a measurement of where it is
+  cut**, and the size was the one the plan had written down. The second: §9.3's dialog no
+  longer appears for a new directory under `projects_root`, only outside it, so the mechanism
+  `Trust` exists for is currently unreachable on the path that uses it — found only because
+  the run step was taken on a slice marked "Run: none", which is the argument for the ritual's
+  step 4 having no exemption.
