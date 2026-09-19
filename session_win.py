@@ -3,11 +3,11 @@
 
 Slice W1c made this a stub with the whole surface, so that `import session` and `import bot`
 succeed on Windows and the portable tests run natively here. What is not built yet still
-raises NotImplementedError naming the slice that fills it in — W3e (the Job Object and
-`terminate`), W3f (the signal half of the stop marker) and W4 (the listener: psutil, the
-mutex). A stub that returned plausible values instead would let a runner get as far as writing
-`starting` before failing, which is the phone waiting out forty-five seconds for nothing;
-failing at the first call is the honest version.
+raises NotImplementedError naming the slice that fills it in — W3f (the signal half of the
+stop marker) and W4 (the listener: `alive`, `started`, the mutex). A stub that returned
+plausible values instead would let a runner get as far as writing `starting` before failing,
+which is the phone waiting out forty-five seconds for nothing; failing at the first call is
+the honest version.
 
 Slice W3b filled in the terminal: `spawn`, and the `Terminal` it hands back. `session.py`'s
 `Runner` gets the same two-value answer it gets from the Mac — a pid, and something to read —
@@ -15,14 +15,19 @@ and the differences that belong to ConPTY rather than to a pty live behind `Term
 command line instead of an argv list, a poll instead of `select`, and `str` re-encoded to
 bytes so `pump`, `Scrape` and `Transcript` see one type on both platforms.
 
+Slice W3e filled in the ending: a Job Object created before the child and holding it since
+before `spawn` returned, and a `terminate` that is a Ctrl-C twice over before it is a kill.
+Both of them live on the `Terminal`, because neither is reachable from a pid — which is why
+`terminate` takes one, and why the seam is a shape wider than the Mac needed it to be.
+
 The two things that were already decided are here for real: `spawn_flags()` — W0c measured
 that `CREATE_BREAKAWAY_FROM_JOB` is refused under Task Scheduler and unnecessary, so the flags
 are `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` — and `request_stop`/`stop_requested`, which
 are two lines over a marker file and have no reason to wait.
 
-Dependencies: pywinpty (`Terminal`, from W3b), psutil and pywin32 (W3e, W4) —
-`requirements-win.txt`. The imports are inside the functions that need them, so the module
-still loads on a bare interpreter.
+Dependencies: pywinpty (`Terminal`, from W3b), pywin32 (the Job Object, W3e) and psutil
+(`_reaped` here, `alive`/`started` in W4a) — `requirements-win.txt`. The imports are inside
+the functions that need them, so the module still loads on a bare interpreter.
 """
 import os
 import subprocess
@@ -41,6 +46,34 @@ DETACH_FLAGS = (getattr(subprocess, "DETACHED_PROCESS", 0)
 #: files, so this is that design extended rather than a new channel.
 STOP = "stop"
 
+#: Ctrl-C, and on this platform that is all it is: a byte on the terminal. §4 said the
+#: pseudoconsole turns it into a `CTRL_C_EVENT` for the console; W3e measured that nothing
+#: does, and that it is delivered to whatever is *reading* the console like any other key. So
+#: it is the polite stop for claude, which reads the console, and it is nothing at all for a
+#: `ping` or a build — see `terminate`.
+INTERRUPT = b"\x03"
+
+#: The gap between the two Ctrl-Cs, and its own number rather than `session.SETTLE`'s — which
+#: happens to be the same 0.4 for a different reason (a keystroke into a panel that is still
+#: drawing). This one is W0b's measurement: two `\x03` 0.4s apart ended a real session with
+#: exit status 0 after 1.71s, and one alone was never tried, so the pair is what is specified
+#: and this is the gap it was measured with. Importing `session` to share the constant is not
+#: available anyway — `session` imports this module, not the other way round.
+SETTLE = 0.4
+
+#: What `TerminateJobObject` is told to make the exit code. Any non-zero would do; 1 is what §4
+#: names, and it being non-zero is the point: a session that exited 0 chose to, and a session
+#: that exited 1 was killed. `test_terminate_graceful_first` is that distinction as a test.
+JOB_KILL_CODE = 1
+
+#: How long a kill gets before it is called a failure. A job kill is not synchronous — the call
+#: starts the termination and returns — so an answer read the instant it comes back is an
+#: answer about a race. The same 1.0s `session_posix.terminate` allows after its SIGKILL.
+AFTER_KILL = 1.0
+
+#: How often the waits above ask whether the session has gone. Same as the Mac's.
+POLL = 0.05
+
 
 def _stderr(message):
     sys.stderr.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), message))
@@ -56,6 +89,24 @@ def _winpty():
     so that importing this module still costs nothing on a box without the venv (W1c)."""
     import winpty
     return winpty
+
+
+def _win32job():
+    """Job Objects, from pywin32. Same shape as `_winpty` and for the same two reasons."""
+    import win32job
+    return win32job
+
+
+def _psutil():
+    """Process facts. Same shape again.
+
+    §6 has this arriving with the listener in W4a, for `alive` and `started`. W3e needs it one
+    slice earlier and for a smaller thing: `_reaped` below, which is the *pid* question
+    `terminate` is built on, and which the Mac answers with `waitpid` and `kill(0)` — neither
+    of which exists here.
+    """
+    import psutil
+    return psutil
 
 
 def environment_block(env):
@@ -119,9 +170,15 @@ class Terminal:
     #: the buffer stops growing rather than holding a copy of the session.
     PREAMBLE = 256
 
-    def __init__(self, pty):
+    def __init__(self, pty, job=None):
         self._pty = pty
         self.pid = pty.pid
+        #: The session's Job Object, created before the child and holding it since before
+        #: `spawn` returned (W3e). `terminate` is the only thing that uses it, and it is here
+        #: rather than in a table keyed by pid because this is already the object the runner
+        #: holds for the life of the session — and because the other half of a Windows stop,
+        #: the Ctrl-C, is a write to this same terminal.
+        self.job = job
         self._preamble = bytearray()
         self._answered = False
 
@@ -181,14 +238,42 @@ class Terminal:
         except Exception:
             return False
 
-    def close(self):
-        """Release the ConPTY. Idempotent, because it is called from a `finally`.
+    def exit_status(self):
+        """How the child went: its exit code, or None while it is still running.
 
-        **This ends the child.** Dropping the last reference closes the pseudoconsole and the
-        process behind it is gone within half a second (measured, W3b). That is why WINDOWS.md
-        §4 puts the close *last* — after the Ctrl-C and after the job kill — and not first.
+        Not used by `pump` — `alive()` is the only question the loop asks — but it is how a
+        stop can be told from a kill, which is what `terminate`'s graceful path claims to be
+        doing. `TerminateJobObject` forces `JOB_KILL_CODE`, so a 0 here is a program that shut
+        itself down and a `JOB_KILL_CODE` is one that had to be ended.
+        """
+        if self._pty is None:
+            return None
+        try:
+            return self._pty.get_exitstatus()
+        except Exception:
+            return None
+
+    def close(self):
+        """Release the job and the ConPTY. Idempotent, because it is called from a `finally`.
+
+        **This ends the session — all of it.** Two mechanisms, and W3e measured them as two:
+        closing the pseudoconsole ends the child within half a second (W3b), and closing the
+        job takes everything the child started, because `_create_job` sets
+        `KILL_ON_JOB_CLOSE`. Either one alone leaves the other half running. That is why
+        WINDOWS.md §4 puts this *last* — after the Ctrl-C and after the job kill — and not
+        first: everything polite has to have happened already.
+
+        The job goes first of the two only so that the tree cannot spend half a second
+        reparenting itself while the pseudoconsole is coming down; both are gone by the time
+        this returns either way.
         """
         pty, self._pty = self._pty, None
+        job, self.job = self.job, None
+        if job is not None:
+            try:
+                job.Close()                # and with it, per `_create_job`, whatever is inside
+            except Exception:
+                pass
         if pty is None:
             return
         try:
@@ -226,6 +311,7 @@ def spawn(argv, cwd, env, rows, cols):
     """
     winpty = _winpty()
     cmdline = subprocess.list2cmdline(argv[1:])
+    job = _create_job()                    # before the child. See the docstring's last bullet.
     try:
         pty = winpty.PTY(cols, rows)
         started = pty.spawn(argv[0], cmdline=cmdline or None, cwd=cwd,
@@ -234,16 +320,235 @@ def spawn(argv, cwd, env, rows, cols):
         raise OSError("could not start %s: %s" % (argv[0], e)) from None
     if not started:
         raise OSError("could not start %s: pywinpty refused the spawn" % argv[0])
-    return pty.pid, Terminal(pty)
+    terminal = Terminal(pty, job)
+    try:
+        _assign_to_job(job, pty.pid)
+    except OSError:
+        # Nothing may survive a spawn that did not finish: a child outside the job is a child
+        # `terminate` can never end, and the caller is about to record this as `failed`.
+        terminal.close()
+        raise
+    return pty.pid, terminal
+
+
+def _create_job():
+    """A Job Object for this session, set to kill on close. W3e.
+
+    Unnamed, because a name is a thing two runners could collide on. It is not a quota — the
+    only thing wanted from a job is that it is a handle on *everything the session starts*,
+    which it gives for free: a process assigned to one cannot leave it and neither can its
+    children.
+
+    **`KILL_ON_JOB_CLOSE` is the one limit set, and it is what covers the runner dying without
+    getting to `terminate`** — a crash, or §6's `Sessions.stop` reaching its last resort, which
+    on this platform is `TerminateProcess` and catches nothing. This was first written the
+    other way round, reasoning that dropping the handle should not be a way to end a session by
+    accident. Measuring it retired that reason: when the runner dies, the pseudoconsole it
+    held closes, and *that alone* ends claude within half a second (the same thing W3b measured
+    from `Terminal.close()`). So the session is already over by the time this flag has an
+    opinion, and the only question left is whether what claude started goes with it. Without
+    the flag it does not — measured, a detached grandchild outlives the runner, the session and
+    the reconciliation that follows. There is no accident left to protect against and a real
+    orphan to prevent, so the flag goes in.
+
+    Note it is therefore `Terminal.close()`, not this handle alone, that the session's life
+    hangs on — which is the same sentence §4's ordering has always been about, now with the
+    tree included. `test_a_runner_that_dies_without_warning_leaves_nothing_behind` is both
+    halves of the measurement above, kept as one test.
+
+    A failure here is an `OSError` *before anything has been spawned*, which is the useful
+    half of §4's ordering: the alternative is a running session with no job to end it by,
+    which fails silently and only at `stop`.
+    """
+    try:
+        win32job = _win32job()
+        job = win32job.CreateJobObject(None, "")
+        limits = win32job.QueryInformationJobObject(
+            job, win32job.JobObjectExtendedLimitInformation)
+        limits["BasicLimitInformation"]["LimitFlags"] |= (
+            win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
+        win32job.SetInformationJobObject(
+            job, win32job.JobObjectExtendedLimitInformation, limits)
+        return job
+    except Exception as e:
+        raise OSError("could not create the job object for the session: %s" % e) from None
+
+
+def _assign_to_job(job, pid):
+    """Put `pid` in `job`. Called between the spawn and `spawn` handing the pid back.
+
+    `PROCESS_SET_QUOTA | PROCESS_TERMINATE` is what `AssignProcessToJobObject` asks for, and
+    the handle is closed again immediately: the job holds the process, not this handle.
+
+    A pid that will not assign has almost always already exited — a child that failed in its
+    first milliseconds — and §4 treats it the same way as a binary that was not there: an
+    `OSError`, a `failed` record with the reason in it, and no session.
+    """
+    import win32api
+    import win32con
+    try:
+        handle = win32api.OpenProcess(
+            win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, pid)
+    except Exception as e:
+        raise OSError("could not open pid %d to put it in the job: %s" % (pid, e)) from None
+    try:
+        _win32job().AssignProcessToJobObject(job, handle)
+    except Exception as e:
+        raise OSError("could not put pid %d in the job: %s" % (pid, e)) from None
+    finally:
+        try:
+            win32api.CloseHandle(handle)
+        except Exception:
+            pass
 
 
 def _reaped(pid):
-    _later("W3e")
+    """True once `pid` is gone. False only while something is genuinely still running there.
+
+    One call, where `session_posix._reaped` needs two, and neither of its reasons survives the
+    port: Windows has no zombie to clear, so there is no `waitpid` half, and a pid query here
+    does not care whose child the process is — which is the case the Mac needed `kill(0)` for,
+    since every runner stops being the listener's child the moment it detaches.
+
+    Something that is not a pid at all reads as gone, because the only caller is a `finally`
+    and the alternative is a `TypeError` replacing a session's outcome with a traceback.
+    """
+    try:
+        return not _psutil().pid_exists(int(pid))
+    except (TypeError, ValueError, OverflowError):
+        return True
 
 
-def terminate(pid, grace, log=_stderr):
-    """Two Ctrl-C bytes on the terminal, then TerminateJobObject. W3e."""
-    _later("W3e")
+def terminate(pid, grace, log=_stderr, terminal=None):
+    """End the session at `pid` and everything it started. Returns True once it is gone. W3e.
+
+    §4's order, and the order is the point on this platform as much as on the Mac (§9.10):
+
+    1. **Ctrl-C twice, `SETTLE` apart**, written to the terminal. W0b measured a real session
+       taking that and exiting 0 in 1.71s, and it is the path that matters, because claude is
+       the process holding the session's state.
+    2. **`TerminateJobObject`**, this platform's `killpg`. A session that started a dev server
+       has it in the job too, and §5's `stop` must not leave it behind.
+    3. **The terminal is closed last**, by the caller and not here. Closing it ends the child
+       outright within half a second (measured, W3b), which would make step 1 a kill wearing a
+       Ctrl-C's clothes.
+
+    **The byte is a keystroke and not a signal, and that is not a detail.** §4 had it the other
+    way round — that the pseudoconsole turns `` into a `CTRL_C_EVENT` — and W3e measured
+    that nothing does. It is delivered to whatever is *reading the console*, like any other
+    key. claude reads the console, so W0b's 1.71s is real and this path does what it claims
+    for the one program the runner ever starts. `cmd`, `ping` and a python process sitting in
+    `time.sleep` do not read it, and two Ctrl-Cs leave all three of them running — measured,
+    all three. So step 1 reaches claude and step 2 reaches the session; there is no version of
+    this in which step 1 alone ends a tree.
+
+    **Which is why what this waits on is whether the *job* is empty and not whether `pid` has
+    gone.** The Mac can ask about the pid because `killpg` addressed the whole group, so the
+    polite signal already reached everything in it; here the polite byte reached one process.
+    Stopping at `_reaped(pid)` would mean the *ordinary* case — claude takes the Ctrl-C, exits
+    in 1.71s, and the dev server it started is still there — answers True with that server
+    running under a session the phone has been told is over. The job knows what is left; the
+    pid does not. `test_a_graceful_child_that_left_a_process_behind_still_loses_it` is that
+    case, and it is the one this function exists for.
+
+    **`terminal` is why this signature is wider than the Mac's**, which needs nothing but the
+    pid because `killpg` and `kill` are addressed by number. Neither mechanism above is
+    reachable from a pid: the Ctrl-C is a write to the terminal, and the job has been held by
+    that same object since before `spawn` returned. That is the one place the Mac's shape did
+    not survive the port. `session_posix.terminate` takes the argument and ignores it, so the
+    seam stays one shape.
+
+    Without a terminal there is neither, and the honest answer is a single hard kill and a line
+    in the log saying so. That is `bot.py`'s caller (§6), which is ending a *runner* rather than
+    a session: W4b's `stop` writes the stop marker first and it is the runner's own `terminate`
+    — this function, with its terminal — that takes the tree. What must not happen there is
+    §9.10's failure in Windows dress: answering True having done nothing at all, so the phone is
+    told a session stopped while it is still running.
+    """
+    job = getattr(terminal, "job", None)
+    if _settled(pid, job):
+        return True
+
+    if terminal is not None:
+        for wait in (SETTLE, grace):
+            if not _interrupt(terminal, pid, log):
+                break                      # nothing left to write to: the job is what is left
+            if _wait_for(pid, job, wait):
+                return True
+    else:
+        log("no terminal for pid %s: no Ctrl-C to send and no job to kill" % pid)
+
+    if job is not None:
+        try:
+            _win32job().TerminateJobObject(job, JOB_KILL_CODE)
+        except Exception as e:
+            log("could not terminate the job holding pid %s: %s" % (pid, e))
+    else:
+        _kill(pid, log)
+
+    if _wait_for(pid, job, AFTER_KILL):
+        return True
+    log("session %s is still there after the kill: %s" % (pid, _job_pids(job)))
+    return False
+
+
+def _interrupt(terminal, pid, log):
+    """Send one Ctrl-C. False if there was nothing to send it to, which is not a failure.
+
+    A terminal whose child has gone raises on write (`WinptyError`, no errno — the same
+    unhelpful shape `Terminal.read` treats as the end of the output), and so does one the
+    caller has already closed. Either way the polite path is over and the job is next.
+    """
+    try:
+        terminal.write(INTERRUPT)
+        return True
+    except Exception as e:
+        log("could not send Ctrl-C to pid %s: %s" % (pid, e))
+        return False
+
+
+def _job_pids(job):
+    """What is still running in `job`, or None if the job cannot be asked.
+
+    None and `()` are different answers and the caller has to keep them apart: an empty tuple
+    is a session that is over, and None is not knowing — which falls back to the pid, because
+    a `stop` that cannot read the job is still better answered by claude's own pid than by a
+    guess.
+    """
+    if job is None:
+        return None
+    try:
+        return tuple(_win32job().QueryInformationJobObject(
+            job, _win32job().JobObjectBasicProcessIdList))
+    except Exception:
+        return None
+
+
+def _settled(pid, job):
+    """Is there anything left of this session? The job is the authority when there is one."""
+    pids = _job_pids(job)
+    if pids is None:
+        return _reaped(pid)
+    return not pids
+
+
+def _wait_for(pid, job, seconds):
+    """True if the session goes within `seconds`. Polled: nothing arrives to wake this up."""
+    deadline = time.time() + max(seconds, 0.0)
+    while True:
+        if _settled(pid, job):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(POLL)
+
+
+def _kill(pid, log):
+    """The one process, hard, and nothing it started. See `terminate`'s last paragraph."""
+    try:
+        _psutil().Process(int(pid)).kill()
+    except Exception as e:
+        log("could not kill pid %s: %s" % (pid, e))
 
 
 def alive(pid):

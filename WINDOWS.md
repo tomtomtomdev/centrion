@@ -8,8 +8,8 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **W3c done (2026-09-17); W3d next.** The suite runs natively on Windows since W1c:
-539 tests, 470 pass, 68 skipped as the Mac's (each skip names its reason or the slice that
+Status: **W3e done (2026-09-19); W3f next.** The suite runs natively on Windows since W1c:
+572 tests, 497 pass, 74 skipped as the Mac's (each skip names its reason or the slice that
 un-gates it), one expected failure (W3h's) — and one unidentified error seen once in 35 runs,
 which W3c's row records rather than explains. Since W2b it is run from the venv —
 `.venv\Scripts\python -m unittest -q` — because `config.py`'s secrecy check needs pywin32;
@@ -98,9 +98,9 @@ Windows Update cannot break at 3am.
 |---|---|---|---|
 | Python | `/usr/bin/python3` 3.9, stdlib only | **3.12.10 from python.org, in a venv under `.venv\`** | There is no system Python on Windows to pin to; a venv with a lockfile is the stable thing. §3's "stdlib only" rule was a defence against brew churn, and it does not survive the pty problem — see next row. |
 | Terminal | `os.openpty` + `fork` | **ConPTY via `pywinpty`** | The stdlib has no ConPTY binding. `pywinpty` is the maintained one (compiled wheel, ships for 3.12, what Spyder and Jupyter's terminal use). Window size is a constructor argument, so it is set before the child exists — §6's requirement, and the reason `spawn()` avoids `pty.fork()` on the Mac, comes free. |
-| Process tree | `setsid` + `killpg` | **Job Object with `KILL_ON_JOB_CLOSE`** (`pywin32`'s `win32job`) | Windows has no process groups worth the name. A job is the only thing that reliably ends a dev server the session started. It also gives §12's property — kill the runner and claude dies with it — for free, because the runner's job handle closes when the runner dies. |
-| Graceful stop | `SIGTERM` to claude | **write `\x03` to the ConPTY, wait `GRACE`, then `TerminateJobObject`** | ConPTY turns a 0x03 on its input into a CTRL_C_EVENT for the attached console. Claude Code asks for a second Ctrl-C to confirm exit, so send it twice with a short gap. Hard kill via the job if it is still there. |
-| Listener → runner stop | `SIGTERM` to runner | **a `stop` marker file in the session directory**, polled every `TICK` | Windows cannot deliver a catchable signal to another process. §2 already has the two processes talking only through files, so this is the design extended rather than a new channel. Fallback after `STOP_GRACE`: `TerminateProcess` on the runner, and the job takes claude with it. |
+| Process tree | `setsid` + `killpg` | **Job Object with `KILL_ON_JOB_CLOSE`** (`pywin32`'s `win32job`) | Windows has no process groups worth the name. A job is the only thing that reliably ends a dev server the session started. *W3e, measured both ways:* the rest of this row was right about the outcome and wrong about the mechanism. Kill the runner and claude does die with it — but that is the **pseudoconsole** closing, within half a second, and it reaches only the one process claude was. What the flag adds is the tree: without it a detached grandchild outlives the runner, the session, and the reconciliation that comes after. |
+| Graceful stop | `SIGTERM` to claude | **write `\x03` to the ConPTY, wait `GRACE`, then `TerminateJobObject`** | *W3e corrects this:* ConPTY does **not** turn a 0x03 on its input into a `CTRL_C_EVENT`. It is delivered to whatever is *reading* the console, like any other key — so it reaches claude, which reads it, and nothing else. `cmd`, `ping` and a python process in `time.sleep` each ignore two of them (measured, all three). Claude Code asks for a second Ctrl-C to confirm exit, so send it twice with a short gap. The job kill is therefore not the fallback for a stubborn claude but the **only** thing that reaches the rest of the session, in the ordinary case as much as the bad one. |
+| Listener → runner stop | `SIGTERM` to runner | **a `stop` marker file in the session directory**, polled every `TICK` | Windows cannot deliver a catchable signal to another process. §2 already has the two processes talking only through files, so this is the design extended rather than a new channel. Fallback after `STOP_GRACE`: `TerminateProcess` on the runner, which takes claude *and* its tree — the first through the pseudoconsole and the second only because of `KILL_ON_JOB_CLOSE`. See the Process tree row for which half does what. |
 | Liveness | `kill(pid, 0)` + `/bin/ps lstart` | **`psutil.pid_exists` + `psutil.Process(pid).create_time()`** | Both halves of §4's pid-reuse guard in two calls, no `ps` to parse. `psutil` is a compiled wheel, available for 3.12. |
 | Detach | `os.setsid()` in the runner | **`Popen(creationflags=DETACHED_PROCESS \| CREATE_NEW_PROCESS_GROUP)`** in the listener — and **not** `CREATE_BREAKAWAY_FROM_JOB` | *W0c, verified 2026-09-14:* Task Scheduler does put the task in a job, with `LimitFlags = 0` — so `BREAKAWAY` is refused with "Access is denied" and the runner would never start. It is also unnecessary: `Stop-ScheduledTask` terminated the parent and left both a flagless child and a detached child running. The runner survives the listener on Windows by default; the two remaining flags give it no shared console and no inherited Ctrl-C. |
 | Lock | `lockf` on fd 9 across an `exec` | **a named mutex, `Local\centrion-<sha1 of config path>`**, taken in `bot.py --serve` before the first `getUpdates` | The kernel releases a mutex when its owner dies, so like `lockf` there is no stale lock to clear. No shell, no inherited fd, and so no equivalent of §8's "the runner must close fd 9" trap — child processes do not inherit a mutex handle unless asked to. |
@@ -251,6 +251,34 @@ that may not yet have attached, and on Windows a program not yet in the job surv
 kill. So the job assignment happens *before* `spawn` returns — create the job, spawn, assign
 by pid, and only then hand the pid back. A pid that will not assign (the process already
 exited) is treated as `failed` with the pty tail as the error, same as an exec failure today.
+
+*W3e: done.* The order above is what shipped and the three steps are unchanged, but two of the
+sentences around them were wrong and the slice is mostly those two.
+
+**A Ctrl-C here is a keystroke and not a signal** (§3's table above, corrected). Nothing turns it
+into a `CTRL_C_EVENT`; the console hands it to whatever is reading, so it reaches claude and
+reaches nothing else — `cmd`, `ping` and a sleeping python all take two of them and carry on.
+W0b's 1.71s is still real, because claude is the one program the runner ever starts, but the
+polite step is a message to *one process* and never to a tree. Which is why what `terminate` waits
+on is **whether the job is empty**, not whether `pid` has gone: the ordinary session — claude
+takes the Ctrl-C, exits 0, and the dev server it started is still running — is exactly the case a
+pid-shaped wait answers True to while the phone is told a session is over that is not. That is
+§9.10's failure in Windows dress and it is what the job is for.
+
+**`terminate` therefore takes the terminal, and the seam is one argument wider than the Mac
+needed.** Neither half of a Windows stop is reachable from a pid: the Ctrl-C is a write to the
+terminal, and the job has been held by that same object since before `spawn` returned.
+`session_posix.terminate` accepts the argument and ignores it, which is the whole of the Mac's
+answer to it. `bot.py` is the caller with a pid and nothing else, and it gets a single hard kill
+and a line in the log saying that is what it got — §6's `stop` writes the marker first precisely
+so that the runner's own `terminate`, which has the terminal, is what ends the tree.
+
+**And `KILL_ON_JOB_CLOSE` covers the ending nothing else can: the runner dying without reaching
+any of this.** Measured in both directions. The pseudoconsole closing with the runner ends claude
+in under half a second on its own — so the flag is not what saves the session from an accidentally
+dropped handle, and the reason this was first written without the flag does not hold. What the
+flag adds is everything claude started, which otherwise outlives the runner with nothing left
+anywhere that can reach it.
 
 **`_catch_signals()`** — a stop marker instead. `Runner.pump` checks
 `os.path.exists(os.path.join(self.dir, "stop"))` each tick; finding it sets `self.stopping`,
@@ -423,11 +451,14 @@ has its own version of the hazard (pid 0 is the idle process, pid 4 is System; b
 than macOS — a freed pid can come back within seconds — so this guard does more work here, and
 the test for it should include a pid that exists but started *after* the record.
 
-**`Sessions.stop()`** — write the `stop` marker, then wait up to `STOP_GRACE` for
-`alive()` to go false. Only then `psutil.Process(pid).terminate()` on the runner; the job takes
-claude with it. §9.11's nesting rule carries over unchanged: the listener's grace must exceed
-the runner's `GRACE` plus the two Ctrl-C settles, or the listener kills a runner that was
-halfway through ending claude cleanly.
+**`Sessions.stop()`** — write the `stop` marker, then wait up to `STOP_GRACE` for `alive()` to go
+false. Only then `psutil.Process(pid).terminate()` on the runner — which is `TerminateProcess` and
+catches nothing, so the runner never reaches its own `terminate`. What saves that case is the two
+handles dying with it: the pseudoconsole takes claude and the job's `KILL_ON_JOB_CLOSE` takes the
+tree (W3e, measured). Without the flag this line would have left a dev server running under a
+session the phone was told had stopped. §9.11's nesting rule carries over unchanged: the
+listener's grace must exceed the runner's `GRACE` plus the two Ctrl-C settles, or the listener
+kills a runner that was halfway through ending claude cleanly.
 
 **`Sessions.start()`** — `Popen(argv, stdin=DEVNULL, cwd=HERE, close_fds=True,
 creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)`. No `CREATE_BREAKAWAY_FROM_JOB`
@@ -796,6 +827,27 @@ proves things about is the one `TestPumpOverATerminal` sends through the pump.
 - Run: none beyond the tests.
 - Test: Windows.
 
+*W3e: done.* The green is the line above almost exactly — with one word changed, and the word is
+what the slice was worth. `terminate` waits on **the job being empty**, not on `alive()`, because
+the Ctrl-C is a keystroke rather than a signal and only ever reaches the one process that is
+reading the console. §4 above carries that correction and the two it brings with it.
+
+The slice also **put back a flag it had first left out**, and the way that happened is the part
+worth keeping. `_create_job` shipped without `KILL_ON_JOB_CLOSE`, reasoning that dropping a handle
+should not be a way to end a session by accident. The measurement retired the reason rather than
+the conclusion: a runner killed outright loses claude anyway — in under half a second, through the
+pseudoconsole — so there was no accident left to protect against, and the only thing the missing
+flag bought was a detached grandchild that outlived the runner, the session and the reconciliation
+after it. Both directions measured before a line changed;
+`test_a_runner_that_dies_without_warning_leaves_nothing_behind` is the pair kept as one test, and
+its two assertions are the two mechanisms.
+
+The general shape, and the fourth time this port has hit it: **a sentence that is true of the
+Mac's mechanism survives as a claim about the design.** §3's table said the job gives "kill the
+runner and claude dies with it" for free. It does — the outcome was never wrong — but for a reason
+that had nothing to do with the job, and believing the stated reason is what made the flag look
+optional.
+
 **W3f — the stop marker.**
 - Red: portable `test_stop_marker_ends_pump` — fake terminal that never ends; a thread
   writes the marker after 0.3s; `pump` returns and the runner writes `ended`. Windows
@@ -966,7 +1018,7 @@ the Mac when the slice touched shared or posix code.
 | W3b `Terminal` and `spawn` on ConPTY | done · Mac pending | 2026-09-16 | b80f4f1 | **531 ran: 462 pass, 68 skip, 1 xfail**, 11.5s · **not run** | **Three seconds of every session start were the pseudoconsole waiting for an answer nobody was giving it.** A fresh ConPTY sends `ESC[c` — DA1, *what terminal are you* — and holds the child's output for 3.04s before giving up: measured on every shape of child, every run, and 0.04s once `Terminal` replies `ESC[?1;0c`. The old WinPTY backend has no such wait (0.22s), which is what pinned it on ConPTY rather than on pywinpty. The reply is sent only after the query has been seen, because before it the bytes would be ordinary input and would reach the child; after it, the console consumes them — an interactive `cmd` driven through this never sees them. This is three of W0a's 6.2 seconds to a link, and three of the phone's forty-five. Two more corrections to §4: **pywinpty takes the program and its arguments separately** and prepends the program itself (quoted — verified against an appname with a space), so `spawn` passes `list2cmdline(argv[1:])`; passing all of argv gives the child its own path as `argv[1]`, silently. And **an exec failure does not land on the pty**, because `CreateProcess` fails before there is a child to write it: pywinpty raises, nothing reaches the terminal, so `spawn` raises `OSError` and `Runner.run` catches it around the spawn — without that a missing binary is a traceback over a record still saying `starting`. `Terminal.close()` ends the child by itself (the pseudoconsole closes with its last reference, process gone in under half a second), which is a second reason for §4's close-last order. Run step: `cmd /c echo hello` came back in 0.05s; `cmd /c mode con` answered `'mode' is not recognized`, which is `child_env()` still handing out a POSIX `PATH` — W3g's, now visible instead of predicted. One repair found on the way: **W3a's torn-read test guards itself with `assertTrue(written)`, and on Windows that was a coin toss** — its reader held the file so continuously that 0–8 of 150 replaces landed and 3 of 32 measured runs landed none. It failed exactly that way once here, under the load of these ConPTY tests. A millisecond of pause between reads takes it to 38–42 landing, every run, busy or idle — so the Windows half now exercises the property instead of asserting nothing, and the reader is still open across the whole of every `json.loads`. Torn reads: still zero. +13 tests, no skip count change here (the new file skips whole on the Mac). Mac: not run — see Pending. |
 | W3c command-line quoting | done · Mac pending | 2026-09-17 | 8e8f032 | **539 ran: 470 pass, 68 skip, 1 xfail**, 22.7s · **not run** | **The quoting was already right; the count of places doing it was wrong.** `spawn` needed no change — a prompt carrying `"`, `^`, `%`, `&`, `\|`, `<`, `>` and a trailing backslash comes back byte-for-byte, and so do an empty argument, a bare quote, doubled backslashes and a non-ASCII string. So the eight new tests were checked by mutation instead of by a green run: with `subprocess.list2cmdline` replaced by `" ".join`, **six of the eight fail**, and the two survivors are the two that do not route through it — `test_a_program_path_with_a_space_is_still_one_program` (that quoting is pywinpty's, not ours) and `test_no_prompt_means_no_prompt_flag` (no argument with a space in it). §9's ritual and §11's rule are amended: a slice that is green at step 1 mutates rather than skipping ahead, and the row says which tests did *not* fail. **The find is a second quoting hop nobody had written down.** §4 had ConPTY; `Sessions.start`'s `Popen` does exactly the same flattening on Windows, because there is no `execve` to hand a list to — so a prompt off a phone is joined and re-split *twice* here against zero times on the Mac, and `bot.py`'s comment at that spawn asserted the opposite in as many words ("no quoting rules to get wrong when there is nothing to quote for"). True of `execve`, false of `CreateProcess`; §6 and the comment now say which. Nothing was broken and no behaviour changed — `list2cmdline` is what `Popen` already used — but the hop had no test on this platform and the documentation pointed the wrong way. Hand-run (the slice said "Run: none"; the two claims in that comment were worth seeing): `C:\dir\` leaves hop 1 as `"…C:\dir\\"`, backslash doubled before the closing quote, and both a plain child and a ConPTY child parse back the identical string — that doubling is the whole reason `--trust` still exists at the far end, which is the case the twin test pins at fifteen argv elements. Suite time doubled, 11.5s → 23.3s: the four new ConPTY tests spawn real interpreters, and an interpreter's first byte under a fresh ConPTY is the slowest thing in this suite. **One open item, honestly unresolved:** one run in the first four errored (`errors=1`) and the name was lost — that command kept only the last three lines of output. It has not come back in **34 consecutive runs since, 24 idle and 10 under four spinners**, which is the load W3b's flake needed. Every run since keeps its whole output (`scratch\w3c_flake.sh`, `scratch\w3c_flake_loaded.sh`, beside `w3c_mutate.py` and `w3c_handrun.py`), so the next occurrence names itself; until then this is an unidentified ~3% error, not a green suite, and W3d should re-read this row before trusting a single clean run. +8 tests, no skip count change. Mac: not run — see Pending. |
 | W3d `pump` without `select` | done · Mac pending | 2026-09-18 | 0937950 | **559 ran: 484 pass, 74 skip, 1 xfail**, 21.8s · **not run** | **The loop went where the plan said; what moved with it was a question that used to have one answer.** `pump` now calls `terminal.read(TICK)` and nothing platform-shaped: the `select` that was its first statement is the first statement of `session_posix.Terminal.read`, `spawn` returns a `Terminal` on both sides, and `Terminal` joined the seam's `SURFACE`. **`read` and `alive` are two questions now, and they do not mean the same thing on the two platforms** — on a pty EIO is the end of the output *and* of the session, so the old loop broke on either; ConPTY separates them, so `session_posix.alive()` is about the *terminal* (the flag set when the pty hangs up) and `session_win.alive()` is about the *process* (`pty.isalive()`). Both answer the only question `pump` asks, and **neither is a substitute for `_reaped()` or `procs.alive(pid)` — W3e and W4a should read that sentence before reaching for `alive`.** Second find: **the drain after the terminal finishes has to go past the scraper, not just into the transcript.** The obvious version appends the dead child's last chunk to `pty.log` and leaves, which loses a *link* arriving in it — reachable on Windows, where output outlives the child (W3b) — so both callers go through one `Runner.absorb` and `test_a_link_in_the_tail_still_goes_live` is the case. Third, measured rather than assumed: **a session's end costs two `TICK`s** — 0.401s of a 0.432s `pump` over `cmd /c echo`, one ordinary poll then the drain, against 0.031s of reading the child (`scratch\w3d_exitcost.py`). Paid after `live` is recorded, so only a `failed` session's tail waits on it; left at `TICK` because shortening it trades 0.2s against the text §4.6 exists to deliver. Run step: the W0a capture gives the same single link at chunk sizes 1, 7, 64, 512, 4096 and whole — unchanged, as predicted — and the new pump over a real ConPTY reached `live` with the URL in `meta.json` and the link in `pty.log` (`scratch\w3d_handrun.py`). `READ_SIZE` moved to `session_posix.py` with the `os.read` that wants it; `session.py` no longer imports `select` or `errno`. **W3c's open ~3% error did not recur**: 20 consecutive clean runs of the full suite after the green, plus the red and green runs themselves — it stays open and unidentified, and `scratch\w3d_flake.sh` keeps the whole output of any run that is not OK. +20 tests (12 portable over a fake `Terminal`, 6 posix over a real pty, 3 Windows over a real ConPTY), skips 68 → 74 — the six new posix ones, which is the whole of the change. Mac: not run — see Pending. |
-| W3e Job Object and `terminate` | todo | | | | |
+| W3e Job Object and `terminate` | done · Mac pending | 2026-09-19 | | **572 ran: 497 pass, 74 skip, 1 xfail**, 31.8s · **not run** | **Two sentences in the plan were true about the outcome and wrong about the mechanism, and one of them made a flag look optional.** The Ctrl-C is not a `CTRL_C_EVENT` — nothing turns it into one; it goes to whatever reads the console, so it reaches claude and reaches nothing else (`cmd`, `ping`, a sleeping python: two each, all three carry on). So `terminate` waits on the **job being empty** and not on the pid, because the ordinary session — claude exits 0 in a second, its dev server does not — is precisely what a pid-shaped wait calls finished. And `KILL_ON_JOB_CLOSE`, first left out on the grounds that a dropped handle should not end a session by accident, went back in once measured: a hard-killed runner loses claude within 0.5s regardless (the pseudoconsole, not the job), so the accident was already unavoidable and the flag's only actual effect was the grandchild it was leaving alive. `terminate` gained a `terminal` argument on both platforms — the Mac ignores it — because neither the Ctrl-C nor the job is reachable from a pid. Eleven tests in `TestEndingTheSessionAndItsTree`, all against real trees; two portable ones in `test_session.py` for the seam and for `run`'s ordering. `psutil` arrives a slice early (§`requirements-win.txt` says why). |
 | W3f stop marker | todo | | | | |
 | W3g `child_env`, runner acceptance run | todo | | | | time to link: |
 | W3h `Trust` carries a partial escape | red | 2026-09-14 | d6701b9 | | red test exists as an `expectedFailure`; fails at chunk sizes 64, 16, 1; passes at 128+ |
@@ -1026,6 +1078,10 @@ verified until then, and W1c's first Windows-green run is not a substitute.
 | W3d | `test_closing_the_pty_hangs_up_the_child_once_it_owns_the_terminal`, watched | SIGHUP, as before. It now closes through `Terminal.close()` rather than `os.close(master)`, and `TestThePosixTerminal::test_closing_it_hangs_up_the_child` makes the same claim about the same call — if one passes and the other does not, `close()` is not closing the fd it thinks it is. |
 | W3d | `python3 session.py --foreground --cwd <project> --name w3d`, then Ctrl-C | a link, and `meta.json` at `ended`. The whole point of the hand-run this time is the **exit**: `run()`'s `finally` now calls `terminal.close()` where it called `os.close(master)`, still last, after `terminate(pid)`. What must not appear is a session that ends without `ended` being written, or a runner that does not come back from `pump` at all — the loop's only way out on the Mac is now `alive()` going false off the `_finished` flag, where it used to be a `break` inside the read. |
 | W3d | the same run, timed | the link should arrive no later than it did before W3a's hand-run. `read(TICK)` waits exactly as the old `select(…, TICK)` did, so there is nothing here that should have slowed down; if it has, the `max(timeout, 0.0)` or the poll ordering is wrong in a way Windows cannot show, because Windows never had a `select` to compare against. |
+| W3e | `.venv\Scripts\python -m compileall -q .` | clean. Nothing here is 3.10+, but the Mac is the only interpreter that can say so and it has not run. |
+| W3e | the runner-death measurement, twice | The plan said "none beyond the tests", and this is the one that earned its place: a stub runner holding a real ConPTY and a real job, hard-killed with `psutil.Process.kill()`. **Without `KILL_ON_JOB_CLOSE`:** runner gone, claude gone within 0.5s, grandchild alive at +5s. **With it:** all three gone by +0.5s. The first half is why the flag was thought unnecessary and the second is why it is not, and neither was knowable from the API docs. Kept as a test. |
+| W3e | `.venv\Scripts\python -m unittest -q` | **572 ran: 497 pass, 74 skip, 1 xfail**, 31.8s. Twelve more than W3d and no change to the skip count — every new test runs on this platform. The Mac's number is W3d's until somebody runs it. |
+| W3e | not run on the Mac | `session.py` and `session_posix.py` both changed: `terminate` takes a fourth argument there too and ignores it. The portable `test_terminate_forwards_the_terminal_the_session_was_read_through` and `test_the_terminal_is_handed_to_terminate_and_closed_after_it` are what the Mac run has to answer, plus the hand-run W3d already asks for. Recorded as debt, like every slice since W1a. |
 
 ### Decisions changed by evidence
 
@@ -1176,6 +1232,34 @@ Appended, dated, when a run step contradicts the plan above and a section was am
   `subprocess.list2cmdline = " ".join`, and it fails six of the eight. The two survivors are
   named in §11's row, because "which tests did *not* fail" is the part that says whether the
   mutation was aimed at the right thing.
+- **2026-09-19, W3e → §3, §4.** The Ctrl-C is a **keystroke**, not a signal. §3's table said
+  ConPTY turns a 0x03 on its input into a `CTRL_C_EVENT` for the attached console; nothing does.
+  It is handed to whatever is *reading* the console, like any other key, so it reaches claude and
+  reaches nothing else — `cmd`, `ping` and a python process in `time.sleep` were each sent two
+  and each carried on. W0b's 1.71s was never wrong; it was a measurement of claude, and it got
+  read as a measurement of the mechanism. The consequence is not in `terminate`'s steps but in
+  what it *waits on*: the job being empty, never the pid, because the ordinary session — claude
+  takes the interrupt and exits 0, the dev server it started does not — is exactly the shape a
+  pid-shaped wait reports as finished.
+- **2026-09-19, W3e → §3, §6.** `KILL_ON_JOB_CLOSE` was dropped from `_create_job` and then put
+  back, and the round trip is the useful part. The reason for dropping it — a dropped handle
+  should not end a session by accident — sounds like a safety argument and is not one, because
+  the runner's death already ends the session by a different route: the pseudoconsole closes
+  with it and claude is gone in under half a second (measured; the same thing W3b saw from
+  `Terminal.close()`). So there was no accident to prevent, and what the missing flag actually
+  bought was a detached grandchild still running at +5s with nothing left anywhere that could
+  reach it. **The rule: before defending a mechanism against a hazard, measure whether the
+  hazard is already unavoidable by another path** — if it is, the defence is not a trade-off,
+  it is just the cost. Both directions were measured before a line changed, and the pair is
+  kept as `test_a_runner_that_dies_without_warning_leaves_nothing_behind`.
+- **2026-09-19, W3e → §9 ritual.** Fourth instance of the port's recurring shape, and the first
+  where the sentence was *true*. §3 said the job gives "kill the runner and claude dies with it"
+  for free. It does. But the stated reason was the job handle closing, and the real reason is
+  the pseudoconsole — so the sentence was checkable, checked out, and still hid a hole, because
+  a correct outcome with the wrong mechanism behind it makes everything downstream of the
+  mechanism look settled. The three earlier instances (W3b's argv, W3c's quoting, W3d's `alive`)
+  were all sentences that were *false* off the Mac. This one was not, and it was the more
+  expensive kind.
 - **2026-09-16, W2b → §9 ritual, §3.** `requirements-win.txt` exists, with `pywin32==312` and
   the `pywinpty==3.0.5` that has been in `.venv` since W0a. The Windows suite is run from the
   venv from here (`.venv\Scripts\python -m unittest -q`); under the system interpreter

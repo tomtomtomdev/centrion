@@ -177,7 +177,7 @@ def spawn(argv, cwd, env, rows=ROWS, cols=COLS):
     return procs.spawn(argv, cwd, env, rows, cols)
 
 
-def terminate(pid, grace=GRACE, log=_stderr):
+def terminate(pid, grace=GRACE, log=_stderr, terminal=None):
     """End the session at `pid` and everything it spawned. Returns True once it is gone.
 
     **The grace periods nest, and a caller ending a *runner* has to allow for it** (§9.11):
@@ -185,8 +185,15 @@ def terminate(pid, grace=GRACE, log=_stderr):
     that allows a runner only `GRACE` hard-kills it mid-way and leaves meta.json saying `live`
     for something on its way out. The signalling itself — process group and process, both,
     and why — is session_posix.terminate's docstring.
+
+    `terminal` is the session's terminal, when the caller has one, and it is there for
+    Windows (WINDOWS.md §4, W3e): the polite stop is a Ctrl-C *written to the terminal* rather
+    than a signal, and the Job Object that takes the rest of the tree has been held by that
+    same object since before `spawn` returned. Neither is reachable from a pid, which is the
+    one place the Mac's shape did not survive the port. `session_posix.terminate` ignores it —
+    `killpg` needs a number and nothing else — so the two modules keep one signature.
     """
-    return procs.terminate(pid, grace, log)
+    return procs.terminate(pid, grace, log, terminal)
 
 
 def strip(data):
@@ -637,7 +644,7 @@ class Runner:
             self.pump(terminal, transcript)
         finally:
             transcript.close()
-            terminate(pid, log=self.log)
+            terminate(pid, log=self.log, terminal=terminal)
             # Last, and that order is the point on both platforms (§9.10, WINDOWS.md §4):
             # closing this hangs up a Mac child and ends a Windows one outright, and a session
             # that has not yet attached to its terminal survives being hung up from it.

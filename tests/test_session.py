@@ -257,7 +257,26 @@ class TestThePlatformSeam(unittest.TestCase):
             spawn.assert_called_once_with(["x"], "/tmp", {}, session.ROWS, session.COLS)
         with mock.patch.object(session.procs, "terminate", return_value=True) as terminate:
             self.assertTrue(session.terminate(4242))
-            terminate.assert_called_once_with(4242, session.GRACE, session._stderr)
+            terminate.assert_called_once_with(4242, session.GRACE, session._stderr, None)
+
+    def test_terminate_forwards_the_terminal_the_session_was_read_through(self):
+        """WINDOWS.md W3e: on Windows a pid alone is not enough to end a session politely.
+
+        The Mac's `terminate` needs nothing but the pid — `killpg` and `kill` are addressed by
+        number — so the seam was shaped that way, and W3e found the shape too narrow. A Ctrl-C
+        on Windows is not a signal, it is two bytes written to the terminal, and the Job Object
+        that takes the rest of the tree was created at spawn and is held by the same `Terminal`
+        object. Neither of them is reachable from a pid. So the terminal travels with it, and
+        `session_posix.terminate` ignores the argument — which is what makes this test the
+        portable one: it says the argument arrives, on both platforms, whatever is done with it.
+
+        `bot.py` is the caller that has a pid and nothing else (it is ending a *runner*, not a
+        session), and the default above is the shape it keeps.
+        """
+        term = FakeTerminal()
+        with mock.patch.object(session.procs, "terminate", return_value=True) as terminate:
+            self.assertTrue(session.terminate(4242, terminal=term))
+            terminate.assert_called_once_with(4242, session.GRACE, session._stderr, term)
 
     @needs_session_posix
     def test_the_posix_no_ops_answer_as_the_mac_needs(self):
@@ -1009,6 +1028,34 @@ class TestTheRunner(unittest.TestCase):
         self.assertEqual(meta["state"], session.FAILED)
         self.assertIn("could not start it", meta["error"])
         self.assertIsNone(meta["claude_pid"], "it recorded a pid for a child that never was")
+
+    def test_the_terminal_is_handed_to_terminate_and_closed_after_it(self):
+        """WINDOWS.md §4 and W3e: the order in `run`'s `finally`, and what goes with it.
+
+        Two things, and the second is why this test is not just the seam test above again.
+        `terminate` gets the terminal because on Windows the polite stop is two bytes written
+        to it and the job that takes the tree is held by it (W3e). And it is closed *after*
+        that call and not before, on both platforms: closing hangs up a Mac child that may not
+        yet have taken the pty as its controlling terminal (§9.10) and ends a Windows one
+        outright within half a second (measured in W3b), either of which turns the graceful
+        path into a kill that happens to look like one.
+
+        `catch_signals` is stood aside from because it is not what this test is about, and on
+        Windows it is still W3f's stub.
+        """
+        term = FakeTerminal([b"nothing useful\r\n"])
+        order = []
+        term.close = lambda: order.append("close")
+        r = self.runner("true")
+        with mock.patch.object(session, "spawn", return_value=(4242, term)), \
+                mock.patch.object(session.procs, "catch_signals", return_value=None), \
+                mock.patch.object(session.procs, "restore_signals"), \
+                mock.patch.object(session, "terminate",
+                                  side_effect=lambda *a, **kw: order.append(kw)) as terminate:
+            r.run()
+        terminate.assert_called_once_with(4242, log=r.log, terminal=term)
+        self.assertEqual([type(step) for step in order], [dict, str],
+                         "the terminal was closed before terminate could use it")
 
     @posix_only
     def test_a_miscased_project_still_passes_the_recheck(self):

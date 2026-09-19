@@ -218,8 +218,15 @@ def _signal(pid, sig, log):
     return reached
 
 
-def terminate(pid, grace, log=_stderr):
+def terminate(pid, grace, log=_stderr, terminal=None):
     """End the session at `pid` and everything it spawned. Returns True once it is gone.
+
+    `terminal` is accepted and ignored, and that is the whole of this platform's answer to it.
+    It is in the seam for Windows (WINDOWS.md W3e), where a Ctrl-C is a byte written to the
+    terminal and the Job Object that takes the tree is held by the same object; here the two
+    kills below are addressed by pid and the terminal is not part of the mechanism. It is
+    deliberately *not* used as a shortcut for hanging the child up either — see the last
+    paragraph of this docstring for the window in which that kills nothing at all.
 
     **The grace periods nest, and a caller ending a *runner* has to allow for it** (§9.11).
     This is two kills in sequence, not one: the runner catches SIGTERM, and then spends up to

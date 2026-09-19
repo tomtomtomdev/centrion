@@ -24,4 +24,12 @@ pywin32==312
 # `write` returns 0 for a write that arrived whole, so the return value is not usable.
 pywinpty==3.0.5
 
-# W4a adds psutil here, for `alive` and `started` — the two halves of §4's pid-reuse guard.
+# W4a wants this for `alive` and `started` — the two halves of §4's pid-reuse guard — and W3e
+# needed it first, which is worth saying because the plan had it arriving with the listener.
+# W3e's `terminate` has to prove it killed a *tree*, and the pids of that tree are the only
+# evidence that survives the kill: they have to be collected before it and asked about after,
+# and `psutil.Process(pid).children(recursive=True)` is the only way to walk a parent-child
+# relationship on Windows without shelling out to WMI. `tasklist` cannot answer it — it has no
+# parent-pid column — and asking the Job Object itself would be verifying the mechanism with
+# the mechanism. So this arrives one slice early, in the tests before the code.
+psutil==7.2.2
