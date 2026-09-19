@@ -11,9 +11,10 @@ Every platform module exports the same names — `tests/test_session.py::TestThe
 lists them — and the ones that have no work to do on POSIX say so here rather than being
 absent: `spawn_flags()` is empty because `os.setsid()` in the runner does the detaching;
 `Lock.take()` is always True because launchd/bot.sh holds the `lockf` before python starts
-(SPEC.md §8); `request_stop`/`stop_requested` do nothing because the listener SIGTERMs the
-runner (§5, §9.10). W3f may teach POSIX the stop marker too, so that the two platforms share
-one set of tests; until then the marker is Windows-only and these are the honest no-ops.
+(SPEC.md §8). W3f did teach POSIX the stop marker — `request_stop`/`stop_requested` are the
+same two lines over the same file as on Windows, so the runner has one place that hears a stop
+and this file's tests are one set — and the Mac keeps SIGTERM as well (§5, §9.10), because a
+runner outside `pump` hears only that.
 
 Stdlib only, same as session.py (SPEC.md §3).
 """
@@ -30,6 +31,13 @@ import time
 
 #: launchd/bot.sh's flock (SPEC.md §8). Closed before setsid, guarded for the hand-run case.
 LOCK_FD = 9
+
+#: The listener → runner stop request (WINDOWS.md §4, W3f). Windows has no signal one process
+#: can deliver to another, so the marker is the whole channel there; here it is the second way
+#: of saying what SIGTERM says. The same name as `session_win.STOP` and deliberately not shared
+#: through an import — neither platform module imports the other, and both ends of this
+#: protocol are always the same module.
+STOP = "stop"
 
 #: One read off the master, and the amount the transcript cap can overshoot by (§10.7): the
 #: size is checked after a write, so a chunk this big is briefly over it either way. Here
@@ -337,12 +345,22 @@ class Lock:
 
 
 def request_stop(directory):
-    """Ask the runner in `directory` to stop. POSIX SIGTERMs it instead; nothing to write."""
+    """Ask the runner in `directory` to stop: create the marker. Idempotent.
+
+    A second way of saying what SIGTERM says here, not a replacement for it — `bot.py` on this
+    platform still signals, and a runner that is anywhere other than `pump` hears only that.
+    What the marker buys the Mac is that the runner has one place where a stop is heard
+    (`Runner.pump`) instead of one per platform, and that the tests for it are one set. See
+    WINDOWS.md W3f, and `session_win.request_stop`, which is this function and is the whole
+    channel on the platform that has no deliverable signal.
+    """
+    with open(os.path.join(directory, STOP), "ab"):
+        pass
 
 
 def stop_requested(directory):
-    """Has the listener asked this runner to stop? Never by marker on POSIX — see W3f."""
-    return False
+    """Has the listener asked this runner to stop? Polled by the runner every TICK (W3f)."""
+    return os.path.exists(os.path.join(directory, STOP))
 
 
 def catch_signals(handler):

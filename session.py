@@ -688,6 +688,24 @@ class Runner:
         entered = False
 
         while not self.stopping:
+            # §5's `stop`, the other half of it. `stopping` above is a signal that has already
+            # arrived; this is the listener asking in the one way that works on a platform
+            # where nothing can signal a detached process at all (WINDOWS.md §4, W3f) — a file
+            # it creates in this directory, which the runner notices within a tick. Both
+            # platforms honour the marker, so a stop is heard in one place here rather than
+            # two, and the Mac keeps SIGTERM as well.
+            #
+            # Before the read rather than after it, and not folded into the `while` above: a
+            # stop that arrived while the terminal was busy must not buy the session one more
+            # tick of output, and a stop that arrived before `pump` was entered at all must
+            # not buy it one either. Checked every pass and not only on an idle one — a
+            # session running a build answers every read with a chunk, and that is exactly the
+            # session somebody reaches for `stop` about.
+            if procs.stop_requested(self.dir):
+                self.log("session %s: stop requested" % self.sid)
+                self.stopping = True
+                break
+
             chunk = terminal.read(TICK)
             if chunk:
                 self.absorb(chunk, transcript)

@@ -25,9 +25,11 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -783,6 +785,184 @@ class TestEndingTheSessionAndItsTree(unittest.TestCase):
         self.assertTrue(self.end(pid, terminal, grace=0.5), self.notes)
         self.assertTrue(session_win._reaped(pid))
         self.assertTrue(session_win._reaped(0x7FFFFFF0), "a pid that cannot exist read as live")
+
+
+@unittest.skipUnless(WIN, "the Windows half of the stop: a marker, and a console's signals")
+class TestTheStopMarkerOnWindows(unittest.TestCase):
+    """WINDOWS.md W3f, the half that is a fact about this platform rather than about `pump`.
+
+    `tests/test_session.py::TestTheStopMarker` has the protocol and the loop, portably, over
+    whichever module the platform chose. What is left here is why the marker exists at all:
+    on this box the listener has no other way to reach a runner it did not keep a handle to.
+    `TerminateProcess` runs nothing in the target, `GenerateConsoleCtrlEvent` needs a console
+    the runner was deliberately spawned without (`DETACHED_PROCESS`, W0c), and there is no
+    SIGTERM to catch. A file is the whole channel, so the file has to behave under two
+    processes reaching for it at once — which is the ordinary case, not the exotic one: the
+    listener writes it from its poll thread while the runner stats it every tick.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_request_stop_is_atomic_and_idempotent(self):
+        """The slice's named test. Twenty threads asking at once leave one empty marker.
+
+        Idempotent because §5's `stop` is a button on a phone and the phone is held by
+        somebody who will press it again. Atomic because the reader is a different process
+        polling at `TICK` and existence is the entire message: there is no half-written state
+        for it to read, so a marker that is there is a stop that was asked for.
+        """
+        seen, errors = [], []
+        start = threading.Event()
+
+        def ask():
+            start.wait()
+            try:
+                session_win.request_stop(self.tmp)
+            except OSError as e:
+                errors.append(e)
+
+        def poll():
+            start.wait()
+            for _ in range(200):
+                try:
+                    seen.append(session_win.stop_requested(self.tmp))
+                except OSError as e:
+                    errors.append(e)
+
+        threads = [threading.Thread(target=ask) for _ in range(20)]
+        threads += [threading.Thread(target=poll) for _ in range(4)]
+        for t in threads:
+            t.start()
+        start.set()
+        for t in threads:
+            t.join(PATIENCE)
+
+        self.assertEqual(errors, [], "asking twice at once is an error the listener would hit")
+        self.assertTrue(session_win.stop_requested(self.tmp))
+        marker = os.path.join(self.tmp, session_win.STOP)
+        self.assertEqual(os.listdir(self.tmp), [session_win.STOP])
+        self.assertEqual(os.path.getsize(marker), 0,
+                         "the marker carries content, so an empty one could mean something")
+        # Once true it stays true: a poll that flickered would be a runner that read a stop
+        # and then went back to reading the terminal.
+        self.assertNotIn(False, seen[seen.index(True):] if True in seen else [])
+
+    def test_a_marker_from_another_process_is_seen(self):
+        """The two ends are two processes, and on this platform that is the only reason the
+        marker exists. A file written by this interpreter proves nothing about that."""
+        asked = subprocess.run(
+            [sys.executable, "-c",
+             "import sys, session_win; session_win.request_stop(sys.argv[1])", self.tmp],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            capture_output=True, timeout=PATIENCE)
+        self.assertEqual(asked.returncode, 0, asked.stderr)
+        self.assertTrue(session_win.stop_requested(self.tmp))
+
+    def test_a_marker_written_by_another_process_ends_a_live_conpty_session(self):
+        """The whole mechanism at once, on the real one: a child that would never stop, a
+        marker written by a process that is not this one, and a `pump` that comes back.
+
+        `TestTheStopMarker` drives this loop over a fake, and every branch of it is pinned
+        there. What a fake cannot be asked is the question this platform actually turns on —
+        whether a runner sitting in a ConPTY read notices the file at all. `ping -n 100` is a
+        session that is up and producing the odd line and going nowhere, which is what every
+        session the phone stops looks like; the assertion that it is still alive afterwards is
+        what says the marker ended the pump rather than the child ending on its own.
+        """
+        r = session.Runner("3f2a91", self.tmp, "beacon-3f2a", root=self.tmp,
+                           project="beacon", argv=[CMD, "/c", "rem"], log=lambda m: None)
+        r.begin()
+        pid, terminal = session_win.spawn([CMD, "/c", "ping -n 100 localhost"], self.tmp,
+                                          dict(os.environ), session.ROWS, session.COLS)
+        self.addCleanup(terminal.close)
+        transcript = session.Transcript(os.path.join(r.dir, session.TRANSCRIPT),
+                                        log=lambda m: None)
+        self.addCleanup(transcript.close)
+
+        asked = subprocess.Popen(
+            [sys.executable, "-c",
+             "import sys, time, session_win; time.sleep(float(sys.argv[2]));"
+             " session_win.request_stop(sys.argv[1])", r.dir, "1.0"],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.addCleanup(asked.wait)
+
+        began = time.time()
+        r.pump(terminal, transcript)
+        took = time.time() - began
+        self.assertTrue(r.stopping, "the pump came back without having seen a stop")
+        self.assertLess(took, PATIENCE, "the pump outlived the stop by more than a tick")
+        self.assertTrue(terminal.alive(), "the child ended on its own; the marker proved "
+                                          "nothing about a session that was still running")
+        self.assertTrue(session_win.terminate(pid, grace=2.0, terminal=terminal), "not ended")
+
+
+@unittest.skipUnless(WIN, "signal.SIGBREAK and the Windows signal set")
+class TestTheSignalsThatAreLeftOnWindows(unittest.TestCase):
+    """WINDOWS.md §4 and W3f: two of them, and only for a console the runner usually has not.
+
+    In service the runner is started with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`
+    (W0c), so no control event can reach it and the marker above is how it is stopped. These
+    handlers are for the other way it runs: `python session.py --foreground` in a console
+    somebody is watching, which is W3g's acceptance run and every hand-debug after it. Ctrl-C
+    there has to end the *session* — with `meta.json` left saying `ended` and claude actually
+    gone — rather than dropping a traceback over a record that still says `live`.
+
+    `SIGTERM` and `SIGHUP` are not in the list. `SIGHUP` does not exist here at all, and
+    `signal.SIGTERM` does exist but nothing can deliver it: Windows has no `kill(2)`, and
+    `os.kill(pid, SIGTERM)` is `TerminateProcess` in a trench coat — it ends the process
+    without running a handler, so registering one is a claim this module cannot keep.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.calls = []
+        # One object and not a bound method: `signal.getsignal` hands back what was installed,
+        # and `self.handler` would be a fresh bound method on every attribute access — so an
+        # identity assertion against it would fail for a handler that was installed correctly.
+        self.handler = lambda signum, frame: self.calls.append(signum)
+        previous = {sig: signal.getsignal(sig)
+                    for sig in (signal.SIGINT, signal.SIGBREAK, signal.SIGTERM)}
+        self.addCleanup(lambda: [signal.signal(s, h) for s, h in previous.items()
+                                 if h is not None])
+        self.before = previous
+
+    def test_it_catches_sigint_and_sigbreak_and_leaves_sigterm_alone(self):
+        session_win.catch_signals(self.handler)
+        self.assertIs(signal.getsignal(signal.SIGINT), self.handler)
+        self.assertIs(signal.getsignal(signal.SIGBREAK), self.handler)
+        self.assertIs(signal.getsignal(signal.SIGTERM), self.before[signal.SIGTERM],
+                      "SIGTERM was taken, and nothing on this platform can deliver one")
+
+    def test_the_handler_actually_runs(self):
+        """Installed is not the same as wired. `raise_signal` is the one way to ask that
+        question in-process: `os.kill(pid, CTRL_C_EVENT)` goes to the whole process group,
+        which here is the test runner."""
+        session_win.catch_signals(self.handler)
+        signal.raise_signal(signal.SIGINT)
+        self.assertEqual(self.calls, [signal.SIGINT])
+
+    def test_restore_puts_back_what_was_there(self):
+        """`run()` calls it from a `finally`, and a runner that left the interpreter without
+        its KeyboardInterrupt would be a hand-run console that cannot be quit."""
+        previous = session_win.catch_signals(self.handler)
+        session_win.restore_signals(previous)
+        self.assertIs(signal.getsignal(signal.SIGINT), self.before[signal.SIGINT])
+        self.assertIs(signal.getsignal(signal.SIGBREAK), self.before[signal.SIGBREAK])
+
+    def test_a_ctrl_c_in_a_foreground_run_ends_the_session(self):
+        """The two halves joined, which is what W3g's acceptance run does by hand: the
+        handler `session.Runner` installs is the one that sets `stopping`, so the loop ends
+        at the top of its next pass and `run()` goes on to `terminate` and the record."""
+        r = session.Runner("3f2a91", self.tmp, "beacon-3f2a", root=self.tmp,
+                           argv=[CMD, "/c", "rem"], log=lambda m: None)
+        previous = r._catch_signals()
+        self.addCleanup(r._restore_signals, previous)
+        self.assertFalse(r.stopping)
+        signal.raise_signal(signal.SIGINT)
+        self.assertTrue(r.stopping, "Ctrl-C in a --foreground run did not end the session")
 
 
 if __name__ == "__main__":

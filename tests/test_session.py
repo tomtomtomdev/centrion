@@ -56,6 +56,11 @@ FIXTURE = os.path.join(ROOT, "tests", "fixtures", "rc_startup.log")
 #: The link in the captured transcript. ULID-shaped, not a UUID (SPEC.md §9.5).
 CAPTURED = "https://claude.ai/code/session_01HJK2Lh42N7JbfMGExJkpTF"
 
+#: How long a test waits for something that should take a moment before calling it a failure.
+#: Long enough for a loop ticking at `session.TICK` to get several passes in on a busy box,
+#: short enough that a wedged run is a red suite rather than a coffee break.
+PATIENCE = 5.0
+
 
 def _silently_kill(pid):
     """Last resort cleanup for a process a test was supposed to have ended."""
@@ -285,9 +290,12 @@ class TestThePlatformSeam(unittest.TestCase):
         self.assertTrue(session_posix.Lock(os.path.join(tempfile.gettempdir(), "x")).take())
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        # The marker was W1a's no-op here and is W3f's mechanism on both platforms now: the
+        # Mac keeps SIGTERM *as well*, so `bot.py` on this side has two ways to say the same
+        # thing and the runner has one place that hears it. See TestTheStopMarker.
+        self.assertFalse(session_posix.stop_requested(d))
         session_posix.request_stop(d)
-        self.assertFalse(session_posix.stop_requested(d),
-                         "posix stops runners with SIGTERM; the marker is W3f's, not W1a's")
+        self.assertTrue(session_posix.stop_requested(d))
 
 
 #: WINDOWS.md W0a: the same startup captured through ConPTY on the Windows box. ConPTY does
@@ -1506,10 +1514,19 @@ class FakeTerminal:
     a dead terminal is not the end of the session until one more read has come back empty too.
     """
 
-    def __init__(self, chunks=(), tail=(), gap=0):
+    def __init__(self, chunks=(), tail=(), gap=0, forever=False):
         self.chunks = list(chunks)
         self.tail = list(tail)
         self.gap = gap
+        # W3f: a session that is up and waiting for its human, which is every session the
+        # phone ever stops. Running out of chunks is how the others end, and a terminal that
+        # ends on its own can say nothing about the mechanism that ends the ones that do not.
+        #
+        # Not actually forever: after PATIENCE it gives up and reports itself finished, so a
+        # `pump` that never notices the marker *fails* the test rather than wedging the suite.
+        # A hanging test says nothing about what is wrong; this one says which assertion.
+        self.forever = forever
+        self.deadline = None
         self.written = bytearray()
         self.reads = 0
         self.closed = False
@@ -1523,10 +1540,18 @@ class FakeTerminal:
             return b""
         if self.tail:
             return self.tail.pop(0)
+        if self.forever:
+            time.sleep(timeout)     # a real Terminal.read waits out its deadline before b""
         return b""
 
     def alive(self):
-        return bool(self.chunks)
+        if self.chunks:
+            return True
+        if not self.forever:
+            return False
+        if self.deadline is None:
+            self.deadline = time.monotonic() + PATIENCE
+        return time.monotonic() < self.deadline
 
     def write(self, data):
         self.written += data
@@ -1691,6 +1716,140 @@ class TestPumpOverATerminal(unittest.TestCase):
         term = FakeTerminal([b"x"])
         self.drive(term)
         self.assertFalse(term.closed)
+
+
+class TestTheStopMarker(unittest.TestCase):
+    """WINDOWS.md W3f: how a listener asks a runner to stop where it cannot signal it.
+
+    On the Mac `stop` is a SIGTERM and the runner catches it (§9.10). Windows has no
+    catchable signal one process can send another: `TerminateProcess` runs no handler, and a
+    console control event needs a console the detached runner does not have. SPEC.md §2
+    already has these two processes talking only through files, so the stop is one more file
+    — the listener creates it in the session directory, the runner sees it on its next tick.
+
+    Both platforms honour it, and that is a decision rather than a side effect. The Mac keeps
+    SIGTERM as well, so nothing about `bot.py` on that side has to change; what the marker
+    buys there is that the runner has **one** place that hears a stop and this file has one
+    set of tests over it, on the box where the mechanism is real and on the box where it is
+    not. A marker-shaped stop that only ran on Windows would be tested only on Windows.
+
+    The case these tests exist for is the ordinary one and it is easy to miss: a live session
+    is a terminal that is *not* finishing. Every other test in this file drives a terminal
+    that runs out — the chunks end, `alive()` goes false, `pump` returns because the child
+    died. A session the phone stops is one that would have sat there all day, so `forever` is
+    the shape of terminal that matters here.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.sessions = os.path.join(self.tmp, "sessions")
+        self.root = os.path.join(self.tmp, "Projects")
+        self.work = os.path.join(self.root, "beacon")
+        os.makedirs(self.sessions)
+        os.makedirs(self.work)
+
+    def runner(self, **kw):
+        r = session.Runner("3f2a91", self.work, "beacon-3f2a", root=self.sessions,
+                           project="beacon", projects_root=self.root,
+                           argv=["/bin/true"], log=lambda m: None, **kw)
+        r.begin()
+        return r
+
+    def transcript(self, r):
+        t = session.Transcript(os.path.join(r.dir, session.TRANSCRIPT), log=lambda m: None)
+        self.addCleanup(t.close)
+        return t
+
+    def test_the_marker_is_seen_by_the_call_that_asks_for_it(self):
+        """The whole protocol, on whichever platform this is running on."""
+        d = tempfile.mkdtemp(dir=self.tmp)
+        self.assertFalse(session.procs.stop_requested(d))
+        session.procs.request_stop(d)
+        self.assertTrue(session.procs.stop_requested(d))
+
+    def test_asking_twice_is_asking_once(self):
+        """§5's `stop` is retried by a human with a phone in their hand."""
+        d = tempfile.mkdtemp(dir=self.tmp)
+        session.procs.request_stop(d)
+        session.procs.request_stop(d)
+        self.assertTrue(session.procs.stop_requested(d))
+
+    def test_one_session_is_not_stopped_by_another_sessions_marker(self):
+        # The marker is in the session directory, not in `var/`, because `stop` names a
+        # session and two can be live at once.
+        one, two = tempfile.mkdtemp(dir=self.tmp), tempfile.mkdtemp(dir=self.tmp)
+        session.procs.request_stop(one)
+        self.assertFalse(session.procs.stop_requested(two))
+
+    def test_stop_marker_ends_pump(self):
+        """The slice's named test: a session that would never end, ended, and `ended` on disk.
+
+        End to end through `run()` rather than `pump` alone, because the state the phone is
+        told is the point — a stopped session is `ended`, the same as one that finished on
+        its own, and not `failed`.
+
+        `assertTrue(term.alive())` is the assertion that makes this test about the marker,
+        and it is here because the first version of it was not: with the terminal's patience
+        as the only bound, a `pump` that ignored the marker outright still reached `ended`,
+        five seconds later, by way of the fake giving up. Every other claim below was true of
+        that run too. What says the stop did it is that the terminal was still live when
+        `run` came back.
+        """
+        r = self.runner()
+        term = FakeTerminal([("here %s\r\n" % CAPTURED).encode()], forever=True)
+        asked = threading.Timer(0.3, session.procs.request_stop, [r.dir])
+        self.addCleanup(asked.cancel)
+        asked.start()
+        with mock.patch.object(session, "spawn", return_value=(4242, term)), \
+                mock.patch.object(session, "terminate", return_value=True):
+            state = r.run()
+        self.assertTrue(term.alive(), "the session ended on its own, not because of the stop")
+        self.assertEqual(state, session.ENDED)
+        meta = session.read_meta(r.dir)
+        self.assertEqual(meta["state"], session.ENDED)
+        self.assertEqual(meta["url"], CAPTURED)
+
+    def test_a_marker_that_is_already_there_is_honoured_before_the_first_read(self):
+        """A stop that arrives while the runner is still starting must not cost a tick of
+        reading — and must not be missed because the check is at the bottom of the loop."""
+        r = self.runner()
+        session.procs.request_stop(r.dir)
+        term = FakeTerminal([b"a"] * 10, forever=True)
+        r.pump(term, self.transcript(r))
+        self.assertEqual(term.reads, 0, "it read the terminal after being told to stop")
+
+    def test_a_session_that_never_goes_quiet_is_still_stoppable(self):
+        """The check is per tick and not per idle tick, which is not the same thing.
+
+        A build running under a live session produces a chunk every time it is asked, so an
+        implementation that only looks for the marker when a read came back empty would stop
+        every session except the busy ones — and the busy one is what somebody reaches for
+        `stop` about. The terminal here never once answers empty.
+        """
+        r = self.runner()
+        term = FakeTerminal([b"noise\r\n"] * 10000, forever=True)
+        original = term.read
+
+        def read(timeout=0.0):
+            if term.reads == 5:
+                session.procs.request_stop(r.dir)
+            return original(timeout)
+
+        term.read = read
+        r.pump(term, self.transcript(r))
+        self.assertLess(term.reads, 20, "it never looked for the marker while output lasted")
+
+    def test_being_stopped_is_not_a_failure_to_scrape(self):
+        """A session stopped before it ever produced a link is still `failed` — the marker
+        does not change what §4.6 means, it only ends the loop."""
+        r = self.runner()
+        session.procs.request_stop(r.dir)
+        term = FakeTerminal(forever=True)
+        with mock.patch.object(session, "spawn", return_value=(4242, term)), \
+                mock.patch.object(session, "terminate", return_value=True):
+            self.assertEqual(r.run(), session.FAILED)
+        self.assertTrue(term.alive(), "the session ended on its own, not because of the stop")
 
 
 @posix_only

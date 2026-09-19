@@ -286,6 +286,36 @@ which is the flag today's signal handler sets. `SIGINT` from a hand-run `--foreg
 still works, because `signal.signal(SIGINT)` exists on Windows — keep that one, drop `SIGTERM`
 and `SIGHUP`. Also handle `CTRL_BREAK_EVENT` the same way for tidiness; it costs one line.
 
+*W3f: done, as written, with two things the plan said in passing and one it had backwards.*
+
+**The marker is checked on every pass of the loop and not only on an idle one**, and those
+are not the same thing — "each tick" above reads like the second. A session running a build
+answers every read with a chunk, so a check that only fires when a read came back empty stops
+every session except the busy ones, and the busy one is what somebody reaches for `stop`
+about. The cost of doing it properly was the open question and it is answered: the `stat` is
+**5.7µs**, about a fifth of a pass of `pump` over a fake terminal that does no other work and
+a far smaller share of a real one, which also reads a pseudoconsole and writes to disk. An
+idle session pays it five times a second. Nothing needs throttling, and
+`test_a_session_that_never_goes_quiet_is_still_stoppable` is the case that says so.
+
+**`SIGTERM` is dropped for a stronger reason than "Windows does not have it".** It does have
+it — `signal.SIGTERM` exists and `signal.signal` accepts it — which is what makes it a trap:
+the handler registers and then is never run, because there is no `kill(2)` here and
+`os.kill(pid, SIGTERM)` is `TerminateProcess`, which ends the target without running anything
+in it. A handler for it would be a promise nothing can call in, and *that* is the reason
+`stop` is a file rather than a signal in the first place. `SIGHUP` is the plain case: it does
+not exist on this platform at all. What is left is `SIGINT` and `SIGBREAK`, and they are for
+the runner's other life — `--foreground` in a console somebody is watching, which is W3g's
+acceptance run and every hand-debug after it. In service, `DETACHED_PROCESS` (§6) means the
+runner has no console to be interrupted from, so it installs two handlers that are never
+called and the marker is the whole of how it is stopped.
+
+**POSIX honours the marker too**, which the slice text had as a convenience for the tests and
+is really the point of it: the runner then has **one** place where a stop is heard rather than
+one per platform, and `TestTheStopMarker` runs on both boxes. The Mac keeps `SIGTERM` as well,
+because it is what `bot.py` sends there and because a runner that is anywhere other than
+`pump` hears only that.
+
 **`detach()`** — nothing to do in the runner. The listener detaches it at spawn (§6).
 `detach()` becomes a no-op on Windows so `main()` is unchanged.
 
@@ -858,6 +888,26 @@ optional.
 - Run: none.
 - Test: both platforms.
 
+*W3f: done.* The green is the line above, and the marker half of it was already sitting in
+`session_win.py` — `request_stop` and `stop_requested` shipped as two lines in W1c, so five of
+the thirteen new tests were green before the slice and were checked the way W3a's and W3c's
+were, by mutation. Disabling either function fails nine of the ten stop tests; the tenth
+asserts a *negative* (one session's marker does not stop another) and is right to survive.
+Swapping the append for `os.O_CREAT | os.O_EXCL` — which is what `bot.claim()` does one file
+away, so it is the plausible mistake rather than an invented one — fails the two idempotence
+tests. **One mutation survives everything: `"ab"` → `"wb"`.** Nothing pins the append, because
+the marker is empty and nothing ever writes to it, so truncating and creating are the same
+act; it is left as an append against the day something does, and this sentence is the record
+that the choice is unguarded.
+
+The slice's own named test had to be repaired before it meant anything, and the repair is the
+part worth keeping. `FakeTerminal(forever=True)` gives up after `PATIENCE` so that a `pump`
+which never sees the marker *fails* rather than wedging the suite — and that safety valve is
+also a way to pass: with the marker disabled, `test_stop_marker_ends_pump` still reached
+`ended`, five seconds late, by way of the fake finishing on its own. Every assertion it made
+was true of that run. `assertTrue(term.alive())` after `run()` returns is what makes it a test
+about the stop, and the mutation is the only thing that would have found that.
+
 **W3g — `child_env` on Windows, and the real thing.**
 - Red: `test_child_env_win_keeps_windows_essentials` — `SYSTEMROOT`, `COMSPEC`, `APPDATA`,
   `LOCALAPPDATA`, `USERPROFILE`, `TEMP`, `PATH` survive; `CLAUDE_*` and the hazard list do
@@ -1019,7 +1069,7 @@ the Mac when the slice touched shared or posix code.
 | W3c command-line quoting | done · Mac pending | 2026-09-17 | 8e8f032 | **539 ran: 470 pass, 68 skip, 1 xfail**, 22.7s · **not run** | **The quoting was already right; the count of places doing it was wrong.** `spawn` needed no change — a prompt carrying `"`, `^`, `%`, `&`, `\|`, `<`, `>` and a trailing backslash comes back byte-for-byte, and so do an empty argument, a bare quote, doubled backslashes and a non-ASCII string. So the eight new tests were checked by mutation instead of by a green run: with `subprocess.list2cmdline` replaced by `" ".join`, **six of the eight fail**, and the two survivors are the two that do not route through it — `test_a_program_path_with_a_space_is_still_one_program` (that quoting is pywinpty's, not ours) and `test_no_prompt_means_no_prompt_flag` (no argument with a space in it). §9's ritual and §11's rule are amended: a slice that is green at step 1 mutates rather than skipping ahead, and the row says which tests did *not* fail. **The find is a second quoting hop nobody had written down.** §4 had ConPTY; `Sessions.start`'s `Popen` does exactly the same flattening on Windows, because there is no `execve` to hand a list to — so a prompt off a phone is joined and re-split *twice* here against zero times on the Mac, and `bot.py`'s comment at that spawn asserted the opposite in as many words ("no quoting rules to get wrong when there is nothing to quote for"). True of `execve`, false of `CreateProcess`; §6 and the comment now say which. Nothing was broken and no behaviour changed — `list2cmdline` is what `Popen` already used — but the hop had no test on this platform and the documentation pointed the wrong way. Hand-run (the slice said "Run: none"; the two claims in that comment were worth seeing): `C:\dir\` leaves hop 1 as `"…C:\dir\\"`, backslash doubled before the closing quote, and both a plain child and a ConPTY child parse back the identical string — that doubling is the whole reason `--trust` still exists at the far end, which is the case the twin test pins at fifteen argv elements. Suite time doubled, 11.5s → 23.3s: the four new ConPTY tests spawn real interpreters, and an interpreter's first byte under a fresh ConPTY is the slowest thing in this suite. **One open item, honestly unresolved:** one run in the first four errored (`errors=1`) and the name was lost — that command kept only the last three lines of output. It has not come back in **34 consecutive runs since, 24 idle and 10 under four spinners**, which is the load W3b's flake needed. Every run since keeps its whole output (`scratch\w3c_flake.sh`, `scratch\w3c_flake_loaded.sh`, beside `w3c_mutate.py` and `w3c_handrun.py`), so the next occurrence names itself; until then this is an unidentified ~3% error, not a green suite, and W3d should re-read this row before trusting a single clean run. +8 tests, no skip count change. Mac: not run — see Pending. |
 | W3d `pump` without `select` | done · Mac pending | 2026-09-18 | 0937950 | **559 ran: 484 pass, 74 skip, 1 xfail**, 21.8s · **not run** | **The loop went where the plan said; what moved with it was a question that used to have one answer.** `pump` now calls `terminal.read(TICK)` and nothing platform-shaped: the `select` that was its first statement is the first statement of `session_posix.Terminal.read`, `spawn` returns a `Terminal` on both sides, and `Terminal` joined the seam's `SURFACE`. **`read` and `alive` are two questions now, and they do not mean the same thing on the two platforms** — on a pty EIO is the end of the output *and* of the session, so the old loop broke on either; ConPTY separates them, so `session_posix.alive()` is about the *terminal* (the flag set when the pty hangs up) and `session_win.alive()` is about the *process* (`pty.isalive()`). Both answer the only question `pump` asks, and **neither is a substitute for `_reaped()` or `procs.alive(pid)` — W3e and W4a should read that sentence before reaching for `alive`.** Second find: **the drain after the terminal finishes has to go past the scraper, not just into the transcript.** The obvious version appends the dead child's last chunk to `pty.log` and leaves, which loses a *link* arriving in it — reachable on Windows, where output outlives the child (W3b) — so both callers go through one `Runner.absorb` and `test_a_link_in_the_tail_still_goes_live` is the case. Third, measured rather than assumed: **a session's end costs two `TICK`s** — 0.401s of a 0.432s `pump` over `cmd /c echo`, one ordinary poll then the drain, against 0.031s of reading the child (`scratch\w3d_exitcost.py`). Paid after `live` is recorded, so only a `failed` session's tail waits on it; left at `TICK` because shortening it trades 0.2s against the text §4.6 exists to deliver. Run step: the W0a capture gives the same single link at chunk sizes 1, 7, 64, 512, 4096 and whole — unchanged, as predicted — and the new pump over a real ConPTY reached `live` with the URL in `meta.json` and the link in `pty.log` (`scratch\w3d_handrun.py`). `READ_SIZE` moved to `session_posix.py` with the `os.read` that wants it; `session.py` no longer imports `select` or `errno`. **W3c's open ~3% error did not recur**: 20 consecutive clean runs of the full suite after the green, plus the red and green runs themselves — it stays open and unidentified, and `scratch\w3d_flake.sh` keeps the whole output of any run that is not OK. +20 tests (12 portable over a fake `Terminal`, 6 posix over a real pty, 3 Windows over a real ConPTY), skips 68 → 74 — the six new posix ones, which is the whole of the change. Mac: not run — see Pending. |
 | W3e Job Object and `terminate` | done · Mac pending | 2026-09-19 | c00371b | **572 ran: 497 pass, 74 skip, 1 xfail**, 31.8s · **not run** | **Two sentences in the plan were true about the outcome and wrong about the mechanism, and one of them made a flag look optional.** The Ctrl-C is not a `CTRL_C_EVENT` — nothing turns it into one; it goes to whatever reads the console, so it reaches claude and reaches nothing else (`cmd`, `ping`, a sleeping python: two each, all three carry on). So `terminate` waits on the **job being empty** and not on the pid, because the ordinary session — claude exits 0 in a second, its dev server does not — is precisely what a pid-shaped wait calls finished. And `KILL_ON_JOB_CLOSE`, first left out on the grounds that a dropped handle should not end a session by accident, went back in once measured: a hard-killed runner loses claude within 0.5s regardless (the pseudoconsole, not the job), so the accident was already unavoidable and the flag's only actual effect was the grandchild it was leaving alive. `terminate` gained a `terminal` argument on both platforms — the Mac ignores it — because neither the Ctrl-C nor the job is reachable from a pid. Eleven tests in `TestEndingTheSessionAndItsTree`, all against real trees; two portable ones in `test_session.py` for the seam and for `run`'s ordering. `psutil` arrives a slice early (§`requirements-win.txt` says why). |
-| W3f stop marker | todo | | | | |
+| W3f stop marker | done · Mac pending | 2026-09-19 | | **586 ran: 511 pass, 74 skip, 1 xfail**, 35.3s · **not run** | **The plan's "each tick" was the sentence to get right, and `SIGTERM` is dropped for the opposite of the obvious reason.** A check that only looks for the marker on an *idle* tick stops every session except the ones producing output, which is the session `stop` is for; so it is checked on every pass, and the cost that made that look expensive is 5.7µs of `stat` against a 23.6µs pass of `pump` over a fake terminal doing nothing else — five a second on an idle session, and a smaller share of any real one. No throttle. `SIGTERM` is not absent on Windows, it is *undeliverable*: `signal.signal(SIGTERM)` is accepted and `os.kill(pid, SIGTERM)` is `TerminateProcess`, so a handler registers and can never run — which is the actual reason `stop` is a file. Left: `SIGINT` and `SIGBREAK`, for `--foreground` only; in service `DETACHED_PROCESS` means there is no console to interrupt from. POSIX honours the marker now as well, so the runner has one place that hears a stop and the tests are one set. Mutation, for the five tests green before the slice (`request_stop`/`stop_requested` shipped in W1c): disabling either fails 9 of the 10 stop tests, the survivor being the one asserting a negative; `O_CREAT\|O_EXCL` instead of the append fails the two idempotence tests; **`"ab"` → `"wb"` is caught by nothing** — the marker is empty, so nothing pins the append. And the mutation found a real hole in the slice's own named test: `FakeTerminal(forever=True)`'s patience let `test_stop_marker_ends_pump` reach `ended` five seconds late with the marker disabled entirely. `assertTrue(term.alive())` is the assertion that makes it about the stop. |
 | W3g `child_env`, runner acceptance run | todo | | | | time to link: |
 | W3h `Trust` carries a partial escape | red | 2026-09-14 | d6701b9 | | red test exists as an `expectedFailure`; fails at chunk sizes 64, 16, 1; passes at 128+ |
 | W4a `alive`/`started` via psutil | todo | | | | |
@@ -1082,6 +1132,11 @@ verified until then, and W1c's first Windows-green run is not a substitute.
 | W3e | the runner-death measurement, twice | The plan said "none beyond the tests", and this is the one that earned its place: a stub runner holding a real ConPTY and a real job, hard-killed with `psutil.Process.kill()`. **Without `KILL_ON_JOB_CLOSE`:** runner gone, claude gone within 0.5s, grandchild alive at +5s. **With it:** all three gone by +0.5s. The first half is why the flag was thought unnecessary and the second is why it is not, and neither was knowable from the API docs. Kept as a test. |
 | W3e | `.venv\Scripts\python -m unittest -q` | **572 ran: 497 pass, 74 skip, 1 xfail**, 31.8s. Twelve more than W3d and no change to the skip count — every new test runs on this platform. The Mac's number is W3d's until somebody runs it. |
 | W3e | not run on the Mac | `session.py` and `session_posix.py` both changed: `terminate` takes a fourth argument there too and ignores it. The portable `test_terminate_forwards_the_terminal_the_session_was_read_through` and `test_the_terminal_is_handed_to_terminate_and_closed_after_it` are what the Mac run has to answer, plus the hand-run W3d already asks for. Recorded as debt, like every slice since W1a. |
+| W3f | `/usr/bin/python3 -m compileall -q .` | clean — 3.9. Nothing in the slice reaches past it (a `for` over a dict, a `getattr` with a default), and the Mac is still the only interpreter that can say so. |
+| W3f | `/usr/bin/python3 -m unittest -q` | green, and **seven newly skipped against seven newly run**. `TestTheStopMarker` (7) is portable and must run there — it is the whole of the loop half of this slice, and the marker exists on the Mac precisely so that it does. `TestTheStopMarkerOnWindows` (3) and `TestTheSignalsThatAreLeftOnWindows` (4) are `skipUnless(WIN)`. The count is W3e's plus 14. |
+| W3f | `TestThePlatformSeam::test_the_posix_no_ops_answer_as_the_mac_needs`, watched | it now asserts the **opposite** of what W1a wrote there: `request_stop` makes the marker and `stop_requested` finds it. That line is the only Mac-side assertion this slice inverts, and it is the one to read if the Mac run is not green. |
+| W3f | `python3 session.py --foreground --cwd <project> --name w3f`, then `touch var/sessions/<sid>/stop` from another terminal | the session ends within a tick and `meta.json` says `ended` — the Mac's first stop that is not a signal. Then the same run again ended with Ctrl-C, which must still work: `session_posix.catch_signals` is untouched and `SIGTERM`/`SIGHUP` are still caught there. |
+| W3f | nothing changed in `bot.py` | the Mac's `Sessions.stop` still sends `SIGTERM` and never writes a marker; W4b is where the listener learns to ask the other way. Named here so the row is not mistaken for an omission — the marker is reachable on the Mac today only by hand. |
 
 ### Decisions changed by evidence
 

@@ -3,8 +3,8 @@
 
 Slice W1c made this a stub with the whole surface, so that `import session` and `import bot`
 succeed on Windows and the portable tests run natively here. What is not built yet still
-raises NotImplementedError naming the slice that fills it in — W3f (the signal half of the
-stop marker) and W4 (the listener: `alive`, `started`, the mutex). A stub that returned
+raises NotImplementedError naming the slice that fills it in — W4 (the listener: `alive`,
+`started`, the mutex). A stub that returned
 plausible values instead would let a runner get as far as writing `starting` before failing,
 which is the phone waiting out forty-five seconds for nothing; failing at the first call is
 the honest version.
@@ -25,11 +25,18 @@ that `CREATE_BREAKAWAY_FROM_JOB` is refused under Task Scheduler and unnecessary
 are `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` — and `request_stop`/`stop_requested`, which
 are two lines over a marker file and have no reason to wait.
 
+Slice W3f finished that last pair off at the runner's end and settled what is left of signals
+here. `Runner.pump` polls the marker every tick on both platforms, and `catch_signals` takes
+`SIGINT` and `SIGBREAK` and nothing else: `SIGHUP` does not exist here, and `SIGTERM` cannot be
+delivered to another process without also killing it outright, which is the reason `stop` is a
+file rather than a signal in the first place.
+
 Dependencies: pywinpty (`Terminal`, from W3b), pywin32 (the Job Object, W3e) and psutil
 (`_reaped` here, `alive`/`started` in W4a) — `requirements-win.txt`. The imports are inside
 the functions that need them, so the module still loads on a bare interpreter.
 """
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -581,7 +588,14 @@ class Lock:
 
 
 def request_stop(directory):
-    """Ask the runner in `directory` to stop: create the marker. Idempotent."""
+    """Ask the runner in `directory` to stop: create the marker. Idempotent.
+
+    `"ab"` rather than `"wb"`: opening for append creates the file if it is not there and
+    touches nothing if it is, so two listeners — or one listener and the human pressing `stop`
+    a second time — cannot truncate each other. Nothing is ever written to it. Existence is
+    the entire message, which is also what makes it atomic for the reader: there is no
+    half-written state for a runner polling at `TICK` to find.
+    """
     with open(os.path.join(directory, STOP), "ab"):
         pass
 
@@ -593,9 +607,36 @@ def stop_requested(directory):
 
 def catch_signals(handler):
     """SIGINT and CTRL_BREAK_EVENT for a hand-run console; stops otherwise arrive by marker.
-    W3f."""
-    _later("W3f")
+    W3f.
+
+    Two of the Mac's three are gone, and for different reasons. `SIGHUP` does not exist on
+    this platform at all. `signal.SIGTERM` does exist, and registering a handler for it would
+    be a claim this module cannot keep: there is no `kill(2)` here, and `os.kill(pid, SIGTERM)`
+    is `TerminateProcess` — the target is ended without running anything, so a handler would
+    be a promise nothing can call in. That is the whole reason `stop` is a file (§4).
+
+    What is left is for the runner's *other* life, `python session.py --foreground` in a
+    console somebody is watching — W3g's acceptance run, and every hand-debug after it. Ctrl-C
+    there has to end the session the way a `stop` does, with `terminate` run and `meta.json`
+    left truthful, rather than dropping a traceback over a record that still says `live`. In
+    service the runner is spawned `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` (W0c) and has
+    no console to be interrupted from, so in service this installs two handlers that are never
+    called and the marker is what ends the session.
+    """
+    previous = {}
+    for sig in (signal.SIGINT, getattr(signal, "SIGBREAK", None)):
+        if sig is None:
+            continue                 # SIGBREAK is Windows-only; this module still imports on the Mac
+        try:
+            previous[sig] = signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass          # not the main thread; the caller's finally clause still cleans up
+    return previous
 
 
 def restore_signals(previous):
-    _later("W3f")
+    for sig, handler in (previous or {}).items():
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
