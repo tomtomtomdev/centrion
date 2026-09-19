@@ -1683,6 +1683,30 @@ class TestTheListenerUsesThePlatformSeam(unittest.TestCase):
                 self.assertFalse(self.sessions.alive(self.record(runner_pid=bad)), repr(bad))
         alive.assert_not_called()
 
+    def test_a_record_with_no_start_time_is_trusted_to_the_pid_alone(self):
+        """W4a, the portable twin of the posix real-process test of the same property.
+
+        §3 writes `started` on every record, so a record without a usable one is corrupt —
+        and of the two ways to be wrong, showing a session that may not exist is recoverable
+        and hiding one that does is not. The platform is not asked at all in that case, which
+        is the half a real-process test cannot show: `ps` and `psutil` would both answer.
+        """
+        with mock.patch.object(bot.procs, "alive", return_value=True), \
+             mock.patch.object(bot.procs, "started") as started:
+            self.assertTrue(self.sessions.alive({"runner_pid": 4242}))
+            for bad in (None, True, "1000", [], 1 + 0j):
+                self.assertTrue(self.sessions.alive({"runner_pid": 4242, "started": bad}),
+                                repr(bad))
+        started.assert_not_called()
+
+    def test_a_pid_the_platform_cannot_date_is_left_alive(self):
+        """The other half of the same branch: the pid answered a moment ago and the platform
+        will not say when it began. `ps` losing a race and psutil's `AccessDenied` are the
+        same answer — `None` — and neither is evidence that the runner is gone."""
+        with mock.patch.object(bot.procs, "alive", return_value=True), \
+             mock.patch.object(bot.procs, "started", return_value=None):
+            self.assertTrue(self.sessions.alive(self.record()))
+
     def test_process_started_is_the_platforms(self):
         self.assertIs(bot.process_started, bot.procs.started)
 

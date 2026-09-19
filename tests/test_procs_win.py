@@ -31,7 +31,14 @@ BREAKAWAY = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
 
 
 def pid_alive(pid):
-    """`tasklist` says whether a pid is there. No psutil yet — that is W4a."""
+    """`tasklist` says whether a pid is there.
+
+    W4a gave `session_win` a `psutil.pid_exists` and this stayed a subprocess, on purpose: the
+    tests below are about whether a *detached child survives*, and answering that with the
+    same library the program uses would verify one mechanism with another one that has not
+    been checked either. `tasklist` is the outside opinion. The class W4a added at the end of
+    this file is where `procs.alive` itself is on trial, and it uses psutil.
+    """
     out = subprocess.check_output(["tasklist", "/FI", "PID eq %d" % pid, "/NH"],
                                   stderr=subprocess.DEVNULL, text=True)
     return str(pid) in out
@@ -98,6 +105,132 @@ class TestADetachedChildOutlivesItsParent(unittest.TestCase):
         plausible commit message."""
         self.assertNotEqual(BREAKAWAY, 0, "the constant should exist on this Python")
         self.assertFalse(DETACH_FLAGS & BREAKAWAY)
+
+
+@unittest.skipUnless(WIN, "psutil against real Windows processes")
+class TestWhetherARunnerIsStillThereOnWindows(unittest.TestCase):
+    """The Windows half of `test_bot.py::TestWhetherARunnerIsStillThere`. WINDOWS.md §6, W4a.
+
+    That class is `@posix_only` because every one of its mechanisms is the Mac's: `/bin/sleep`,
+    `/usr/bin/true`, `kill(pid, 0)`, `EPERM`, `ps lstart`. The *properties* it asserts are not
+    the Mac's, and they are what `ls`, `stop` and the reconciliation pass are built on — so
+    they are tested three ways now. The branches bot.py takes without asking the platform have
+    portable twins over a fake `procs` (`TestTheListenerUsesThePlatformSeam`); the two that are
+    the platform have this class, against real processes, and the Mac's original against its.
+
+    §6 is explicit that this guard does *more* work here than on the Mac: Windows hands a freed
+    pid back within seconds, where macOS walks a 99999-wide range before wrapping. So the
+    reused-pid case below is the one to read if this file ever goes red.
+    """
+
+    def child(self):
+        """A process that will be there for the length of a test, and is cleaned up after.
+
+        Holding the `Popen` also holds the process handle, which is what stops Windows handing
+        the pid to somebody else while a test is still asking about it.
+        """
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)
+        return p
+
+    def exited(self):
+        """A pid whose process has run and finished. The Windows `/usr/bin/true`."""
+        p = subprocess.Popen([sys.executable, "-c", ""], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        p.wait()
+        return p.pid
+
+    def test_alive_true_for_running_false_after_exit(self):
+        import session
+        self.assertTrue(session.procs.alive(self.child().pid))
+        self.assertFalse(session.procs.alive(self.exited()))
+
+    def test_started_matches_create_time(self):
+        import psutil
+        import session
+        before = time.time()
+        p = self.child()
+        after = time.time()
+        began = session.procs.started(p.pid)
+        self.assertIsNotNone(began)
+        self.assertEqual(began, psutil.Process(p.pid).create_time())
+        # Not only self-consistent: it has to be in epoch seconds on the same clock the
+        # record's `started` is written from, or PID_REUSE_SLACK compares two calendars.
+        self.assertGreaterEqual(began, before - 2)
+        self.assertLessEqual(began, after + 2)
+
+    def test_a_pid_that_is_not_there_has_no_start_time(self):
+        import session
+        self.assertIsNone(session.procs.started(self.exited()))
+
+    def test_a_pid_that_is_not_one_is_answered_rather_than_raised(self):
+        """Parity with `session_posix`, which catches `OverflowError` in `alive` and guards
+        `started` with an `int()`. The listener's type check means neither is reachable from
+        `Sessions.alive`, but `procs` is a seam and the two sides have to answer alike."""
+        import session
+        self.assertFalse(session.procs.alive(2 ** 62))
+        for bad in ("4242", None, 2 ** 62, -1):
+            self.assertIsNone(session.procs.started(bad), repr(bad))
+
+    def test_the_system_process_is_there_and_dates_from_before_every_record(self):
+        """§6's Windows shape of `EPERM is not death`, and the shape is not the one it predicted.
+
+        Pid 4 is System: it exists and it is not ours, so `alive` has to say it is there — the
+        twin of the Mac asserting pid 1 is alive. What §6 expected of `started` was
+        `AccessDenied`, and W4a measured otherwise: psutil answers **0.0** for pids 0 and 4,
+        which is the epoch and not the boot time. It is therefore not `None`, so §4's `began is
+        None` branch never sees it, and `0.0 <= record["started"] + PID_REUSE_SLACK` is true of
+        every record that could ever exist — a corrupt record naming pid 4 reads as a live
+        runner. The Mac has the same property for pid 1 by a different route (launchd's real
+        start time is boot, which is older than any record), which is why this is recorded as
+        a shared shape rather than patched here.
+
+        Asserted as "no later than boot" rather than as `0.0` so that a psutil which starts
+        returning the real boot time for these two pids passes: that would be a better answer
+        to the same question, and bot.py cannot tell the two apart.
+        """
+        import psutil
+        import session
+        self.assertTrue(session.procs.alive(4))
+        began = session.procs.started(4)
+        self.assertIsNotNone(began)
+        self.assertLessEqual(began, psutil.boot_time())
+
+    def test_nothing_on_this_box_refuses_to_say_when_it_started(self):
+        """The measurement behind the sentence above, kept as a test. W4a.
+
+        `create_time` needs only `PROCESS_QUERY_LIMITED_INFORMATION`, which this account has
+        for every process on the machine — 0 of 208 raised `AccessDenied` at W4a, including
+        the 109 whose *owner* psutil could not read. So the `AccessDenied` handler in
+        `session_win.started` is insurance rather than a path anything exercises, and this is
+        what would notice if that stopped being true: a Windows or psutil release that tightens
+        the access check turns a whole class of pid into "cannot date it", and §4's `began is
+        None` branch — which would then be load-bearing — has never run outside a fake.
+        """
+        import psutil
+        import session
+        denied = [p.pid for p in psutil.process_iter()
+                  if session.procs.started(p.pid) is None and psutil.pid_exists(p.pid)]
+        self.assertEqual(denied, [])
+
+    def test_the_listener_trusts_a_live_pid_and_refuses_a_reused_one(self):
+        """End to end through `Sessions.alive`, which is the only caller either function has.
+
+        The three cases the Mac's class covers with `/bin/sleep`: a runner that is there, a
+        record that predates the process at its pid, and a record with no `started` at all.
+        """
+        import bot
+        sessions = bot.Sessions(root=os.path.join(os.environ["TEMP"], "centrion-w4a"),
+                                log=lambda *_: None)
+        p = self.child()
+        self.assertTrue(sessions.alive({"runner_pid": p.pid, "started": int(time.time())}))
+        self.assertFalse(sessions.alive({"runner_pid": p.pid, "started": 1}))
+        self.assertTrue(sessions.alive({"runner_pid": p.pid}))
+        self.assertFalse(sessions.alive({"runner_pid": self.exited(),
+                                         "started": int(time.time())}))
 
 
 if __name__ == "__main__":

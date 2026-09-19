@@ -559,13 +559,66 @@ def _kill(pid, log):
 
 
 def alive(pid):
-    """psutil.pid_exists. W4a."""
-    _later("W4a")
+    """Does *something* answer to this pid? The first half of bot.py's §4 check. W4a.
+
+    `psutil.pid_exists` where the Mac has `kill(pid, 0)`, and the two draw the same line in
+    different words: it opens the process for the least access Windows will grant and asks
+    whether it has exited, so a process that belongs to somebody else reads as *there* — which
+    is exactly what `session_posix.alive` means by counting EPERM as alive (§9.11). What it
+    cannot say, on either platform, is whether that something is the runner the record was
+    written about; `started` below is the half that answers it, and §6 is explicit that the
+    question matters more here, because Windows hands a freed pid back within seconds where
+    macOS walks a 99999-wide range before wrapping.
+
+    The out-of-range guard is the posix side's `OverflowError` branch, for the same reason:
+    a record corrupted into a pid no `DWORD` can hold must not turn the reconciliation pass
+    into a traceback. It deliberately does not extend to a pid that is not an int at all —
+    `session_posix.alive` raises `TypeError` there, `bot.Sessions.alive`'s type check means
+    neither is reachable, and a seam whose two sides disagree about what counts as a bug is
+    worse than either answer on its own.
+    """
+    try:
+        return _psutil().pid_exists(int(pid))
+    except (OverflowError, ValueError):
+        return False
 
 
 def started(pid):
-    """psutil.Process(pid).create_time(). W4a."""
-    _later("W4a")
+    """When that pid's process started, in epoch seconds, or None if there is no answer. W4a.
+
+    `psutil.Process(pid).create_time()` where the Mac shells out to `/bin/ps lstart`, and the
+    number is the same kind of number: epoch seconds on the wall clock the record's `started`
+    was written from, so `PID_REUSE_SLACK` compares like with like. (SPEC.md §4 asked for this
+    by name; §9.6's "no third-party packages" was a rule about the Mac, and §3 of this document
+    is where it stopped applying.)
+
+    `None` covers three things that are not the same and that bot.py has one answer for.
+    `NoSuchProcess` is the pid going away between `alive` and here — the one that actually
+    happens. A pid that is not an int is a corrupt record. `AccessDenied` is a process that is
+    there and will not say when it began, and **W4a measured that it does not occur**: 0 of the
+    208 processes on this box refused, including the 109 whose owner psutil could not read,
+    because `create_time` needs only `PROCESS_QUERY_LIMITED_INFORMATION` and every account has
+    that for everything. §6 had predicted it as the ordinary case and it is the unreachable
+    one; the handler stays because the day a Windows release tightens that check is not the day
+    to discover that this raises. All three mean "the platform did not answer", and §4's
+    `began is None` branch treats that as insufficient evidence of death rather than proof of
+    it, because the cost of hiding a live bypass-permissions session from `ls` is not symmetric
+    with the cost of showing a stale one.
+
+    What Windows says instead, for the two pids that genuinely cannot be opened: `0.0`. Pids 0
+    and 4 answer the epoch — not the boot time, and not an error — so they arrive at bot.py as
+    a real timestamp older than every record that could exist, and pid 4 reads as a live runner
+    for as long as a corrupt record names it. Left alone: the Mac reaches the same place for
+    pid 1 by an honest route (launchd really did start at boot), `bot.Sessions.alive` cannot
+    tell the two apart, and mapping 0.0 to `None` here would change no answer it gives.
+    """
+    psutil = _psutil()
+    try:
+        return psutil.Process(int(pid)).create_time()
+    except (TypeError, ValueError, OverflowError):
+        return None
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return None
 
 
 #: What a Windows program is entitled to assume is in its environment, and what `child_env`
