@@ -1809,6 +1809,29 @@ class TestTheListenerUsesThePlatformSeam(unittest.TestCase):
         Telegram.assert_not_called()
         Listener.assert_not_called()
 
+    def test_serve_runs_the_listener_when_the_lock_is_granted(self):
+        """The other half of the same line, and W4d is where it turned out to be missing.
+
+        The test above pins the refusal; nothing pinned the grant. `if not
+        procs.Lock(LOCK).take() or True` — a listener that refuses itself, which is what a
+        `CreateMutexW` misread as "already exists" produces — passed all 623 tests. That is a
+        bot which exits 0 every ten seconds and never answers the phone, and on this platform
+        it is a live risk rather than a theoretical one: the Mac's `take()` is `return True`
+        and cannot be wrong, the mutex can.
+        """
+        lock = mock.Mock()
+        lock.take.return_value = True
+        cfg = mock.Mock(allowed_chat_ids=[1], projects_root=self.dir, max_sessions=1,
+                        bot_token="t")
+        with mock.patch.object(bot.procs, "Lock", return_value=lock), \
+             mock.patch.object(bot, "Listener") as Listener, \
+             mock.patch.object(bot.telegram, "Telegram") as Telegram, \
+             mock.patch.object(bot, "log"):
+            self.assertEqual(bot.serve(cfg=cfg), 0)
+        Telegram.assert_called_once()
+        Listener.assert_called_once()
+        Listener.return_value.run.assert_called_once_with()
+
     def test_the_lock_path_is_the_one_lock_sh_uses(self):
         # One lock file for both the shell's lockf and the Windows mutex named after it.
         self.assertEqual(os.path.relpath(bot.LOCK, bot.HERE).replace(os.sep, "/"),

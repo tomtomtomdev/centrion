@@ -2,12 +2,11 @@
 """The process and terminal mechanisms of session.py, Windows side. WINDOWS.md §2, §4, §6.
 
 Slice W1c made this a stub with the whole surface, so that `import session` and `import bot`
-succeed on Windows and the portable tests run natively here. What is not built yet still
-raises NotImplementedError naming the slice that fills it in — as of W4b that is `Lock.take`
-and nothing else (W4d, the mutex). A stub that returned
-plausible values instead would let a runner get as far as writing `starting` before failing,
-which is the phone waiting out forty-five seconds for nothing; failing at the first call is
-the honest version.
+succeed on Windows and the portable tests run natively here; what was not built yet raised
+NotImplementedError naming the slice that would fill it in, rather than returning a plausible
+value and letting a runner get as far as writing `starting` before failing. **W4d was the last
+of them** — `Lock.take`, the single-instance mutex — so the surface is whole and `_later` is
+gone with it.
 
 Slice W3b filled in the terminal: `spawn`, and the `Terminal` it hands back. `session.py`'s
 `Runner` gets the same two-value answer it gets from the Mac — a pid, and something to read —
@@ -31,10 +30,15 @@ here. `Runner.pump` polls the marker every tick on both platforms, and `catch_si
 delivered to another process without also killing it outright, which is the reason `stop` is a
 file rather than a signal in the first place.
 
+Slice W4d filled in the last one: `Lock`, a named mutex, which is the listener's half of
+"there is only one of me" now that there is no `bot.sh` holding a `lockf` before python
+starts. It is ctypes rather than pywin32 for a reason the class explains.
+
 Dependencies: pywinpty (`Terminal`, from W3b), pywin32 (the Job Object, W3e) and psutil
 (`_reaped` here, `alive`/`started` in W4a) — `requirements-win.txt`. The imports are inside
 the functions that need them, so the module still loads on a bare interpreter.
 """
+import hashlib
 import os
 import signal
 import subprocess
@@ -85,10 +89,6 @@ POLL = 0.05
 def _stderr(message):
     sys.stderr.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), message))
     sys.stderr.flush()
-
-
-def _later(slice_name):
-    raise NotImplementedError("session_win: WINDOWS.md %s has not been built" % slice_name)
 
 
 def _winpty():
@@ -682,14 +682,74 @@ def spawn_flags():
     return {"creationflags": DETACH_FLAGS}
 
 
+#: The mutexes this process holds, for as long as it runs. Nothing removes one: the release
+#: is the process dying, exactly as the Mac's `lockf` is released by the shell exiting (§3).
+#:
+#: It changes nothing today and W4d measured that — deleting the `append` below is caught by
+#: 0 of 624 tests — because a raw ctypes `HANDLE` is an integer that no garbage collector
+#: will ever close. That is the point rather than an oversight: `serve()` says
+#: `procs.Lock(LOCK).take()` and keeps no reference, so the `Lock` is garbage before the next
+#: statement, and this list is where the lifetime is written down instead of being a property
+#: of a number nobody happens to close. It is also the guard if the handle ever stops being
+#: one: a `PyHANDLE` from pywin32 in here would still be held, where one on `self` would not.
+_HELD = []
+
+#: `CreateMutexW` succeeded but somebody else made the object first. Not an error — it is the
+#: answer this whole mechanism exists to get.
+ERROR_ALREADY_EXISTS = 183
+
+#: Per-logon-session, not machine-wide: two people signed into this box each get their own
+#: bot. `Global\` would make one of them refuse to start because the other was already
+#: running, which is not what §7's "one listener" means.
+MUTEX_PREFIX = "Local\\centrion-"
+
+
 class Lock:
-    """A named mutex, taken in serve() before the first getUpdates. W4d."""
+    """The single-instance lock: a named mutex, taken in serve() before the first getUpdates.
+    WINDOWS.md §3, §6, W4d.
+
+    `path` is `bot.LOCK` — the file `launchd/bot.sh` holds its `lockf` on. Nothing is read or
+    written here; the path is only the name, hashed, so that two checkouts of this bot are two
+    locks and two spellings of one checkout are one lock. A file would have to be cleaned up
+    after a listener that was killed, and §3 chose a mutex to avoid exactly that: the kernel
+    destroys the object with the last handle to it, so a listener that dies in any way at all
+    leaves nothing behind for the next one to clear.
+
+    ctypes rather than pywin32, and this is the one decision here that is not arbitrary:
+    `win32event.CreateMutex` hands back a `PyHANDLE` that closes itself when it is collected,
+    so the mutex would be released on the same line that took it (measured in W4d: after
+    dropping the `PyHANDLE`, a second `CreateMutexW` on the same name no longer reports
+    ERROR_ALREADY_EXISTS). A raw handle in `_HELD` is closed by nothing.
+    """
 
     def __init__(self, path):
         self.path = path
+        self.name = MUTEX_PREFIX + hashlib.sha1(
+            os.path.normcase(os.path.abspath(path)).encode("utf-8")).hexdigest()
 
     def take(self):
-        _later("W4d")
+        """True if this process is now the only listener; False if another one has it."""
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        # Not the owner: the lock is the object's *existence*, which belongs to the process,
+        # where ownership belongs to a thread and is abandoned if that thread exits. Nothing
+        # ever waits on this mutex, so ownership would decide nothing and could expire.
+        handle = kernel32.CreateMutexW(None, False, self.name)
+        err = ctypes.get_last_error()
+        if not handle:
+            raise ctypes.WinError(err)
+        if err == ERROR_ALREADY_EXISTS:
+            # The handle is valid even so, and leaking it would keep the object alive after
+            # the real holder exits — the refused copy would lock out its own successor.
+            kernel32.CloseHandle(handle)
+            return False
+        _HELD.append(handle)
+        return True
 
 
 def request_stop(directory):

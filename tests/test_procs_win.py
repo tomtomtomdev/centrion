@@ -11,8 +11,10 @@ cannot register a task and log the user out.
 Windows only. Everything here spawns real processes and cleans up after itself.
 """
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 import unittest
@@ -264,6 +266,88 @@ class TestWhetherARunnerIsStillThereOnWindows(unittest.TestCase):
         self.assertTrue(sessions.alive({"runner_pid": p.pid}))
         self.assertFalse(sessions.alive({"runner_pid": self.exited(),
                                          "started": int(time.time())}))
+
+
+#: A process that takes the lock, says whether it got it, and then stays alive until it is
+#: killed. The point of the second test below is what the *kernel* does when this process
+#: dies without ever releasing anything — which is the whole reason §3 chose a mutex over a
+#: lock file: there is no stale lock to clear because there is nothing on disk to go stale.
+HOLDER = textwrap.dedent("""
+    import sys, time
+    sys.path.insert(0, %(root)r)
+    import session_win
+    print(session_win.Lock(%(path)r).take(), flush=True)
+    time.sleep(60)
+""")
+
+
+@unittest.skipUnless(WIN, "the single-instance lock is a named mutex here")
+class TestTheSingleInstanceMutex(unittest.TestCase):
+    """WINDOWS.md §6 and §3's Lock row, W4d — the last of the seam's NotImplementedErrors.
+
+    On the Mac this is `launchd/bot.sh`'s `lockf` on fd 9, taken by the shell before python
+    starts, and `session_posix.Lock.take()` is `return True` because there is nothing left for
+    the process to do. There is no shell here: `bot.cmd` (§7) is a loop around `--serve`, so
+    the listener has to hold its own lock, and it has to be one the kernel releases when the
+    holder dies — a listener killed by Task Scheduler or Ctrl-C must not leave a lock behind
+    that the next `--serve` cannot take.
+    """
+
+    def path(self):
+        """A lock file of this test's own. The mutex is named after the path, so two tests
+        that share one would be asking about the same kernel object."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return os.path.join(d, ".bot.lock")
+
+    def test_second_lock_refused(self):
+        """§7's 409 is mutual: the second listener must lose before its first getUpdates."""
+        path = self.path()
+        self.assertTrue(session_win.Lock(path).take(), "the first copy was refused")
+        self.assertFalse(session_win.Lock(path).take(), "the second copy was let in")
+        # Named after the path, not global: two checkouts of this bot are two bots, and one
+        # must not lock the other out. (`bot.LOCK` is under the checkout — §6.)
+        self.assertTrue(session_win.Lock(self.path()).take(),
+                        "a different lock file was refused by an unrelated listener's mutex")
+
+    def test_lock_released_on_owner_death(self):
+        """The property that makes this a lock and not a flag: the kernel is the release.
+
+        A held mutex whose owner is terminated goes away with the owner's last handle, so the
+        next listener gets it immediately. Two things this catches that `test_second_lock_
+        refused` cannot: a `take()` that leaks the handle it opened on a *refusal* (our own
+        failed attempt would then keep the object alive after the holder is gone, and the
+        bot would be locked out for the life of the machine), and an implementation that
+        writes something to disk and checks that instead.
+        """
+        path = self.path()
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        holder = subprocess.Popen([sys.executable, "-c", HOLDER % {"root": root, "path": path}],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(holder.stderr.close)
+        self.addCleanup(holder.stdout.close)
+        self.addCleanup(holder.wait)
+        self.addCleanup(kill, holder.pid)
+        said = holder.stdout.readline().strip()
+        if said != "True":
+            # Killed first, and the order is the point: `stderr.read()` waits for the pipe to
+            # close, which is the holder exiting. Written as an `assertEqual` message it is
+            # evaluated whether the assertion fails or not — sixty seconds of waiting for the
+            # process this test needs alive, after which the mutex is released and the next
+            # line reads "another listener was let in". Found the hard way in W4d.
+            kill(holder.pid)
+            self.fail("the holder did not take the lock: %r %s" % (said, holder.stderr.read()))
+        self.assertFalse(session_win.Lock(path).take(),
+                         "let in while another process holds the lock")
+
+        kill(holder.pid)
+        holder.wait(timeout=10)
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            if session_win.Lock(path).take():
+                return
+            time.sleep(0.02)
+        self.fail("the lock survived its owner by more than a second")
 
 
 if __name__ == "__main__":
