@@ -17,6 +17,10 @@ import textwrap
 import time
 import unittest
 
+# Imports on either platform — session_win's top level is stdlib only, and the win32 calls are
+# inside the functions that make them — so this is safe above the WIN guards below.
+import session_win
+
 WIN = sys.platform == "win32"
 
 #: WINDOWS.md §6: how the listener starts a runner. **Not** `CREATE_BREAKAWAY_FROM_JOB`: W0c
@@ -25,8 +29,15 @@ WIN = sys.platform == "win32"
 #: runner never starts. It is also unnecessary: `Stop-ScheduledTask` terminated the parent and
 #: left both a plain child and a detached child running. The two flags that remain are about
 #: not sharing the listener's console and not receiving its Ctrl-C, not about survival.
-DETACH_FLAGS = (getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+#:
+#: **Taken from the program, not spelled again here**, and W4c is why. Until that slice this
+#: line was its own copy of the same two `getattr`s, which meant every test below — the
+#: breakaway assertion and the real-process survival test that spawns `PARENT % DETACH_FLAGS`
+#: — was evidence about a lookalike constant in this file. W4c mutated `session_win`'s
+#: `DETACH_FLAGS` to add breakaway back and mutated `spawn_flags()` to return `{}`, and all
+#: 611 tests stayed green through both. A test that reimplements the value it is checking
+#: cannot fail.
+DETACH_FLAGS = session_win.DETACH_FLAGS
 BREAKAWAY = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
 
 
@@ -105,6 +116,28 @@ class TestADetachedChildOutlivesItsParent(unittest.TestCase):
         plausible commit message."""
         self.assertNotEqual(BREAKAWAY, 0, "the constant should exist on this Python")
         self.assertFalse(DETACH_FLAGS & BREAKAWAY)
+
+    def test_both_detach_flags_are_actually_set(self):
+        """The vacuity guard on the assertion above, and W4c's reason for adding it.
+
+        `DETACH_FLAGS & BREAKAWAY` is falsey for an empty `DETACH_FLAGS` too, so on its own
+        that test is satisfied by a constant that has lost both of the flags it exists to
+        carry — which is a runner sharing the listener's console and inheriting its Ctrl-C,
+        the exact failure W4c is about. Named rather than recomputed: this asserts the two
+        flags are *present*, where the line at the top of this file asserts nothing.
+        """
+        self.assertTrue(DETACH_FLAGS & subprocess.DETACHED_PROCESS,
+                        "the runner would share the listener's console")
+        self.assertTrue(DETACH_FLAGS & subprocess.CREATE_NEW_PROCESS_GROUP,
+                        "the runner would take the listener's Ctrl-C with it")
+
+    def test_spawn_flags_hands_popen_the_detach_flags(self):
+        """`Sessions.start` spreads this dict straight into `Popen`, so it is the last place
+        the flags can go missing — and until W4c nothing on either platform looked at what
+        the Windows one returns. `test_session.py` asserts `session_posix.spawn_flags() == {}`
+        and there was no twin for this side, so `return {}` here was caught by nothing.
+        """
+        self.assertEqual(session_win.spawn_flags(), {"creationflags": DETACH_FLAGS})
 
 
 @unittest.skipUnless(WIN, "psutil against real Windows processes")

@@ -845,10 +845,23 @@ class TestTheStopMarkerOnWindows(unittest.TestCase):
                 errors.append(e)
 
         def poll():
+            # One list per poller, and that is not tidiness. A list four threads append to
+            # records *append* order, and the claim at the bottom of this test is about the
+            # order the answers were read in: a thread that reads False can be descheduled
+            # and land its stale answer after another thread has already appended a True.
+            # W4c measured that at 6 and then 9 runs in 40 (`scratch\w4c_flake.py`,
+            # gitignored) — it was failing this test somewhere around one run in five. The
+            # filesystem was in order every time, in both measurements: sorting the same
+            # answers by a stamp taken before the call put every one of them right, 0 out of
+            # order in 80 rounds. So what flickered was only ever the list. Within a single
+            # thread the two orders are the same, which is what makes the claim observable.
+            # The per-poller form then went 25 runs of this class without a failure.
+            mine = []
+            seen.append(mine)
             start.wait()
             for _ in range(200):
                 try:
-                    seen.append(session_win.stop_requested(self.tmp))
+                    mine.append(session_win.stop_requested(self.tmp))
                 except OSError as e:
                     errors.append(e)
 
@@ -867,8 +880,10 @@ class TestTheStopMarkerOnWindows(unittest.TestCase):
         self.assertEqual(os.path.getsize(marker), 0,
                          "the marker carries content, so an empty one could mean something")
         # Once true it stays true: a poll that flickered would be a runner that read a stop
-        # and then went back to reading the terminal.
-        self.assertNotIn(False, seen[seen.index(True):] if True in seen else [])
+        # and then went back to reading the terminal. Per poller, for the reason in poll().
+        self.assertEqual(len(seen), 4, "every poller should have recorded something")
+        for mine in seen:
+            self.assertNotIn(False, mine[mine.index(True):] if True in mine else [])
 
     def test_a_marker_from_another_process_is_seen(self):
         """The two ends are two processes, and on this platform that is the only reason the
