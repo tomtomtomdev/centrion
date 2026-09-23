@@ -32,12 +32,15 @@ its to kill. So a brand-new listener process met a live record it had never spaw
 alone, which tested §8's reconciliation rather than launchd. A login after a cold *boot* is
 still unwatched. See §12 slice 9 and §14.
 
-**What is left is one planned slice and two things only time can close.** Slice 12 makes the 45s
-deadline capture a stack, so §9.13 cannot come back unwitnessed a second time; §14 carries the
-cold boot and the first real day under §10's retention. See §13.
+**What is left is two planned slices and two things only time can close.** Slice 12 makes the 45s
+deadline capture a stack, so §9.13 cannot come back unwitnessed a second time; slice 13 turns the
+project list the bot already sends into buttons, so a phone taps a directory instead of spelling
+one; §14 carries the cold boot and the first real day under §10's retention. See §13.
 
 Every claim marked *verified* was tested on this box against Claude Code v2.1.269 (2026-09-12)
-or v2.1.270 (2026-09-13).
+or v2.1.270 (2026-09-13). **The box is on v2.1.263 as of 2026-09-23** — the homebrew build, older
+than both, `~/.local/bin/claude` gone (§9.8) — and §14's two UI-coupled checks were re-run against
+it and hold.
 
 ---
 
@@ -579,6 +582,23 @@ All verified 2026-09-12 unless noted.
    a `new` on a name that was already there with anything in it — those hang at the dialog
    exactly as they did before, because that is what the dialog is for.
 
+   **On 2026-09-23 the panel came back for `centrion` itself**, a project with nine days of
+   sessions behind it and its flag long since written. `claude centrion` from the phone at 16:14
+   parked on the dialog and spent the whole 45s deadline there (`var/sessions/75057a/pty.log`,
+   marker still on `No, exit`); by 17:11 the same message came up in three seconds, and
+   `~/.claude.json` carries `hasTrustDialogAccepted: true` for that path again with nothing in
+   this repository having put it there. Two things follow, and the second is why the entry is
+   being amended rather than annotated. **The flag is not permanent** — it is a key in a file
+   every live Claude Code process rewrites, and it can go — so "answering it is one-time" is a
+   fact about the answer and not about the state. And the split this entry ends on has a cost it
+   had never had to pay: `claude <project>` never answers the dialog, so a project whose flag has
+   gone is a 45-second panel on the phone *every time* until something else trusts it. The split
+   is still right — the bot cannot vouch for a directory it did not create, and a keyboard that
+   makes starting a session one tap (§12 slice 13) is an argument for that, not against it — but
+   the reply owes the phone the reason, which is §12 slice 12's brief and not a new rule about
+   trust. The count above is stale for the same reason: `~/Projects` holds one directory today,
+   not 46.
+
 4. **Killing the PTY leaves the remote session registered but offline** — it stays in the
    claude.ai/code list without the green dot. `claude --continue` in that directory reattaches
    within roughly four hours. `stop` should say so in its reply.
@@ -607,6 +627,12 @@ All verified 2026-09-12 unless noted.
    `claude_bin`; `realpath` stays correct for `projects_root`, where §3 needs a resolved path to
    defeat a symlink escaping the root. Pinned by
    `test_config.TestClaudeBinary.test_a_symlinked_binary_is_not_resolved`.
+   *Still true on 2026-09-23, about a different symlink:* `~/.local/bin/claude` is gone from this
+   box and `.telegram.json` names `/opt/homebrew/bin/claude`, itself a symlink into
+   `../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe`. The rule is what survives the
+   move — the path in config is a name to be followed at exec time, whoever installed it — and
+   `DEFAULT_CLAUDE_BIN` is now a default that would fail closed on this machine, which is the
+   right way round for a default to be wrong (§1).
 
 9. **The volume is case-insensitive and `realpath()` is not.** *Verified:* `os.path.realpath`
    is a lexical resolver — it expands symlinks and normalises `..`, and it does not consult the
@@ -1173,6 +1199,61 @@ and the field failure is a silent 45s timeout. Stamping `claude --version` into 
 spawn and saying when it changed since the last successful scrape is the neighbouring half-slice,
 and it has its own tests coming (§11 step 2).
 
+### Slice 13 — a keyboard instead of a grammar
+
+Everything here is already possible: `claude` lists the directories and `claude <project>` starts
+a session in one. What a phone does not have is a keyboard worth typing a directory name on, so
+the slice turns the list the bot already sends into buttons that send the message the user would
+otherwise spell — list the folders, tap one, and the session starts there with permissions
+bypassed exactly as §5 describes.
+
+**A reply keyboard, not an inline one, and the reason is the dispatch path.** Inline buttons
+arrive as `callback_query` updates: a second update type in `allowed_updates`, a second
+allowlist check against a `from.id` that is *not* `message.chat.id` (§10.1 checks both today, and
+a callback has neither in the same place), an `answerCallbackQuery` inside Telegram's own
+deadline or the phone spins, and `callback_data` capped at 64 bytes — which a 200-byte directory
+name does not fit, so the button would have to carry an index into a list that can change between
+being drawn and being tapped. A reply keyboard sends ordinary message text. `claude centrion` off
+a button is indistinguishable from `claude centrion` typed, so it meets §7's date guard, §10's
+allowlist, §3's four checks and §4's cap on exactly the path 465 tests already cover, and
+`commands.py` does not change at all. The cost is honest and small: the keyboard is chat state
+held by Telegram rather than by this bot, so it outlives a restart and can show a directory that
+has since gone — which is a `claude <gone>` and already a tested refusal.
+
+**The one thing a button can get wrong is spelling, and §3 is why.** A project name may contain
+spaces — `My Project` is an ordinary directory, and §3 refuses only `/`, `\`, NUL, a leading
+`.` and control characters. `commands.parse` splits on whitespace, so that button arrives as
+`claude My` carrying the prompt `Project`: a refusal if nothing is called `My`, and a session in
+the wrong project with a stray prompt typed into it if something is. The fix is not a character
+rule of its own — a second copy of §3 is how two doors drift apart (§9 slice 11) — but a round
+trip: a name earns a button only if `commands.parse` reads the button's own text back as that
+name and nothing else. The parser decides what the parser can read, and a name that cannot
+survive it stays in the text of the reply, where it has always been, with no button beside it.
+
+**`stop all` is not a button.** §4 already refuses to read a bare `stop` as `stop all` because it
+is the one misreading in this grammar that cannot be taken back; a button for it is that same
+message one thumb away from every live session on the box, and a keyboard is tapped by people who
+are half-attending — which is the whole argument §5 makes against a most-recent-project default.
+The menu carries projects, `ls` and `help`. Ending a session stays a thing you spell.
+
+*Red:* the reply to bare `claude` and to `help` carries a keyboard with one button per project,
+each button the exact text `claude <name>`; a name that does not round-trip through
+`commands.parse` appears in the reply text and *not* as a button; the keyboard is capped and the
+reply says so when it is, while the text keeps listing everything; no button sends `stop` in any
+form; `ls` and `stop` replies carry no keyboard of their own, so the keyboard changes only where
+the project list does; an empty projects root sends no keyboard rather than an empty one; the
+markup survives §7's 4096 cap being applied to the text beside it; a tapped button produces the
+identical `Intent` to the typed message, over a table of hostile-but-legal names; and §10.2's
+redaction test extends to the markup, because a reply now carries a second field that leaves this
+process.
+*Green:* `reply_markup` on `telegram.py`'s `send_message` (the body is already JSON, so it is a
+nested dict and nothing needs encoding), an optional markup through `bot.say()` so §7's `fit()`
+stays the single choke point, and one function that builds the keyboard by asking `commands.parse`
+what it can read.
+*Run:* from the phone — `help`, then tap a project and watch the link come back; tap a project
+that was deleted after the keyboard was drawn and confirm it is the ordinary refusal; restart the
+listener and confirm the keyboard is still there without the bot having sent anything.
+
 ---
 
 ## 13. Progress
@@ -1194,6 +1275,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 10 | hardening | ☑ | **The cap and the tail are the same file read from two ends, and only one of them was in the brief.** §4.6 reads the last 64 KB of `pty.log` to explain a session that never came up; rotating that file at 4 MiB means a session which fails just after a rotation hands the phone a cleared panel instead of the error — and §9.7's expired login, the likeliest failure after week one, is exactly a session that prints something and dies. Hence two files and a tail that reads back through the older one; a one-file cap would have been a silent regression in the reply that matters most. The third red test was already green from slice 7 and nothing was written for it (§11). Two smaller things, both in the rotation rather than the retention: the cap is checked *after* the write, because a chunk is one 64 KB read off the master and the file is briefly over either way — and a rotation that fails switches the cap off rather than retrying, because the loop it sits in is the session's life (§2) and a failing rename retried per write is a spin in the one place that has to keep reading the terminal. Retention counts from the record's mtime and not from `started`: a session left open for a week is not an old record, and the pass that finishes a reboot's orphan rewrites the record, so the day starts when the session ends rather than when it began. The sweep runs *after* the announcing loop and not inside it, because the marker that keeps an ending to one announcement lives inside the directory being removed — two days of downtime is a record that is terminal, old, and never announced. Run step by flood rather than by afternoon: 26 MiB through a real pty in 2.4s, 5.0 MiB left on disk, the `/login` line still in the tail from either file; the sweep over this box's own records, backdated, kept the live session and took the four ended ones. Nobody has yet watched a real day pass. |
 | 11 | new projects from the phone | ☑ | **§9.3 was true, and the detail that decides the code is the one nobody could have guessed: the trust dialog's default selection is `No, exit`.** The obvious answer — press Enter, it is a confirmation — ends the session. So the runner sends Down, then checks that the marker moved onto `Yes, I trust this folder`, and only then confirms; a reworded or reordered dialog is left hanging, which is the old behaviour and honest, rather than confirmed blind. The matching had its own trap, the same shape as §9.5's: the panel renders words with `CSI <n> G` cursor jumps instead of spaces, so the stripped transcript reads `yes,itrustthisfolder` and any matcher written against what a human sees matches nothing. Answering is one-time — Claude Code writes `hasTrustDialogAccepted` for that path, verified by a second session coming straight up — which is what makes `new x` then `claude x` work tomorrow. The permission to answer it is deliberately split across both processes: the listener passes `--trust` only for `new`, the runner answers only if the directory is empty when it starts, and `new beacon` on an existing repository therefore behaves exactly like `claude beacon`. Two findings from `new` being the first verb that writes rather than reads: a control character in a name is now refused by *both* verbs (there is no delete verb here, so a directory called `red<ESC>[31m` is one nobody can remove from a phone), and the cap is now checked *before* the project is resolved, because a directory created for a session that is then refused is precisely the empty repository §5 gives this verb its own word to prevent. The fake `claude` the pty tests run against cost an hour to the oldest trap in this file: it mixed `select()` with a buffered reader, so it took all three bytes of an arrow key off the kernel to return one, then waited out its idle timeout on a terminal that had already answered it. Run step done twice: below the wire first, then **from the phone at 16:24** — `new scratchpad`, dialog answered one second after the spawn, link on the phone four seconds after the message, `ls`, `stop`, and the directory still there and still empty afterwards. The trust flag is now recorded for it, which is the property that makes tomorrow's `claude scratchpad` ordinary. |
 | 12 | the failure that explains itself | ☐ | **Planned.** §8 stands on evidence of working rather than of being understood, and §14's way to change that — `sample` the parked pid while it is still hung — is an instruction no person can follow: the failure is a 45s timeout on a phone, and the process is killed or gone by the time anyone reaches the machine. The slice does not explain §9.13; it makes the bot take the capture an explanation would need, on the one path that has already failed. |
+| 13 | a keyboard instead of a grammar | ☐ | **Planned.** Everything it does the grammar already did; what it changes is how many words a phone has to spell. A reply keyboard rather than an inline one, so a tap is an ordinary message and `commands.py` does not change — and a button is rendered only for a name `commands.parse` reads back unchanged, because §3 allows spaces in a directory name and the grammar splits on them. |
 
 ---
 
@@ -1210,6 +1292,11 @@ Not slices — things that stay true after the build.
   the designed behaviour rather than a crash, so nothing will page you — check it deliberately.
   The one-line probe: `python3 session.py --cwd <a fresh empty dir in ~/Projects> --name probe
   --trust --foreground` should come up to a link in about three seconds.
+  *Run on 2026-09-23 against v2.1.263, and both couplings hold*: slice 6's transcript tests and
+  slice 11's `TestTheTrustDialog` are green, and the probe answered the dialog and reached a link
+  in 3.0s. The direction is the finding — 2.1.263 is **older** than the 2.1.269/270 everything
+  else here was verified against, because the box is on the homebrew build now (§9.8). So
+  "after any upgrade" is the wrong half of the rule: it is after any *change*.
 - `python3 bot.py --whoami` stays the way `allowed_chat_ids` gets filled in, as `notify.py`
   already does it.
 - `tail -f var/bot.log` is the first thing to look at when the phone gets no reply; a silent
@@ -1253,6 +1340,7 @@ what would have to change to reopen it.
 | Concurrency | `max_sessions: 2` on 8 GB | You watch memory during two real sessions and find headroom. |
 | Bare `claude` | Answers with the project list; starts nothing (§5) | The extra tap outweighs starting in the wrong repo, which it will not. |
 | Same-directory sessions | Allowed, flagged in the reply (§5) | Two sessions actually clobber each other's edits — then `--worktree` per session. |
+| What the menu's buttons carry | Projects, `ls` and `help` — never `stop all`, and never a bare project name without its verb (§12 slice 13) | The keyboard grows a verb whose worst misreading is recoverable; `stop all` is not one of those. |
 | Creating projects from the phone | A separate `new <name>` verb; `claude <unknown>` stays a typo (§5, §12 slice 11) | A mistyped name creating an empty repository turns out to be harmless, which it is not while every session bypasses permissions. |
 | Answering §9.3's trust dialog | On the PTY, and only for a directory this bot created *and* finds empty — never by writing `hasTrustDialogAccepted` into `~/.claude.json` (§9.3) | Claude Code grows a flag that means "this directory is trusted", or stops rewriting `~/.claude.json` from every live process, which is what makes seeding it a race today. |
 | Runtime | System `/usr/bin/python3`, stdlib only (§3) | Something here genuinely needs a third-party package, which nothing does yet. |
