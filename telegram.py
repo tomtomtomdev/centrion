@@ -228,16 +228,27 @@ class Telegram:
                 self.sleep(min(e.retry_after or FIRST_BACKOFF * (attempt + 1), MAX_BACKOFF))
         return False
 
-    def send_message(self, chat_id, text):
-        """Plain text, no parse_mode (§7). True if Telegram took it."""
-        return self._best_effort("sendMessage", {
+    def send_message(self, chat_id, text, reply_markup=None):
+        """Plain text, no parse_mode (§7). True if Telegram took it.
+
+        `reply_markup` is §12 slice 13's keyboard, and it goes in as an ordinary nested object
+        because this client POSTs a JSON body (see `_call`) — the documented form everyone
+        writes, JSON inside a string field, is what a *form-encoded* call needs and would
+        arrive here as a quoted blob. It is omitted entirely when there is none: an empty
+        keyboard is a request to remove the one the phone already has, and most replies have
+        nothing to say about the menu either way.
+        """
+        payload = {
             "chat_id": chat_id,
             "text": text,
             # The session link is the payload of the important reply, and Telegram's preview of
             # it is a claude.ai sign-in card — half a screen on a phone, saying nothing. The
             # link stays tappable without it.
             "disable_web_page_preview": True,
-        })
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        return self._best_effort("sendMessage", payload)
 
     def delete_webhook(self):
         """§7: a webhook set at any point in this bot's past makes getUpdates 409 forever.

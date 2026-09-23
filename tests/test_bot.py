@@ -147,8 +147,8 @@ class FakeTelegram:
             self.offset = max(ids) + 1
         return batch
 
-    def send_message(self, chat_id, text):
-        self.sent.append((chat_id, text))
+    def send_message(self, chat_id, text, reply_markup=None):
+        self.sent.append((chat_id, text, reply_markup))
         result = self.results.pop(0) if self.results else True
         if isinstance(result, BaseException):
             raise result
@@ -166,7 +166,12 @@ class FakeTelegram:
 
     @property
     def texts(self):
-        return [t for _, t in self.sent]
+        return [sent[1] for sent in self.sent]
+
+    @property
+    def markups(self):
+        """§12 slice 13: the second field a reply now carries out of this process."""
+        return [sent[2] for sent in self.sent]
 
 
 class Clock:
@@ -550,7 +555,7 @@ class TestTheOffsetSurvivesARestart(Base):
         saved = []
         tg = FakeTelegram([message("help", uid=41)])
 
-        def watching(chat_id, text):
+        def watching(chat_id, text, reply_markup=None):
             with open(self.offset_path) as fh:
                 saved.append(fh.read().strip())
             return True
@@ -2587,7 +2592,7 @@ class TestReconciliation(Base):
         self.sessions.dead.add(4001)
         tg, _ = self.ticked()
         self.assertEqual(len(tg.sent), 1)
-        chat, text = tg.sent[0]
+        chat, text, _ = tg.sent[0]
         self.assertEqual(chat, ME)
         self.assertIn("beacon-aa11", text)
         # It says when the session *started*, not how long it ran. This pass is the only thing
@@ -2722,7 +2727,7 @@ class TestALateLinkIsStillAnnounced(Base):
         tg = FakeTelegram([])
         self.listener(tg).tick()
         self.assertEqual(len(tg.sent), 1)
-        chat, text = tg.sent[0]
+        chat, text, _ = tg.sent[0]
         self.assertEqual(chat, ME)
         self.assertIn(LINK, text.splitlines())
         self.assertIn("beacon-aa11", text)
@@ -3133,6 +3138,145 @@ class TestCreatingAProjectFromThePhone(Base):
         # The sentence, not the help text under it: §5 has the project list naming the root,
         # which in the real config is `~/Projects` and here is a temporary directory.
         self.assertNotIn(self.tmp, tg.texts[0].split("\n\n")[0], "the refusal leaked a path")
+
+
+class TestTheKeyboard(Base):
+    """Slice 13 — §5's project list, as buttons that send §5's messages.
+
+    The menu adds no capability: every button is a message the grammar already understood, and
+    the point of building it that way is that a tap arrives as ordinary text and meets §7's
+    date guard, §10's allowlist, §3's four checks and §4's cap on the path every test above
+    already covers. So what is tested here is not "does tapping start a session" — that is
+    `TestASessionIsStarted` — but the three things only the keyboard can get wrong: a button
+    that says something other than what it shows, a button that says something that cannot be
+    taken back, and a name the grammar cannot carry.
+    """
+
+    def markup(self, text="claude"):
+        tg = self.deliver(message(text))
+        self.assertEqual(len(tg.sent), 1)
+        return tg.markups[0]
+
+    def buttons(self, text="claude"):
+        markup = self.markup(text)
+        return [label for row in (markup or {}).get("keyboard", []) for label in row]
+
+    def test_the_project_list_comes_with_a_button_for_each_project(self):
+        self.assertEqual(self.buttons("claude")[:3],
+                         ["claude beacon", "claude centrion", "claude stock-watch-project"])
+
+    def test_help_carries_the_same_keyboard(self):
+        # The two replies that list projects are the two that draw the menu, because the
+        # keyboard is chat state: it changes when the list it shows changes, and not otherwise.
+        self.assertEqual(self.markup("help"), self.markup("claude"))
+
+    def test_a_button_carries_the_whole_message_and_not_just_the_name(self):
+        """A bare `beacon` would be `help` (§5), and the phone would look broken.
+
+        Every label is parsed here rather than string-matched, because the assertion worth
+        making is the round trip: what the button sends is what the grammar reads.
+        """
+        for label in self.buttons("claude"):
+            intent = commands.parse(label)
+            if intent.verb == commands.START:
+                self.assertIn(intent.project, config.projects(self.projects), label)
+                self.assertIsNone(intent.prompt, "a button smuggled a prompt: %r" % label)
+            else:
+                self.assertIn(intent.verb, (commands.LIST, commands.HELP), label)
+
+    def test_no_button_can_stop_anything(self):
+        """§15: `stop all` is one thumb from every live session on the box, and §4 already
+        refuses to read a bare `stop` as one for the same reason. The menu carries the verbs
+        whose worst misreading is recoverable."""
+        for label in self.buttons("claude"):
+            self.assertNotEqual(commands.parse(label).verb, commands.STOP, label)
+
+    def test_a_name_the_grammar_cannot_carry_gets_no_button(self):
+        """§3 allows a space in a directory name; `commands.parse` splits on one.
+
+        `claude My Project` is `claude My` with the prompt `Project` — a refusal if nothing is
+        called `My`, and a session in the wrong project if something is. The name stays in the
+        text of the reply, where it has always been, with no button beside it.
+        """
+        os.makedirs(os.path.join(self.projects, "My Project"))
+        os.makedirs(os.path.join(self.projects, "My"))
+        tg = self.deliver(message("claude"))
+        self.assertIn("My Project", tg.texts[0], "the list must still name it")
+        self.assertNotIn("claude My Project", self.buttons("claude"))
+        self.assertIn("claude My", self.buttons("claude"))
+
+    def test_every_button_parses_back_to_its_own_project(self):
+        """The rule, over the names §3 actually permits. No character class of its own: a
+        second copy of §3's rules is how two doors drift apart (§12 slice 11)."""
+        legal = ["a b", "stop", "claude", "new", "all", "ls", "-n", "--dangerously", "2",
+                 "b" * 120, u"caf\u00e9", "a\tb", "a\u00a0b", " leading", "trailing "]
+        for name in legal:
+            if bot.tappable(name):
+                intent = commands.parse(bot.BUTTON % name)
+                self.assertEqual(intent.verb, commands.START, name)
+                self.assertEqual(intent.project, name, name)
+                self.assertIsNone(intent.prompt, name)
+
+    def test_the_keyboard_is_capped_and_the_text_still_lists_everything(self):
+        """A root with forty directories is not forty buttons on a phone. The cap is on the
+        keyboard alone — the list in the text is §5's reply and stays whole."""
+        for i in range(bot.MENU_MAX + 5):
+            os.makedirs(os.path.join(self.projects, "p%02d" % i))
+        tg = self.deliver(message("claude"))
+        names = config.projects(self.projects)
+        starts = [b for b in self.buttons("claude")
+                  if commands.parse(b).verb == commands.START]
+        self.assertEqual(len(starts), bot.MENU_MAX)
+        for name in names:
+            self.assertIn(name, tg.texts[0], "the text dropped a project")
+        self.assertIn(str(bot.MENU_MAX), tg.texts[0],
+                      "a capped keyboard must say so, or the missing buttons read as a bug")
+
+    def test_the_other_replies_carry_no_keyboard_of_their_own(self):
+        # Not "they remove it": a reply that has nothing to say about the menu leaves the one
+        # the phone already has alone (telegram.py's test says why absent beats empty).
+        for text in ("ls", "stop all", "stop 1"):
+            self.assertIsNone(self.markup(text), text)
+
+    def test_an_empty_projects_root_sends_no_keyboard(self):
+        for name in config.projects(self.projects):
+            os.rmdir(os.path.join(self.projects, name))
+        self.assertIsNone(self.markup("claude"))
+
+    def test_a_tapped_button_is_exactly_the_message_it_shows(self):
+        """The end of the whole design: the button's own text, replayed as a message, starts
+        the session — through `begin()`, the cap, and §3's checks, with nothing new in the
+        path."""
+        label = self.buttons("claude")[0]
+        tg = self.deliver(message(label))
+        self.assertEqual(len(self.sessions.started), 1, "the button started nothing")
+        self.assertEqual(self.sessions.started[0]["project"], "beacon")
+        self.assertIn(LINK, tg.texts[0])
+
+    def test_the_text_is_capped_and_the_keyboard_still_arrives(self):
+        """§7's 4096 applies to the text; the markup is a separate field and must survive it."""
+        for i in range(30):
+            os.makedirs(os.path.join(self.projects, "p" + "x" * 200 + "%02d" % i))
+        tg = self.deliver(message("claude"))
+        self.assertLessEqual(len(tg.texts[0]), telegram.LIMIT)
+        self.assertTrue(tg.markups[0], "the keyboard went missing with the truncated text")
+
+    def test_a_mistyped_project_gets_the_buttons_back(self):
+        """§5 answers a typo with the project list, which is the moment a button is most use."""
+        tg = self.deliver(message("claude beacn"))
+        self.assertEqual(self.sessions.started, [], "a typo started something")
+        self.assertTrue(tg.markups[0], "the reply to a typo is the list, and it was not tappable")
+
+    def test_the_buttons_under_test_are_not_an_empty_list(self):
+        """Half the assertions in this class are about what the keyboard must *not* carry, and
+        every one of them holds trivially over no keyboard at all."""
+        self.assertGreaterEqual(len(self.buttons("claude")), 4)
+
+    def test_the_keyboard_never_carries_the_token(self):
+        # §10.2. A reply now leaves this process in two fields rather than one, and the leak
+        # test has to follow it.
+        self.assertNotIn(SECRET, json.dumps(self.markup("claude")))
+        self.assertNotIn(SECRET, json.dumps(self.markup("help")))
 
 
 if __name__ == "__main__":

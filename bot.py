@@ -107,6 +107,15 @@ TAIL_LINES = 15
 #: itself fills this within a few seconds of startup, which is the whole of what a tail is for.
 TAIL_BYTES = 65536
 
+#: §12 slice 13: the most project buttons a keyboard carries. A phone shows about this many
+#: without scrolling, and the list in the text of the reply is never capped — §5's answer to
+#: bare `claude` is the list, and the keyboard is a convenience laid over it.
+MENU_MAX = 12
+
+#: What a project button says. The verb is not decoration: a button reading `beacon` would send
+#: `beacon`, which §5 answers with `help`, and the phone would look broken.
+BUTTON = commands.START + " %s"
+
 #: §10.7: how long a finished session's directory is kept. Nothing ever removed one, and the
 #: directory is not the part that grows — the transcript inside it is capped (§10.7) — but the
 #: *number* of them is unbounded, and every `claude beacon` from a phone makes another. A day
@@ -224,6 +233,49 @@ def fit(text, limit=telegram.LIMIT):
         return text[:limit]
     head = room // 2
     return text[:head] + (ELISION % (len(text) - room)) + text[len(text) - (room - head):]
+
+
+def tappable(name):
+    """True if a button saying `claude <name>` is read back as this project and nothing else.
+
+    §3 permits a space in a directory name — `My Project` is an ordinary directory — and
+    `commands.parse` splits the verb from its argument on whitespace, so that button would
+    arrive as `claude My` carrying the prompt `Project`: a refusal if nothing is called `My`,
+    and a session in the *wrong* project if something is.
+
+    The check is a round trip through the parser rather than a character rule of its own,
+    which is the same argument §3 makes about `new` and `claude` sharing one set of checks: a
+    second copy of the grammar's rules here is how the two quietly drift apart. Whatever the
+    parser can read back is what a button may say.
+    """
+    intent = commands.parse(BUTTON % name)
+    return (intent.verb == commands.START and intent.project == name
+            and intent.prompt is None)
+
+
+def menu_names(names):
+    """The projects that get a button: the ones the grammar can carry, capped. §12 slice 13."""
+    return [name for name in names if tappable(name)][:MENU_MAX]
+
+
+def keyboard(names):
+    """§5's project list as a reply keyboard, or None when there is nothing to tap.
+
+    None rather than an empty keyboard, because Telegram reads an empty one as *remove the
+    keyboard this chat already has* — a root that has briefly gone unreadable (§9.2) would
+    otherwise take the menu away with it.
+
+    `stop` is deliberately not on here, in any form. §4 already refuses to read a bare `stop`
+    as `stop all` because it is the one misreading in this grammar that cannot be taken back,
+    and a button for it is that message one thumb from every live session on the box — tapped
+    by somebody half-attending, which is precisely the state §5 designs the bare `claude` reply
+    around. The menu carries the verbs whose worst misreading is a wasted second.
+    """
+    rows = [[BUTTON % name] for name in menu_names(names)]
+    if not rows:
+        return None
+    rows.append([commands.LIST, commands.HELP])
+    return {"keyboard": rows, "resize_keyboard": True, "is_persistent": True}
 
 
 def _last(path, count):
@@ -723,7 +775,46 @@ class Listener:
         if not names:
             return ("Nothing in %s. A directory has to exist there to be reachable, and "
                     "nothing outside it ever is." % root)
-        return "Projects in %s:\n%s" % (root, "\n".join("  " + n for n in names))
+        text = "Projects in %s:\n%s" % (root, "\n".join("  " + n for n in names))
+        # The one place the keyboard is allowed to affect the words. A button missing beside a
+        # name that is plainly in the list reads as a bug from a phone, and both reasons for it
+        # are things the owner can act on: too many projects, or a name this grammar cannot
+        # carry (§12 slice 13).
+        shown = menu_names(names)
+        if len(shown) < len(names):
+            text += "\n\n"
+            if len(shown) == MENU_MAX:
+                text += "The keyboard holds the first %d. " % MENU_MAX
+            else:
+                text += "A name with a space in it gets no button. "
+            text += "`claude <project>` still reaches any of them."
+        return text
+
+    def buttons(self):
+        """The keyboard for a reply that lists the projects. §12 slice 13.
+
+        A second read of the root a moment after `project_list()` read it, and deliberately not
+        a cached one: the two disagree only if a directory appeared or went between them, and
+        the worse half of that — a button for a directory that has gone — is a `claude <gone>`,
+        which is §3's ordinary refusal and already tested. Holding a listing across a reply to
+        avoid it would be state, and state about the filesystem is the thing §4 spends a whole
+        reconciliation pass not keeping.
+        """
+        return keyboard(config.projects(self.cfg.projects_root))
+
+    def menu(self, intent):
+        """The keyboard this intent's reply carries, if any. §12 slice 13.
+
+        The two replies that list the projects are the two that draw the menu. Everything else
+        — `ls`, a `stop`, a session's own reply — sends no markup at all, which leaves the
+        keyboard the phone already has exactly where it was: it changes when the list it shows
+        changes, and not otherwise.
+        """
+        if intent.verb == commands.HELP:
+            return self.buttons()
+        if intent.verb == commands.START and intent.project is None:
+            return self.buttons()
+        return None
 
     def help(self):
         """§5's two tables, and the directories currently in the root."""
@@ -918,7 +1009,10 @@ class Listener:
         except config.ProjectError as e:
             # §3: any resolution failure is a help reply, and it names the rule that was broken
             # rather than the path that broke it.
-            self.say(chat_id, "%s\n\n%s" % (e, self.help()))
+            # With the keyboard, because this reply carries the project list and §5's answer
+            # to a mistyped name is the list — `claude beacn` is the moment a button is most
+            # use (§12 slice 13).
+            self.say(chat_id, "%s\n\n%s" % (e, self.help()), self.buttons())
             return "refused, not a project"
 
         sid = self.mint()
@@ -1098,7 +1192,7 @@ class Listener:
         if intent.verb in (commands.START, commands.NEW) and intent.project is not None:
             done = self.begin(chat_id, intent)
         else:
-            done = "replied" if self.say(chat_id, self.answer(intent)) \
+            done = "replied" if self.say(chat_id, self.answer(intent), self.menu(intent)) \
                    else "reply NOT delivered"
         # One line per handled message, and it is what makes the refusal lines above legible:
         # §14 sends you here when the phone gets nothing, and an empty log has to mean "nothing
@@ -1110,9 +1204,13 @@ class Listener:
                                          " " + loggable(intent.project) if intent.project else "",
                                          done))
 
-    def say(self, chat_id, text):
-        """Every reply leaves through here, so §7's 4096 is enforced in exactly one place."""
-        return self.tg.send_message(chat_id, fit(text))
+    def say(self, chat_id, text, markup=None):
+        """Every reply leaves through here, so §7's 4096 is enforced in exactly one place.
+
+        The cap is on the text alone: the keyboard is a field of its own on the wire and a
+        truncated project list must not arrive with the buttons missing (§12 slice 13).
+        """
+        return self.tg.send_message(chat_id, fit(text), markup)
 
     def remember(self):
         """Persist the offset. Losing it is survivable; exiting over it is not."""

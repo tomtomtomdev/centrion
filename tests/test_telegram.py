@@ -248,6 +248,30 @@ class TestSending(unittest.TestCase):
         # tappable either way.
         self.assertTrue(body["disable_web_page_preview"])
 
+    def test_a_keyboard_travels_as_an_object_and_not_as_a_string(self):
+        """§12 slice 13. The body is JSON already, which is the whole reason this is a dict.
+
+        Telegram's documented form for `reply_markup` on a form-encoded call is JSON *inside*
+        a string field, and every example on the internet is written that way. This client
+        POSTs a JSON body (§7), so the markup is an ordinary nested object — and a string here
+        would arrive as a quoted blob Telegram answers with a 400 nobody would read, because
+        §4.6's failure path swallows it into one line of bot.log.
+        """
+        tg = Stub([ok({"message_id": 1})])
+        markup = {"keyboard": [["claude beacon"]], "resize_keyboard": True}
+        self.assertTrue(tg.send_message(42, "pick one", markup))
+        body = tg.sent()
+        self.assertEqual(body["reply_markup"], markup)
+        self.assertIsInstance(body["reply_markup"], dict)
+
+    def test_a_reply_without_a_keyboard_says_nothing_about_keyboards(self):
+        """Absent, not empty. An empty `keyboard` is a request to *remove* the one the phone
+        already has, so a reply that simply has nothing to say about the menu — every session
+        reply, every refusal — must leave the field out entirely."""
+        tg = Stub([ok({"message_id": 1})])
+        tg.send_message(42, "hi")
+        self.assertNotIn("reply_markup", tg.sent())
+
     def test_it_retries_three_times_then_gives_up_quietly(self):
         # Quietly to the caller — the poll loop must not die over a failed reply — but never
         # silently: §14 makes var/bot.log the first place to look when the phone gets nothing.
