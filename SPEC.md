@@ -9,12 +9,15 @@ servers, your git checkouts, permissions already bypassed.
 The bot is a **launcher**, not a bridge. It does not relay conversation. Once the link comes
 back, Remote Control carries everything; Telegram's job is done.
 
-Status: **slices 0-11 built, and every verb has now been driven from a phone.** `claude
-<project>` starts a session, `new <name>` creates the project first and answers §9.3's trust
-dialog for it, `ls` lists them, `stop <n>` and `stop all` end them, `max_sessions` refuses the
-one past the cap, and §4's reconciliation pass clears the records a reboot orphaned and
-announces a link that arrives after its waiter gave up. Slice 10 bounded what all that leaves
-behind: the transcript is capped and a finished session's directory goes after a day (§10.7).
+Status: **slices 0-11 and 13 built, and every verb has now been driven from a phone —
+the last one from a button.** `claude <project>` starts a session, `new <name>` creates the
+project first and answers §9.3's trust dialog for it, `ls` lists them, `stop <n>` and `stop all`
+end them, `max_sessions` refuses the one past the cap, and §4's reconciliation pass clears the
+records a reboot orphaned and announces a link that arrives after its waiter gave up. Slice 10
+bounded what all that leaves behind: the transcript is capped and a finished session's directory
+goes after a day (§10.7). Slice 13 put the project list on the phone as a keyboard, which adds no
+verb at all: a button says `claude <project>` in full and is read by the same parser as a typed
+message.
 
 **§9.13, which blocked the whole thing, stopped happening before slice 9 could diagnose it.**
 For three hours on 2026-09-13 a LaunchAgent-started Claude Code hung at startup in any directory
@@ -32,10 +35,9 @@ its to kill. So a brand-new listener process met a live record it had never spaw
 alone, which tested §8's reconciliation rather than launchd. A login after a cold *boot* is
 still unwatched. See §12 slice 9 and §14.
 
-**What is left is two planned slices and two things only time can close.** Slice 12 makes the 45s
-deadline capture a stack, so §9.13 cannot come back unwitnessed a second time; slice 13 turns the
-project list the bot already sends into buttons, so a phone taps a directory instead of spelling
-one; §14 carries the cold boot and the first real day under §10's retention. See §13.
+**What is left is one planned slice and two things only time can close.** Slice 12 makes the 45s
+deadline capture a stack, so §9.13 cannot come back unwitnessed a second time; §14 carries the
+cold boot and the first real day under §10's retention. See §13.
 
 Every claim marked *verified* was tested on this box against Claude Code v2.1.269 (2026-09-12)
 or v2.1.270 (2026-09-13). **The box is on v2.1.263 as of 2026-09-23** — the homebrew build, older
@@ -1254,6 +1256,30 @@ what it can read.
 that was deleted after the keyboard was drawn and confirm it is the ordinary refusal; restart the
 listener and confirm the keyboard is still there without the bot having sent anything.
 
+**Outcome: the slice's own property is that there is nothing to see.** `claude ttsecuritas-2`
+arrived at 20:33:47 off a button and reached a link at 20:33:50, and `var/bot.log` records it in
+the line it would have written for the same words typed — identical by construction, which is the
+design and not a gap in the evidence. What a keyboard *can* be caught doing is on the wire and in
+the tests: Telegram took the markup as a nested object on the first send, which is the one thing
+no unit test here could have established, because every example of `reply_markup` in circulation
+is JSON inside a string field and that is what a form-encoded call needs, not this one (§7 posts
+a JSON body).
+
+Two smaller things, both from the keyboard being state this bot does not hold. It is the *chat*
+that has a keyboard, not a message, so it survived the listener restart at 17:37 with nothing
+sent — which is the property that makes a menu cheap here and also the reason the buttons can
+outlive the directories they name. And a reply with nothing to say about the menu has to send no
+markup at all rather than an empty one: an empty `keyboard` is Telegram's way of spelling
+*remove the keyboard this chat has*, so the natural-looking default would have taken the menu
+away on every `ls`.
+
+The cap and the round-trip filter are the same line of code read twice, and only one of them was
+in the brief. `menu_names()` is what the buttons come from *and* what the reply's text checks
+itself against, so the sentence explaining a missing button cannot drift from the rule that
+removed it. §11's warning earned a mention too: four of this class's assertions — no `stop`
+button, no keyboard on `ls`, no keyboard for an empty root, no token in the markup — hold
+trivially over no keyboard at all, so one more test asserts the keyboard under them is not empty.
+
 ---
 
 ## 13. Progress
@@ -1275,7 +1301,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 10 | hardening | ☑ | **The cap and the tail are the same file read from two ends, and only one of them was in the brief.** §4.6 reads the last 64 KB of `pty.log` to explain a session that never came up; rotating that file at 4 MiB means a session which fails just after a rotation hands the phone a cleared panel instead of the error — and §9.7's expired login, the likeliest failure after week one, is exactly a session that prints something and dies. Hence two files and a tail that reads back through the older one; a one-file cap would have been a silent regression in the reply that matters most. The third red test was already green from slice 7 and nothing was written for it (§11). Two smaller things, both in the rotation rather than the retention: the cap is checked *after* the write, because a chunk is one 64 KB read off the master and the file is briefly over either way — and a rotation that fails switches the cap off rather than retrying, because the loop it sits in is the session's life (§2) and a failing rename retried per write is a spin in the one place that has to keep reading the terminal. Retention counts from the record's mtime and not from `started`: a session left open for a week is not an old record, and the pass that finishes a reboot's orphan rewrites the record, so the day starts when the session ends rather than when it began. The sweep runs *after* the announcing loop and not inside it, because the marker that keeps an ending to one announcement lives inside the directory being removed — two days of downtime is a record that is terminal, old, and never announced. Run step by flood rather than by afternoon: 26 MiB through a real pty in 2.4s, 5.0 MiB left on disk, the `/login` line still in the tail from either file; the sweep over this box's own records, backdated, kept the live session and took the four ended ones. Nobody has yet watched a real day pass. |
 | 11 | new projects from the phone | ☑ | **§9.3 was true, and the detail that decides the code is the one nobody could have guessed: the trust dialog's default selection is `No, exit`.** The obvious answer — press Enter, it is a confirmation — ends the session. So the runner sends Down, then checks that the marker moved onto `Yes, I trust this folder`, and only then confirms; a reworded or reordered dialog is left hanging, which is the old behaviour and honest, rather than confirmed blind. The matching had its own trap, the same shape as §9.5's: the panel renders words with `CSI <n> G` cursor jumps instead of spaces, so the stripped transcript reads `yes,itrustthisfolder` and any matcher written against what a human sees matches nothing. Answering is one-time — Claude Code writes `hasTrustDialogAccepted` for that path, verified by a second session coming straight up — which is what makes `new x` then `claude x` work tomorrow. The permission to answer it is deliberately split across both processes: the listener passes `--trust` only for `new`, the runner answers only if the directory is empty when it starts, and `new beacon` on an existing repository therefore behaves exactly like `claude beacon`. Two findings from `new` being the first verb that writes rather than reads: a control character in a name is now refused by *both* verbs (there is no delete verb here, so a directory called `red<ESC>[31m` is one nobody can remove from a phone), and the cap is now checked *before* the project is resolved, because a directory created for a session that is then refused is precisely the empty repository §5 gives this verb its own word to prevent. The fake `claude` the pty tests run against cost an hour to the oldest trap in this file: it mixed `select()` with a buffered reader, so it took all three bytes of an arrow key off the kernel to return one, then waited out its idle timeout on a terminal that had already answered it. Run step done twice: below the wire first, then **from the phone at 16:24** — `new scratchpad`, dialog answered one second after the spawn, link on the phone four seconds after the message, `ls`, `stop`, and the directory still there and still empty afterwards. The trust flag is now recorded for it, which is the property that makes tomorrow's `claude scratchpad` ordinary. |
 | 12 | the failure that explains itself | ☐ | **Planned.** §8 stands on evidence of working rather than of being understood, and §14's way to change that — `sample` the parked pid while it is still hung — is an instruction no person can follow: the failure is a 45s timeout on a phone, and the process is killed or gone by the time anyone reaches the machine. The slice does not explain §9.13; it makes the bot take the capture an explanation would need, on the one path that has already failed. |
-| 13 | a keyboard instead of a grammar | ☐ | **Planned.** Everything it does the grammar already did; what it changes is how many words a phone has to spell. A reply keyboard rather than an inline one, so a tap is an ordinary message and `commands.py` does not change — and a button is rendered only for a name `commands.parse` reads back unchanged, because §3 allows spaces in a directory name and the grammar splits on them. |
+| 13 | a keyboard instead of a grammar | ☑ | **The slice succeeds by leaving no trace, which is also how it has to be proved.** `claude ttsecuritas-2` off a button at 20:33:47 is the same log line, the same intent and the same 3-second link as the typed message, because the button *is* the typed message — so the evidence that it worked is on the wire and in the shape of the code, not in bot.log. What only the real send could settle: Telegram takes `reply_markup` here as a nested JSON object, where every example in circulation writes it as JSON inside a string field — correct for a form-encoded call and wrong for this client, which posts a JSON body (§7). The design finding was the one the plan named: §3 permits a space in a directory name and the grammar splits on whitespace, so `My Project` would tap as `claude My` carrying the prompt `Project` — a refusal if nothing is called `My`, a session in the **wrong project** if something is. The filter is a round trip through `commands.parse` rather than a character rule of its own, for slice 11's reason: a second copy of §3 here is how two doors drift apart. Two things came from the keyboard being state Telegram holds rather than this bot: it survived the 17:37 listener restart with nothing sent, and a reply that has nothing to say about the menu must send *no* markup rather than an empty one, because an empty `keyboard` is the documented way to take a keyboard away — the obvious default would have removed the menu on every `ls`. §11's first rule bit as well: four assertions in this class (no `stop` button, no keyboard on `ls` or on an empty root, no token in the markup) are green over an absent keyboard, so one more test holds the others honest by asserting the keyboard beneath them is not empty. |
 
 ---
 
