@@ -32,7 +32,7 @@
   opens it itself, before the script runs. This is also why the bot's whole reachable world is
   ~/Projects (SPEC.md §9.2), and why var/ must exist before the first bootstrap.
 
-  install:  mkdir -p /Users/tomtomtomtom/Projects/centrion/var
+  install:  mkdir -p /Users/tommyyohanes/Projects/centrion/var
             cp launchd/com.tommy.centrion.bot.plist ~/Library/LaunchAgents/
             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tommy.centrion.bot.plist
   restart:  launchctl kickstart -k gui/$(id -u)/com.tommy.centrion.bot
@@ -52,11 +52,11 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>
-    <string>/Users/tomtomtomtom/Projects/centrion/launchd/bot.sh</string>
+    <string>/Users/tommyyohanes/Projects/centrion/launchd/bot.sh</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/tomtomtomtom/Projects/centrion</string>
+  <string>/Users/tommyyohanes/Projects/centrion</string>
 
   <key>RunAtLoad</key>
   <true/>
@@ -70,9 +70,9 @@
   <string>Standard</string>
 
   <key>StandardOutPath</key>
-  <string>/Users/tomtomtomtom/Projects/centrion/var/bot.log</string>
+  <string>/Users/tommyyohanes/Projects/centrion/var/bot.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/tomtomtomtom/Projects/centrion/var/bot.log</string>
+  <string>/Users/tommyyohanes/Projects/centrion/var/bot.log</string>
 
   <key>EnvironmentVariables</key>
   <dict>
