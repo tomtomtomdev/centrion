@@ -42,7 +42,7 @@ HELP = "help"         # §5: and everything else.
 #: `stop all`'s target. A string, so it can never collide with an `ls` index, which is an int.
 ALL = "all"
 
-#: What BotFather's /setcommands should carry (§5). The listener owns the descriptions.
+#: What the phone's `/` menu carries (§5). The listener owns the descriptions and registers them.
 VERBS = (START, NEW, LIST, STOP, HELP)
 
 Intent = collections.namedtuple("Intent", "verb project prompt target")

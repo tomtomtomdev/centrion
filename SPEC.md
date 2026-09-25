@@ -315,8 +315,9 @@ menu will send.
 | `stop 2` / `stop all` | SIGTERM the runner, which SIGTERMs claude |
 | `help` | the two tables above, and the directories currently in `~/Projects` |
 
-Anything else: reply with `help`. Register the tier-1 and tier-2 verbs with BotFather's
-`/setcommands` so they autocomplete on the phone.
+Anything else: reply with `help`. The tier-1 and tier-2 verbs are registered as the phone's `/`
+command menu by the bot itself (`setMyCommands`, at every startup) so they autocomplete there and
+cannot drift from what the parser understands — no BotFather `/setcommands` step.
 
 **Bare `claude` starts nothing.** It answers with the project list and waits for a second
 message. The cost is one extra tap; what it buys is that no bypass-permissions session can ever

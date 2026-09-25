@@ -116,6 +116,18 @@ MENU_MAX = 12
 #: `beacon`, which §5 answers with `help`, and the phone would look broken.
 BUTTON = commands.START + " %s"
 
+#: §5: the phone's `/` menu, registered with setMyCommands at every startup so it can never drift
+#: from what parse() understands the way a hand-typed BotFather /setcommands list would. Keyed by
+#: commands.VERBS, which is the list of what belongs in it; this is only what each one says.
+MENU_TEXT = {
+    commands.START: "claude <project> [text] — start a session (bare: list the projects)",
+    commands.NEW: "new <name> — make a project directory and start a session in it",
+    commands.LIST: "the live sessions",
+    commands.STOP: "stop <n> · stop all — end one session, or all of them",
+    commands.HELP: "what this bot understands, and the projects",
+}
+COMMAND_MENU = [(verb, MENU_TEXT[verb]) for verb in commands.VERBS]
+
 #: §10.7: how long a finished session's directory is kept. Nothing ever removed one, and the
 #: directory is not the part that grows — the transcript inside it is capped (§10.7) — but the
 #: *number* of them is unbounded, and every `claude beacon` from a phone makes another. A day
@@ -1386,6 +1398,7 @@ class Listener:
     def run(self):
         """Forever. §7: never exit."""
         self.tg.delete_webhook()
+        self.tg.set_commands(COMMAND_MENU)
         while True:
             try:
                 self.tick()

@@ -331,6 +331,17 @@ class TestStartup(unittest.TestCase):
         tg = Stub([urllib.error.URLError("down")] * 3)
         self.assertFalse(tg.delete_webhook())
 
+    def test_set_commands_sends_the_menu_in_order(self):
+        tg = Stub([ok(True)])
+        self.assertTrue(tg.set_commands([("claude", "start"), ("ls", "sessions")]))
+        self.assertEqual(tg.method(), "setMyCommands")
+        self.assertEqual(tg.sent()["commands"], [{"command": "claude", "description": "start"},
+                                                 {"command": "ls", "description": "sessions"}])
+
+    def test_a_failing_set_commands_does_not_raise(self):
+        tg = Stub([urllib.error.URLError("down")] * 3)
+        self.assertFalse(tg.set_commands([("help", "this")]))
+
     def test_get_me_returns_the_bot(self):
         tg = Stub([ok({"id": 8960211893, "username": "Centrionetbot"})])
         self.assertEqual(tg.get_me()["username"], "Centrionetbot")

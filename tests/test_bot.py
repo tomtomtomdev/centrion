@@ -134,6 +134,7 @@ class FakeTelegram:
         self.results = []          # per-send: True, False, or an exception to raise
         self.polls = 0
         self.webhooks_deleted = 0
+        self.menus = []
 
     def poll(self, timeout=None):
         self.polls += 1
@@ -156,6 +157,10 @@ class FakeTelegram:
 
     def delete_webhook(self):
         self.webhooks_deleted += 1
+        return True
+
+    def set_commands(self, commands):
+        self.menus.append(list(commands))
         return True
 
     def redact(self, text):
@@ -642,6 +647,17 @@ class TestTheLoopSurvives(Base):
         with self.assertRaises(Exhausted):
             self.listener(tg).run()
         self.assertEqual(tg.webhooks_deleted, 1)
+
+    def test_run_registers_the_command_menu_once_at_startup(self):
+        # §5: every verb parse() understands, in its order, and each one parses back to itself.
+        tg = FakeTelegram([], [], [])
+        with self.assertRaises(Exhausted):
+            self.listener(tg).run()
+        self.assertEqual(len(tg.menus), 1)
+        self.assertEqual([verb for verb, _ in tg.menus[0]], list(commands.VERBS))
+        for verb, description in tg.menus[0]:
+            self.assertTrue(1 <= len(description) <= 256, verb)
+        self.assertEqual(commands.parse("/ls@centrionbot").verb, commands.LIST)
 
     def test_nothing_a_message_can_contain_makes_a_tick_raise(self):
         hostile = ["claude " + "x" * 4000, "claude beacon \x00\x1b[31m", "stop ²", None,

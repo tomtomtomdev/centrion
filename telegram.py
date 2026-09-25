@@ -74,7 +74,7 @@ class TelegramError(Exception):
 
 
 class Telegram:
-    """The four Bot API calls centrion needs. One instance, long-lived, owns the offset."""
+    """The Bot API calls centrion needs. One instance, long-lived, owns the offset."""
 
     def __init__(self, token, sleep=time.sleep, log=None):
         self.token = token
@@ -258,6 +258,16 @@ class Telegram:
         sent over the weekend. Dropping here cannot.
         """
         return self._best_effort("deleteWebhook", {})
+
+    def set_commands(self, commands):
+        """setMyCommands: the `/` menu the phone shows beside the text box (§5).
+
+        `commands` is `[(verb, description), …]`, in menu order. Best-effort like every other
+        outbound call: a menu that failed to register costs autocomplete, not a working bot, so
+        it must not hold up the poll loop that follows it.
+        """
+        return self._best_effort("setMyCommands", {
+            "commands": [{"command": c, "description": d} for c, d in commands]})
 
     def get_me(self):
         """The bot's own record. Raises, unlike the others — this one is run by hand."""
