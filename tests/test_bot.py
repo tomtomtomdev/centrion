@@ -3266,10 +3266,14 @@ class TestTheKeyboard(Base):
         self.assertIn(str(bot.MENU_MAX), tg.texts[0],
                       "a capped keyboard must say so, or the missing buttons read as a bug")
 
+    def test_ls_carries_the_project_keyboard(self):
+        # What runs, and one tap to start another: `ls` is where that question is asked.
+        self.assertEqual(self.markup("ls"), self.markup("claude"))
+
     def test_the_other_replies_carry_no_keyboard_of_their_own(self):
         # Not "they remove it": a reply that has nothing to say about the menu leaves the one
         # the phone already has alone (telegram.py's test says why absent beats empty).
-        for text in ("ls", "stop all", "stop 1"):
+        for text in ("stop all", "stop 1"):
             self.assertIsNone(self.markup(text), text)
 
     def test_an_empty_projects_root_sends_no_keyboard(self):

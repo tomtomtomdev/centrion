@@ -1269,8 +1269,8 @@ The menu carries projects, `ls` and `help`. Ending a session stays a thing you s
 each button the exact text `claude <name>`; a name that does not round-trip through
 `commands.parse` appears in the reply text and *not* as a button; the keyboard is capped and the
 reply says so when it is, while the text keeps listing everything; no button sends `stop` in any
-form; `ls` and `stop` replies carry no keyboard of their own, so the keyboard changes only where
-the project list does; an empty projects root sends no keyboard rather than an empty one; the
+form; `ls` carries the same project keyboard (what is running, and one tap to start another)
+while `stop` replies carry none of their own; an empty projects root sends no keyboard rather than an empty one; the
 markup survives §7's 4096 cap being applied to the text beside it; a tapped button produces the
 identical `Intent` to the typed message, over a table of hostile-but-legal names; and §10.2's
 redaction test extends to the markup, because a reply now carries a second field that leaves this

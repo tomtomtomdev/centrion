@@ -817,12 +817,12 @@ class Listener:
     def menu(self, intent):
         """The keyboard this intent's reply carries, if any. §12 slice 13.
 
-        The two replies that list the projects are the two that draw the menu. Everything else
-        — `ls`, a `stop`, a session's own reply — sends no markup at all, which leaves the
-        keyboard the phone already has exactly where it was: it changes when the list it shows
-        changes, and not otherwise.
+        The two replies that list the projects draw the menu, and so does `ls`: the question
+        after "what is running" is usually "start one where", and the answer is then one tap
+        away. Everything else — a `stop`, a session's own reply — sends no markup at all, which
+        leaves the keyboard the phone already has exactly where it was.
         """
-        if intent.verb == commands.HELP:
+        if intent.verb in (commands.HELP, commands.LIST):
             return self.buttons()
         if intent.verb == commands.START and intent.project is None:
             return self.buttons()
