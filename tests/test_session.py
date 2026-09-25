@@ -830,6 +830,9 @@ class TestTheChildEnvironment(unittest.TestCase):
         self.assertEqual(env["LANG"], "en_US.UTF-8")
         self.assertIn("/.local/bin", env["PATH"])
         self.assertIn("/opt/homebrew/bin", env["PATH"])
+        # Project hooks run under /bin/sh with this PATH and never read .zshenv, so cargo's bin
+        # has to be named here or ttsecuritas's `tuntun ... --hook` is "command not found".
+        self.assertIn("/.cargo/bin", env["PATH"])
 
     @unittest.skipUnless(not POSIX, "the Windows half of the child environment (WINDOWS.md W3g)")
     def test_child_env_win_keeps_windows_essentials(self):

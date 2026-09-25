@@ -358,9 +358,11 @@ child env explicitly rather than inheriting.
 
 **Must be set**
 
-- `PATH=/Users/tomtomtomtom/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin` —
+- `PATH=/Users/tomtomtomtom/.local/bin:/Users/tomtomtomtom/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin` —
   `claude` lives at `~/.local/bin/claude`, and the session's own Bash tool needs brew on PATH to
-  be useful.
+  be useful. `~/.cargo/bin` because project hooks run under `/bin/sh -c` with this PATH and read
+  no `.zshenv`: without it ttsecuritas's `tuntun ... --hook` fails with
+  `/bin/sh: tuntun: command not found` in every session started from the phone.
 - `HOME`, `USER`, `SHELL`, `LANG=en_US.UTF-8`.
 - `TERM=xterm-256color`.
 - `COLUMNS=200`, `LINES=50` — for the shell and for tools the session itself runs. **These do

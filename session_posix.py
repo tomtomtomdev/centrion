@@ -333,13 +333,20 @@ def child_env(env):
     Bash tool needs it to be useful. A `PATH` off whoever started the listener would put an
     unpinned `claude` first on the day somebody brew-installs one.
 
+    `~/.cargo/bin` too, because a project's hooks run under `/bin/sh -c` with exactly this
+    `PATH` — no `.zshenv`, so no `. "$HOME/.cargo/env"`. ttsecuritas's `tuntun ... --hook`
+    lines lived there and failed every session the phone started with `/bin/sh: tuntun:
+    command not found`, while the same project opened from a Warp tab was fine. It goes after
+    `~/.local/bin`, so the pinned `claude` still wins.
+
     This is today's code moved, not rewritten — the same rule W1a followed for the rest of the
     seam — with one line changed: `HOME` is read from the environment being built rather than
     from `os.environ`, which it already was.
     """
     home = env.get("HOME") or os.path.expanduser("~")
     env.update({
-        "PATH": "%s/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" % home,
+        "PATH": "%s/.local/bin:%s/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                % (home, home),
         "HOME": home,
         "USER": env.get("USER") or os.environ.get("USER", ""),
         "SHELL": env.get("SHELL") or "/bin/zsh",
