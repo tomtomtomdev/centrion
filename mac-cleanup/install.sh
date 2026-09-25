@@ -8,11 +8,11 @@
 #   ~/.local/bin/friday-cleanup.sh     -> mac-cleanup/friday-cleanup.sh
 #   ~/.claude/commands/mac-cleanup.md  -> mac-cleanup/mac-cleanup.md
 #
-# The Friday run is opt-in, because it deletes things with nobody watching:
+# The daily run is opt-in, because it deletes things with nobody watching:
 #
 #   sh mac-cleanup/install.sh                    the script and the command, no schedule
-#   sh mac-cleanup/install.sh --schedule [HH:MM] also run it with --apply on Fridays (default 20:00)
-#   sh mac-cleanup/install.sh --unschedule       remove the Friday run, keep the rest
+#   sh mac-cleanup/install.sh --schedule [HH:MM] also run it with --apply daily (default 09:15)
+#   sh mac-cleanup/install.sh --unschedule       remove the daily run, keep the rest
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 CHECKOUT=$(cd "$HERE/.." && pwd)
@@ -66,13 +66,13 @@ schedule() {   # schedule HH:MM
     done
     launchctl bootstrap "$DOMAIN" "$AGENT"
     launchctl print "$DOMAIN/$LABEL" >/dev/null
-    printf 'scheduled %s: Fridays at %02d:%02d, --apply\n' "$LABEL" "$hour" "$minute"
+    printf 'scheduled %s: daily at %02d:%02d, --apply\n' "$LABEL" "$hour" "$minute"
 }
 
 case "${1:-}" in
     --unschedule)
         unschedule
-        echo "removed the Friday run ($LABEL)"
+        echo "removed the daily run ($LABEL)"
         exit 0 ;;
     --schedule|"") ;;
     *) echo "usage: sh $0 [--schedule [HH:MM] | --unschedule]" >&2; exit 2 ;;
@@ -83,5 +83,5 @@ link "$HERE/friday-cleanup.sh" "$HOME/.local/bin/friday-cleanup.sh"
 link "$HERE/mac-cleanup.md" "$HOME/.claude/commands/mac-cleanup.md"
 
 if [ "${1:-}" = "--schedule" ]; then
-    schedule "${2:-20:00}"
+    schedule "${2:-09:15}"
 fi

@@ -525,7 +525,7 @@ is pmset's, not launchd's.
 `mac-cleanup/` is this Mac's disk hygiene — Xcode build output, simulators, caches and stale
 Claude Code scratchpads — and is installed separately, because it is not the bot's:
 `sh mac-cleanup/install.sh` symlinks the script to `~/.local/bin/friday-cleanup.sh` and the
-`/mac-cleanup` command into `~/.claude/commands`. Its unattended Friday `--apply` run deletes
+`/mac-cleanup` command into `~/.claude/commands`. Its unattended daily `--apply` run (09:15, after pmset's 08:45 power-on) deletes
 things with nobody watching, so it is opt-in: `--schedule [HH:MM]` loads
 `com.tommy.mac-cleanup`, `--unschedule` removes it.
 

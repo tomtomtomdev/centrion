@@ -25,7 +25,7 @@ Mode is `$1`. If empty, default to `dry-run`.
 | *(empty)* / `dry-run` | Run the cleanup now in preview mode. Delete nothing. Print exactly what would be removed and the bytes each would reclaim, then ask if I want to apply it. If I say yes, re-run with `--apply` in the same session. |
 | `apply` | Run the cleanup now with `--apply`. No confirmation prompt — I already decided. |
 | `status` | Report last run, current disk usage, and sizes of each cleanup target. Change nothing. |
-| `schedule` | *(optional)* Install the launchd agent that runs this unattended on Fridays at `$2` (default `20:00`), via `install.sh --schedule` (below). Only do this if I explicitly pass `schedule`. |
+| `schedule` | *(optional)* Install the launchd agent that runs this unattended every day at `$2` (default `09:15`), via `install.sh --schedule` (below). Only do this if I explicitly pass `schedule`. |
 
 The script and this command live in the centrion repo, in `mac-cleanup/`, and are installed as
 symlinks into it by `sh mac-cleanup/install.sh`. If `~/.local/bin/friday-cleanup.sh` is missing,
@@ -158,10 +158,10 @@ them — one ttsecuritas project dir alone grew to 10 GB. The unit is the **sess
 Run the installer the script's symlink points back to:
 
 ```sh
-sh "$(dirname "$(readlink ~/.local/bin/friday-cleanup.sh)")/install.sh" --schedule "${2:-20:00}"
+sh "$(dirname "$(readlink ~/.local/bin/friday-cleanup.sh)")/install.sh" --schedule "${2:-09:15}"
 ```
 
-It renders `mac-cleanup/com.tommy.mac-cleanup.plist` (label `com.tommy.mac-cleanup`, `Weekday 5`,
+It renders `mac-cleanup/com.tommy.mac-cleanup.plist` (label `com.tommy.mac-cleanup`, daily, no `Weekday`,
 the script with `--apply` and nothing else) into `~/Library/LaunchAgents`, then boots it out and
 back in — editing an installed plist alone does not take effect. `--unschedule` removes it.
 

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  The unattended Friday cleanup. Rendered and loaded by mac-cleanup/install.sh --schedule, which
+  The unattended daily cleanup. Rendered and loaded by mac-cleanup/install.sh --schedule, which
   writes __CHECKOUT__, __HOME__, __HOUR__ and __MINUTE__ in; launchd expands nothing itself.
 
   launchd, not cron: cron skips a run the Mac slept through, and StartCalendarInterval fires at
@@ -21,8 +21,6 @@
   </array>
   <key>StartCalendarInterval</key>
   <dict>
-    <key>Weekday</key>
-    <integer>5</integer>
     <key>Hour</key>
     <integer>__HOUR__</integer>
     <key>Minute</key>
