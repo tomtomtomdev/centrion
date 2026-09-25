@@ -4,6 +4,8 @@
 #
 # Each skill is a symlink back into the checkout, so a `git pull` here is the upgrade. A plain
 # directory or a command file of the same name in its way is moved aside to *.bak, never deleted.
+# A skill that ships a configure.sh is asked its settings the first time; after that, re-run the
+# skill's own configure.sh to change them.
 #
 #   sh .claude/skills/install.sh                  install ticket-workflow and ios-next-slice
 #   sh .claude/skills/install.sh <name> [name…]   install those skills instead
@@ -34,4 +36,7 @@ for name in "$@"; do
     fi
     ln -s "$src" "$target"
     echo "installed $target -> $src"
+    if [ -f "$src/configure.sh" ]; then
+        sh "$src/configure.sh" --if-missing
+    fi
 done

@@ -43,7 +43,7 @@ and they travel as one unit:
 - **At most 3 tickets per batch.** More makes one failed `EXPECT:` hold back too much work, and a
   batch's smoke drive already runs longest on this 8 GB M1.
 - **Same target RC, always.** Grouping only joins tickets whose §3 answer is the same (the same
-  Affects Version, the same `vX.Y.Z` label, or both resolved by the ≥2.4.0 rule). A different RC
+  Affects Version, the same `vX.Y.Z` label, or both resolved by the RC-floor rule). A different RC
   is never a batch: one MR has one target.
 - **One branch, one commit per ticket.** Subject `fix(<area>): [<KEY>] <what changed>`, in the
   order the tickets were fixed. Code two tickets need goes in the first commit that needs it. Every
@@ -129,6 +129,34 @@ harness is already clean it is a plain `git` call.
   pushing.
 - Shipping a harness update to the team is its own MR, and only when the user asks for one.
 
+## Settings — the board, the repo and the build are configuration
+
+Every Jira query, GitLab call, branch name and build line below reads a `TW_*` variable, never a
+literal. `env.sh` (next to this file) sets them, and every shell block loads it right after
+`tt-slot`'s eval, because it builds the claim labels from `TT_HOST_ID`. Values come from, last
+winning: env.sh's defaults (the Tuntun iOS pipeline), this Mac's
+`~/.config/ticket-workflow/config.env` (written by `configure.sh`, which `install.sh` runs), and
+the checkout's own `.tuntun/ticket-workflow.env` for a repo on a different board.
+
+| Variable | Default | Used for |
+|---|---|---|
+| `TW_BOARD_JQL` | `filter = 11001` | §1's pickup board |
+| `TW_FIXING_JQL` | `filter = 10550` | §1a, bucket 2 and §8: my `fixing` tickets |
+| `TW_COMPONENT` | `ios` | the one component every query requires |
+| `TW_EXCLUDE_COMPONENTS` | `BE` | pickup skips tickets carrying any of these |
+| `TW_JIRA_USER` / `TW_NOT_QA` | `tommy.yohanes` / `admin tommy.yohanes` | the pipeline's own account; authors that are never a brief (§4) |
+| `TW_HOSTS` | `A B` | every Mac's `TT_HOST_ID`; labels `mac-<id>` |
+| `TW_GITLAB_HOST` / `TW_GITLAB_PROJECT` / `TW_MR_ASSIGNEE` | `git.tuntun.co.id` / `49` / the Jira user | every `glab` call |
+| `TW_MAIN_BRANCH` / `TW_RC_PREFIX` / `TW_RC_FLOOR` / `TW_BRANCH_PREFIX` | `main` / `release_candidate` / `2.4.0` / `tommy` | §3's target and branch name |
+| `TW_WORKSPACE` / `TW_SCHEME` / `TW_PRODUCTS` / `TW_APP_NAME` / `TW_SIM_DEVICE` | `TTSecuritas.xcworkspace` / `TTSecuritas Staging` / `Staging-iphonesimulator` / `Tuntun Sekuritas.app` / `iPhone 17` | §9's build and §10's drive |
+
+env.sh also derives `TW_MINE` (`mac-$TT_HOST_ID`), `TW_OTHERS` and `TW_ALL_MACS` (the JQL-quoted
+labels of the other Macs and of all of them) and `TW_EXCLUDE_JQL` (` AND component NOT IN (…)`,
+empty when nothing is excluded). Where the prose below names a default (filter 11001, project 49,
+`release_candidate/`, the staging scheme), read it as *the configured one*; the facts it states
+about that default (squash on by default, fast-forward only, no CI) are to be re-checked on any
+other project. The accounts table in §4 is not configuration: it is this app's.
+
 ## 00 · Is a pass already running? — hold, don't start a second one
 
 **Check this before anything else, including §0.** A `/loop` wakeup or a repeated invocation can
@@ -174,11 +202,13 @@ Keep it current as the pass advances (`echo "phase A: <KEY> fix agent" > .tuntun
 ```bash
 export PATH="$HOME/.tuntun/bin:$PATH"
 export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"      # serve-sim runs through npx; node is nvm-only here
-eval "$(tt-slot env --with-jira)"
+eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
 tt-slot check
 node --version                                         # must print v18+ or §10 cannot drive anything
 curl -sS -k -o /dev/null -w 'jira=%{http_code}\n' -H "Authorization: Bearer $JIRA_TOK" "$JIRA_URL/myself"
 echo "slot=$TT_SLOT host=$TT_HOST_ID rc=$TT_RC"
+echo "board=[$TW_BOARD_JQL] fixing=[$TW_FIXING_JQL] component=$TW_COMPONENT$TW_EXCLUDE_JQL mine=$TW_MINE others=[$TW_OTHERS]"
+echo "gitlab=$TW_GITLAB_HOST project=$TW_GITLAB_PROJECT rc=$TW_RC_PREFIX/≥$TW_RC_FLOOR branch=$TW_BRANCH_PREFIX/…"
 ```
 
 `tt-slot` is the identity and credential source for this pipeline — do not hand-roll either.
@@ -190,8 +220,8 @@ is **not on `PATH`** by default, hence the export.
 serve-sim` fails with "node not found" even though Node is installed. Sourcing `nvm.sh` is what
 makes §10 possible; check it here rather than discovering it after a 12-minute build.
 
-**Re-run `eval "$(tt-slot env --with-jira)"` at the top of every block that reads a `$TT_*` or
-`$JIRA_*` variable.** Shell state does not survive from one tool call to the next, so a block that
+**Re-run `eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh` at the top of every block that reads a `$TT_*` or
+`$JIRA_*` or `$TW_*` variable.** Shell state does not survive from one tool call to the next, so a block that
 assumes an earlier export silently sees an empty token — which then looks exactly like an empty
 board.
 
@@ -200,7 +230,8 @@ board.
 `tt-slot check` verifies this worktree actually carries the project instructions; a freshly created
 worktree starts with none.
 
-`TT_HOST_ID` is this **Mac's** identity and the whole basis of the claim label. Empty → stop; an
+`TT_HOST_ID` is this **Mac's** identity and the whole basis of the claim label. Empty, or not one
+of `TW_HOSTS` (then `TW_OTHERS` still lists this Mac's peers but `TW_ALL_MACS` misses it) → stop; an
 unlabelled claim is indistinguishable from no claim and the two Macs will collide.
 
 Not `200`, or `tt-slot` fails → **stop and report**, and skip Phase B too: a dead token cannot
@@ -212,8 +243,8 @@ ticket nobody moved.
 **Run this before §1, every pass.** This Mac's tickets in flight are its own `fixing` tickets:
 
 ```bash
-export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"
-JQL="filter = 10550 AND component = ios AND labels IN (\"mac-$TT_HOST_ID\") AND labels NOT IN (\"needs-human\") ORDER BY created ASC"
+export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
+JQL="($TW_FIXING_JQL) AND component = \"$TW_COMPONENT\" AND labels IN (\"$TW_MINE\") AND labels NOT IN (\"needs-human\") ORDER BY created ASC"
 curl -sS -k -G -H "Authorization: Bearer $JIRA_TOK" --data-urlencode "jql=$JQL" \
   --data-urlencode "fields=summary,labels" --data-urlencode "maxResults=50" "$JIRA_URL/search" \
 | python3 -c "
@@ -271,15 +302,14 @@ On a batch MR a `needs-rework` marker also carries ` failed=<KEY>,<KEY>`: the ti
 
 ## 1 · Read the board
 
-Filter 11001 is *"Open ticket / tommy"*: `assignee = tommy.yohanes` AND status in
-(Open, Reopened, Issues, Backlog), Frontend excluded. Four clauses are added on top of it, and all
-four matter:
+`TW_BOARD_JQL` is the pickup board. Its default, filter 11001, is *"Open ticket / tommy"*:
+`assignee = tommy.yohanes` AND status in (Open, Reopened, Issues, Backlog), Frontend excluded. A
+configured board must mean the same: my tickets, in the statuses §1's ranking knows. Four clauses
+are added on top of it, and all four matter:
 
 ```bash
-export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"
-MINE="mac-$TT_HOST_ID"
-OTHERS=$(for h in A B; do [ "mac-$h" = "$MINE" ] || printf '"mac-%s",' "$h"; done | sed 's/,$//')
-JQL="filter = 11001 AND component = ios AND component NOT IN (BE) AND (labels IS EMPTY OR labels NOT IN ($OTHERS,\"not-reachable\",\"needs-version\"))"
+export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
+JQL="($TW_BOARD_JQL) AND component = \"$TW_COMPONENT\"$TW_EXCLUDE_JQL AND (labels IS EMPTY OR labels NOT IN (${TW_OTHERS:+$TW_OTHERS,}\"not-reachable\",\"needs-version\"))"
 echo "JQL: $JQL"
 
 curl -sS -k -G -H "Authorization: Bearer $JIRA_TOK" \
@@ -305,9 +335,9 @@ for r in rows:
 "
 ```
 
-- **`component = ios`** — neither filter carries it. It leaves 11001 unchanged today but is the
+- **`component = $TW_COMPONENT`** (`ios`) — neither default filter carries it. It leaves 11001 unchanged today but is the
   clause that keeps an Android or web row off this pipeline the day one lands.
-- **`component NOT IN (BE)`** — a ticket that also carries the **BE** component is backend work,
+- **`$TW_EXCLUDE_JQL`** (`component NOT IN (BE)`) — a ticket that also carries the **BE** component is backend work,
   or at least waits on it, even when `iOS` is tagged alongside. Never pick it up; this Mac cannot
   fix or smoke the backend half. `BE` is the component's exact name in UATP, TUNTUN and PBT.
   This clause is on the pickup board only. A ticket this Mac already claimed stays in §1a and §8,
@@ -329,7 +359,7 @@ Judge the *output*, never an exit code:
 ### Bucket 2 — orphaned `fixing` tickets, only when the board is empty
 
 A `fixing` ticket with **no** Mac label is in no other query: §1a and §8 read only this Mac's label,
-and 11001 has no `fixing`. The released claim in *When the fix agent comes back empty* makes them
+and the pickup board has no `fixing`. The released claim in *When the fix agent comes back empty* makes them
 whenever no Open-ward transition exists, and a hand-moved ticket makes them too. Without this read
 they sit there forever. Run it **only** after the query above printed `total=0`.
 
@@ -341,11 +371,10 @@ run from Friday 16:00 to Monday 09:00 (~65h) without touching Jira. Taking over 
 only holding is harmless: this Mac's §1a reads the same marker and holds too.
 
 ```bash
-export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"
-MINE="mac-$TT_HOST_ID"
-OTHERS=$(for h in A B; do [ "mac-$h" = "$MINE" ] || printf '"mac-%s",' "$h"; done | sed 's/,$//')
+export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
 PARKED='"not-reachable","needs-version","needs-human"'
-JQL="filter = 10550 AND component = ios AND component NOT IN (BE) AND (labels IS EMPTY OR labels NOT IN (\"mac-A\",\"mac-B\",$PARKED) OR (labels IN ($OTHERS) AND labels NOT IN (\"$MINE\",$PARKED) AND updated <= -72h)) ORDER BY updated ASC"
+STALE=${TW_OTHERS:+" OR (labels IN ($TW_OTHERS) AND labels NOT IN (\"$TW_MINE\",$PARKED) AND updated <= -72h)"}
+JQL="($TW_FIXING_JQL) AND component = \"$TW_COMPONENT\"$TW_EXCLUDE_JQL AND (labels IS EMPTY OR labels NOT IN ($TW_ALL_MACS,$PARKED)$STALE) ORDER BY updated ASC"
 curl -sS -k -G -H "Authorization: Bearer $JIRA_TOK" \
   --data-urlencode "jql=$JQL" --data-urlencode "fields=summary,status,issuetype,labels,updated" \
   --data-urlencode "maxResults=50" "$JIRA_URL/search" \
@@ -383,7 +412,7 @@ the claim label and §2's double-stamp check decide who takes each one.
    what this prints — and find the rows that share context with the seed:
 
 ```bash
-export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"
+export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
 for k in <every key from §1's rows>; do
   curl -sS -k -H "Authorization: Bearer $JIRA_TOK" \
     "$JIRA_URL/issue/$k?fields=summary,labels,versions,parent,issuelinks,description"; echo
@@ -421,23 +450,22 @@ for ln in sys.stdin:
    then transition each:
 
 ```bash
-export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"
-MINE="mac-$TT_HOST_ID"
+export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
 curl -sS -k -X PUT -H "Authorization: Bearer $JIRA_TOK" -H "Content-Type: application/json" \
-  -d "{\"update\":{\"labels\":[{\"add\":\"$MINE\"}]}}" "$JIRA_URL/issue/<KEY>"   # plus {"add":"batch-<SEED KEY>"} in a batch
+  -d "{\"update\":{\"labels\":[{\"add\":\"$TW_MINE\"}]}}" "$JIRA_URL/issue/<KEY>"   # plus {"add":"batch-<SEED KEY>"} in a batch
 tuntun-ios jira issue issue transition <KEY> --status fixing --insecure
 curl -sS -k -H "Authorization: Bearer $JIRA_TOK" "$JIRA_URL/issue/<KEY>?fields=labels"
 ```
 
 4. **Re-read the labels.** Jira has no compare-and-set, so two Macs reading the board seconds apart
-   can both stamp. If a ticket now carries **both** `mac-A` and `mac-B`, the **lower host id
-   wins**. If you lost one: remove your own labels from it (claim and `batch-…`) and drop it from
+   can both stamp. If a ticket now carries **two** claim labels (`mac-A` and `mac-B`), the
+   **lower host id wins**. If you lost one: remove your own labels from it (claim and `batch-…`) and drop it from
    the batch. If you lost the seed, the next surviving member stands in for it; lost them all → take
    another seed from §1's list. If that was the only row, Phase A ends — go to §8.
 
 ```bash
 curl -sS -k -X PUT -H "Authorization: Bearer $JIRA_TOK" -H "Content-Type: application/json" \
-  -d "{\"update\":{\"labels\":[{\"remove\":\"$MINE\"}]}}" "$JIRA_URL/issue/<KEY>"
+  -d "{\"update\":{\"labels\":[{\"remove\":\"$TW_MINE\"}]}}" "$JIRA_URL/issue/<KEY>"
 ```
 
 5. **A bucket-2 (orphan) claim differs in two ways.** Skip step 3's transition — the ticket is
@@ -452,9 +480,9 @@ curl -sS -k -X PUT -H "Authorization: Bearer $JIRA_TOK" -H "Content-Type: applic
 
 ```bash
 curl -sS -k -X PUT -H "Authorization: Bearer $JIRA_TOK" -H "Content-Type: application/json" \
-  -d "{\"update\":{\"labels\":[{\"remove\":\"<STALE mac-X>\"},{\"add\":\"$MINE\"}]}}" "$JIRA_URL/issue/<KEY>"
+  -d "{\"update\":{\"labels\":[{\"remove\":\"<STALE mac-X>\"},{\"add\":\"$TW_MINE\"}]}}" "$JIRA_URL/issue/<KEY>"
 tuntun-ios jira issue issue comment <KEY> --insecure \
-  --body "Claim by <STALE mac-X> idle since <updated>; taken over by $MINE."
+  --body "Claim by <STALE mac-X> idle since <updated>; taken over by $TW_MINE."
 ```
 
    The comment is for the person who finds the ticket later. It also bumps `updated`, so the other
@@ -507,10 +535,10 @@ The prompt stays short, because the runbook is this file and the agent reads it 
 > You own ticket **<KEY>** end to end, in the worktree at `<this working directory>`. It is already
 > claimed with the label `mac-<HOST>` and transitioned to `fixing` by the session that spawned you,
 > and a task row is already open for it.
-> Read `~/.claude/commands/ticket-workflow.md` and execute **§3 through §7** exactly as written,
+> Read `~/.claude/skills/ticket-workflow/SKILL.md` and execute **§3 through §7** exactly as written,
 > then stop. CLAUDE.md's HARD CONSTRAINTS and pipeline apply throughout.
 > Every shell block of yours starts with §0's preamble — `export PATH="$HOME/.tuntun/bin:$PATH"`,
-> `export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"` and `eval "$(tt-slot env --with-jira)"` —
+> `export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"` and `eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh` —
 > because shell state does not survive between tool calls.
 > Nobody is watching: at any choice point take the recommended option and record it, never ask.
 > Ticket summary: `<summary from §1>`.
@@ -529,7 +557,7 @@ the file's* Batches *section says*, and one `Ticket summary:` line per ticket. I
 
 > You rework MR **!<IID>** (`<source_branch>` → `<target_branch>`, ticket **<KEY>**) in the
 > worktree at `<this working directory>`. The ticket is claimed and `fixing`, and a task row is open.
-> Its last smoke run failed: note <note url>. Read `~/.claude/commands/ticket-workflow.md` and
+> Its last smoke run failed: note <note url>. Read `~/.claude/skills/ticket-workflow/SKILL.md` and
 > execute **§5a**, then stop. (Same preamble, same unattended rule, same *Do not* list and the same
 > handoff block as the fix prompt, with `OUTCOME: reworked`.)
 
@@ -541,7 +569,7 @@ what the block says. Thirteen lines, nothing after them:
 ```
 OUTCOME:    shipped | reworked | not-reproducible | not-reachable | needs-version | blocked
 TICKET:     <KEY> — <summary>
-RC:         <target branch, and where it came from: Affects Version, a vX.Y.Z label, or the ≥2.4.0 rule>
+RC:         <target branch, and where it came from: Affects Version, a vX.Y.Z label, or the RC-floor rule>
 BRANCH:     <branch, or "deleted" on any abandon path>
 MR:         !<IID> <url> | none
 SMOKE:      <n> steps in the MR description | none — <why>
@@ -563,11 +591,11 @@ unclaimed one — the label is also Phase B's filter. Do not re-drive the work i
 release the claim instead:
 
 ```bash
-export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"
+export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
 tuntun-ios jira issue issue comment <KEY> --insecure \
   --body "Automated fix run ended without a result; releasing the claim. No MR was opened."
 curl -sS -k -X PUT -H "Authorization: Bearer $JIRA_TOK" -H "Content-Type: application/json" \
-  -d "{\"update\":{\"labels\":[{\"remove\":\"mac-$TT_HOST_ID\"}]}}" "$JIRA_URL/issue/<KEY>"
+  -d "{\"update\":{\"labels\":[{\"remove\":\"$TW_MINE\"}]}}" "$JIRA_URL/issue/<KEY>"
 tuntun-ios jira issue issue transition <KEY> --list --insecure     # what Open-ward moves exist
 ```
 
@@ -596,22 +624,23 @@ curl -sS -k -H "Authorization: Bearer $JIRA_TOK" \
 
 Resolve the target branch, in this order, taking the first that names a branch that **exists**:
 
-1. `versions` non-empty → candidate `release_candidate/<name minus leading V>`.
-2. A **`vX.Y.Z` label** on the ticket → `release_candidate/<X.Y.Z>`. Tickets routinely carry the
+1. `versions` non-empty → candidate `$TW_RC_PREFIX/<name minus leading V>`.
+2. A **`vX.Y.Z` label** on the ticket → `$TW_RC_PREFIX/<X.Y.Z>`. Tickets routinely carry the
    version as a label with Affects Version left empty, and the label is a better answer than any
    rule below because it came from the ticket.
-3. **Neither → this is a question, and unattended it auto-answers "the oldest live RC at 2.4.0 or
-   above".** Never "the earliest RC on the remote": taken literally that is
+3. **Neither → this is a question, and unattended it auto-answers "the oldest live RC at
+   `$TW_RC_FLOOR` (2.4.0) or above"** — the RC-floor rule. Never "the earliest RC on the remote": taken literally that is
    `release_candidate/1.7.0`, which is years dead. Never the `tt-slot` pin either — it goes stale
    silently and has pointed at a branch that no longer exists.
 
 ```bash
+export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
 git fetch origin --prune
-git ls-remote --heads origin 'refs/heads/release_candidate/*' \
-| sed 's#.*refs/heads/release_candidate/##' \
+git ls-remote --heads origin "refs/heads/$TW_RC_PREFIX/*" \
+| sed "s#.*refs/heads/$TW_RC_PREFIX/##" \
 | python3 -c "
 import sys, re
-FLOOR = (2, 4, 0)
+FLOOR = tuple(int(x) for x in '$TW_RC_FLOOR'.split('.'))
 out = []
 for ln in sys.stdin:
     n = ln.strip()
@@ -622,15 +651,15 @@ for ln in sys.stdin:
 for _, n in sorted(out): print(n)
 " \
 | while read -r v; do
-    if git merge-base --is-ancestor "origin/release_candidate/$v" origin/main 2>/dev/null; then
+    if git merge-base --is-ancestor "origin/$TW_RC_PREFIX/$v" "origin/$TW_MAIN_BRANCH" 2>/dev/null; then
       continue                      # already released, keep looking
     fi
-    echo "TARGET=release_candidate/$v"; break
+    echo "TARGET=$TW_RC_PREFIX/$v"; break
   done
 ```
 
 Plain `X.Y.Z` **only** — the remote carries `2.4.0-txs-endpoints`, `2.1.0-clean`, `2.0.0-hyperion`,
-`AO` and a dozen more suffixed spurs, and none of them is a release. `--is-ancestor` against `main`
+`AO` and a dozen more suffixed spurs, and none of them is a release. `--is-ancestor` against `$TW_MAIN_BRANCH`
 drops the ones already shipped, so what survives is the nearest release still open.
 
 Nothing survives → hand back `OUTCOME: needs-version` after posting the question where a human will
@@ -638,10 +667,10 @@ see it:
 
 ```bash
 tuntun-ios jira issue issue comment <KEY> --insecure \
-  --body "No Affects Version and no vX.Y.Z label, and no unreleased release_candidate at 2.4.0 or
+  --body "No Affects Version and no vX.Y.Z label, and no unreleased $TW_RC_PREFIX at $TW_RC_FLOOR or
 above. Cannot pick a target branch — please set Affects Version and remove the needs-version label."
 curl -sS -k -X PUT -H "Authorization: Bearer $JIRA_TOK" -H "Content-Type: application/json" \
-  -d "{\"update\":{\"labels\":[{\"add\":\"needs-version\"},{\"remove\":\"mac-$TT_HOST_ID\"}]}}" \
+  -d "{\"update\":{\"labels\":[{\"add\":\"needs-version\"},{\"remove\":\"$TW_MINE\"}]}}" \
   "$JIRA_URL/issue/<KEY>"
 tuntun-ios jira issue issue transition <KEY> --status Open --insecure
 ```
@@ -649,15 +678,15 @@ tuntun-ios jira issue issue transition <KEY> --status Open --insecure
 **Verify whichever you picked**, however you got there:
 
 ```bash
-git ls-remote --exit-code --heads origin "release_candidate/<X.Y.Z>"
+git ls-remote --exit-code --heads origin "$TW_RC_PREFIX/<X.Y.Z>"
 ```
 
 Jira carries versions with no branch behind them, so an unchecked name is a dead checkout. A named
 version that does not exist as a branch → `OUTCOME: blocked`, saying which candidates you tried; do
-not silently fall through to the ≥2.4.0 rule, because a wrong Affects Version is worth seeing.
+not silently fall through to the RC-floor rule, because a wrong Affects Version is worth seeing.
 
 ```bash
-tt-harness-switch checkout -b "tommy/<TARGET_RC>/<KEY>-<slug>" "origin/<TARGET_RC>"
+tt-harness-switch checkout -b "$TW_BRANCH_PREFIX/<TARGET_RC>/<KEY>-<slug>" "origin/<TARGET_RC>"
 git push -u origin HEAD          # remote tracking ref
 ```
 
@@ -691,11 +720,11 @@ checklist with finished items marked `(fixed ✅)` and the rest still open. Read
 context, but take the current work from the latest QA/design comment:
 
 ```bash
-export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"
+export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
 curl -sS -k -H "Authorization: Bearer $JIRA_TOK" "$JIRA_URL/issue/<KEY>?fields=comment" \
 | python3 -c "
 import sys, json
-NOT_QA = {'admin', 'tommy.yohanes'}      # GitLab's 'mentioned this' bot, and this pipeline's own account
+NOT_QA = set('$TW_NOT_QA'.split())      # GitLab's 'mentioned this' bot, and this pipeline's own account
 cs = json.load(sys.stdin)['fields']['comment']['comments']
 qa = [c for c in cs if c['author']['name'] not in NOT_QA]
 print('comments=%d qa_design=%d' % (len(cs), len(qa)))
@@ -706,7 +735,7 @@ if qa:
 "
 ```
 
-- **QA or design is anyone but `admin` and `tommy.yohanes`.** `admin` posts GitLab's automatic
+- **QA or design is anyone but `TW_NOT_QA`** (`admin` and `tommy.yohanes`). `admin` posts GitLab's automatic
   *mentioned this* notes. `tommy.yohanes` is the account this pipeline comments as, so its smoke
   and not-reproducible notes are this pipeline talking to itself, not a brief.
 - **Every open item in that comment is in scope. Every `(fixed ✅)` item is not**, unless your drive
@@ -718,7 +747,7 @@ if qa:
 - **It overrides the description where they disagree.** Say which comment you followed (its date
   and author) on `ASSUMPTION:`.
 - `qa_design=0` → the description is the brief, as before.
-- A `tommy.yohanes` comment that is **not** pipeline boilerplate (not a smoke, not-reproducible,
+- A `$TW_JIRA_USER` (`tommy.yohanes`) comment that is **not** pipeline boilerplate (not a smoke, not-reproducible,
   release or claim note; for example "target retry with dev env") is the owner's instruction. Follow
   it too.
 
@@ -976,7 +1005,7 @@ steps you never executed is expected at this step; say so on `UNVERIFIED:`.
 ```bash
 git add -A -- . ':!CLAUDE.md' ':!.claude' && git commit && git push   # the fix only, never the harness; §6's steps go in the description
 glab mr create --source-branch "$(git branch --show-current)" \
-  --target-branch "<TARGET_RC>" --assignee tommy.yohanes \
+  --target-branch "<TARGET_RC>" --assignee "$TW_MR_ASSIGNEE" \
   --squash-before-merge \
   --title "fix(<area>): [<KEY>] <what changed>" \
   --description "<why, how verified>
@@ -1001,7 +1030,7 @@ title it `fix(<area>): [<KEY>][<KEY>] <the shared feature>`, open the descriptio
 squash off explicitly:
 
 ```bash
-glab api --hostname git.tuntun.co.id --method PUT "projects/49/merge_requests/<IID>?squash=false" \
+glab api --hostname "$TW_GITLAB_HOST" --method PUT "projects/$TW_GITLAB_PROJECT/merge_requests/<IID>?squash=false" \
 | python3 -c "import sys, json; print('squash=%s' % json.load(sys.stdin)['squash'])"   # must print False
 ```
 
@@ -1053,7 +1082,7 @@ other agent in this pass, and never `isolation: "worktree"`:
 > Ticket summary: `<summary from §1>`. The MR description holds the acceptance intent and the
 > `## Smoke steps`; read it with `glab mr view <IID>`.
 > Every shell block of yours starts with `export PATH="$HOME/.tuntun/bin:$PATH"` and
-> `eval "$(tt-slot env --with-jira)"`.
+> `eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh`.
 > Nothing was built and the smoke steps were not driven — Phase B does both; do not ask for them.
 > Nobody is watching: never ask. Return APPROVED or FINDINGS, each finding with `file:line`,
 > severity and evidence, and nothing after the verdict.
@@ -1105,12 +1134,13 @@ behind a `fixing` ticket is worse than an unmerged one.
 This is no longer a queue read. §1a already chose the pass ticket; §8 only confirms its MR and
 guards against the ticket having moved. The filter below is kept because it is also §1a's source.
 
-Filter 10550 is *"Fixing"*: `status = fixing AND assignee = tommy.yohanes` across UATP/TUNTUN/PBT.
-Two clauses are added: `component = ios`, and **this Mac's own claim label**.
+`TW_FIXING_JQL` is the in-flight queue. Its default, filter 10550, is *"Fixing"*: `status = fixing
+AND assignee = tommy.yohanes` across UATP/TUNTUN/PBT. Two clauses are added: `component =
+$TW_COMPONENT`, and **this Mac's own claim label**.
 
 ```bash
-export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"
-JQL="filter = 10550 AND component = ios AND labels IN (\"mac-$TT_HOST_ID\") AND labels NOT IN (\"needs-human\")"
+export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
+JQL="($TW_FIXING_JQL) AND component = \"$TW_COMPONENT\" AND labels IN (\"$TW_MINE\") AND labels NOT IN (\"needs-human\")"
 curl -sS -k -G -H "Authorization: Bearer $JIRA_TOK" \
   --data-urlencode "jql=$JQL" --data-urlencode "fields=summary,labels" \
   --data-urlencode "maxResults=50" "$JIRA_URL/search" \
@@ -1132,8 +1162,8 @@ smoke**; report and end the pass.
 **Then confirm the pass ticket's MR exists:**
 
 ```bash
-glab api --hostname git.tuntun.co.id \
-  "projects/49/merge_requests?state=opened&per_page=100" \
+glab api --hostname "$TW_GITLAB_HOST" \
+  "projects/$TW_GITLAB_PROJECT/merge_requests?state=opened&per_page=100" \
 | python3 -c "
 import sys, json
 KEYS = ['<KEY>']                     # every ticket of the pass batch
@@ -1144,7 +1174,7 @@ for m in json.load(sys.stdin):
 ```
 
 This check is load-bearing, not a formality: §2 sets `fixing` the moment it *claims* a ticket, so
-filter 10550 also holds tickets still being fixed with no MR behind them yet. No open MR for the
+the fixing queue also holds tickets still being fixed with no MR behind them yet. No open MR for the
 pass ticket → nothing to smoke; report and end. Do **not** try another row.
 
 Fetch every open MR and match client-side. Do not use `scope=assigned_to_me` — it silently drops an
@@ -1199,10 +1229,10 @@ building and driving a running app. Keep the prompt short; the runbook is this f
 
 > You smoke-test MR **!<IID>** (`<source_branch>` → `<target_branch>`, ticket **<KEY>**) in the
 > worktree at `<this working directory>`.
-> Read `~/.claude/commands/ticket-workflow.md` and execute **§9 through §12** exactly as written,
+> Read `~/.claude/skills/ticket-workflow/SKILL.md` and execute **§9 through §12** exactly as written,
 > then stop.
 > Every shell block of yours starts with `export PATH="$HOME/.tuntun/bin:$PATH"`, `export
-> NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"` and `eval "$(tt-slot env --with-jira)"` — shell state
+> NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"` and `eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh` — shell state
 > does not survive between tool calls, and serve-sim needs nvm's node.
 > Invoke the **`/serve-sim:serve-sim` skill** before you drive anything; it owns the CLI surface.
 > Nobody is watching: at any choice point take the recommended option and record it, never ask.
@@ -1249,6 +1279,7 @@ another MR.
 > job, and you finish with the verdict block — nothing else.
 
 ```bash
+export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
 git fetch origin --prune
 tt-harness-switch checkout <source_branch> && tt-harness-switch rebase "origin/<target_branch>"
 ```
@@ -1267,8 +1298,8 @@ A clean rebase is not a working build. RC-side code that references APIs this br
 rebase attempt you threw away. So build before you trust it:
 
 ```bash
-xcodebuild -workspace TTSecuritas.xcworkspace \
-  -scheme 'TTSecuritas Staging' -destination 'platform=iOS Simulator,name=iPhone 17' build
+xcodebuild -workspace "$TW_WORKSPACE" \
+  -scheme "$TW_SCHEME" -destination "platform=iOS Simulator,name=$TW_SIM_DEVICE" build
 ```
 
 **A build needs no booted simulator and no Simulator.app** — `xcodebuild build` resolves the named
@@ -1281,8 +1312,8 @@ Use the scheme matching the environment you are driving, from §4's table. **`TT
 the default** — switch only when the ticket named another backend, and build the scheme that matches
 the `APP_ID` §10 will pass, or you will drive a bundle you did not build. Never pipe the verdict through `tail` — that turns BUILD FAILED into
 exit 0. Grep loosely for the verdict line, anchor error greps to `file:line:col:`, and never pass
-`-derivedDataPath` (it forces a cold build). The built app is **`Tuntun Sekuritas.app`**, not
-`TTSecuritas.app`.
+`-derivedDataPath` (it forces a cold build). The built app is **`$TW_APP_NAME`** (`Tuntun Sekuritas.app`,
+not `TTSecuritas.app`).
 
 Also confirm §6's smoke steps are actually on the MR, and pull them out to drive from:
 
@@ -1318,11 +1349,11 @@ which is most of what has ever gone wrong here.
 boot it and bring Simulator.app up:
 
 ```bash
-export PATH="$HOME/.tuntun/bin:$PATH"
+export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
 tt-sim-wait || echo "SIM BUSY — call tt-sim-wait again (max 4 calls) before opening the simulator"
 SIM=$(xcrun simctl list devices available -j | python3 -c "
 import sys, json
-print(next(x['udid'] for v in json.load(sys.stdin)['devices'].values() for x in v if x['name']=='iPhone 17'))
+print(next(x['udid'] for v in json.load(sys.stdin)['devices'].values() for x in v if x['name']=='$TW_SIM_DEVICE'))
 ")
 xcrun simctl boot "$SIM" 2>/dev/null || true      # already booted is fine
 open -a Simulator --args -CurrentDeviceUDID "$SIM"
@@ -1341,7 +1372,7 @@ every UDID on this Mac changed when the toolchain was reinstalled:
 ```bash
 export PATH="$HOME/.tuntun/bin:$PATH"
 export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"
-eval "$(tt-slot env --with-jira)"
+eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
 UDID=$(xcrun simctl list devices booted -j | python3 -c "
 import sys, json
 ids = [x['udid'] for v in json.load(sys.stdin)['devices'].values() for x in v if x['state']=='Booted']
@@ -1361,7 +1392,7 @@ looks healthy, so it reads as an app bug rather than an input-routing one. `xcru
 
 ```bash
 xcrun simctl install "$UDID" \
-  "$HOME/Library/Developer/Xcode/DerivedData/TTSecuritas-*/Build/Products/Staging-iphonesimulator/Tuntun Sekuritas.app"
+  "$HOME/Library/Developer/Xcode/DerivedData/${TW_WORKSPACE%.xcworkspace}-"*"/Build/Products/$TW_PRODUCTS/$TW_APP_NAME"
 ```
 
 Then read the live backend off Xpector — `tuntun-ios xpector summary` — because a stored
@@ -1515,9 +1546,9 @@ no real multipart encoder. Use plain curl with a `PRIVATE-TOKEN` header — `gla
 token, so read it back rather than storing a second copy:
 
 ```bash
-TOK=$(glab config get token --host git.tuntun.co.id)
+TOK=$(glab config get token --host "$TW_GITLAB_HOST")
 curl -sS -k -X POST -H "PRIVATE-TOKEN: $TOK" -F "file=@.tuntun/proof/<KEY>-proof.png" \
-  "https://git.tuntun.co.id/api/v4/projects/49/uploads"
+  "https://$TW_GITLAB_HOST/api/v4/projects/$TW_GITLAB_PROJECT/uploads"
 ```
 
 That returns JSON whose `markdown` field (`![shot](/uploads/<hash>/shot.png)`) is what you paste
@@ -1570,15 +1601,15 @@ resolvable threads: §7b's review notes and §11's proof note all land `resolved
 false `blocked`:
 
 ```bash
-glab api --hostname git.tuntun.co.id "projects/49/merge_requests/<IID>/discussions" \
+glab api --hostname "$TW_GITLAB_HOST" "projects/$TW_GITLAB_PROJECT/merge_requests/<IID>/discussions" \
 | python3 -c "
 import sys, json
 for d in json.load(sys.stdin):
     n = (d.get('notes') or [{}])[0]
     if n.get('resolvable') and not n.get('resolved'): print(d['id'])
 " | while read id; do
-  glab api --hostname git.tuntun.co.id --method PUT \
-    "projects/49/merge_requests/<IID>/discussions/$id?resolved=true"
+  glab api --hostname "$TW_GITLAB_HOST" --method PUT \
+    "projects/$TW_GITLAB_PROJECT/merge_requests/<IID>/discussions/$id?resolved=true"
 done
 ```
 
@@ -1597,11 +1628,11 @@ ticket moves to `fixed` with its own proof comment (§11 attaches the screenshot
 subsection to each ticket):
 
 ```bash
-glab api --hostname git.tuntun.co.id --method PUT "projects/49/merge_requests/<IID>/merge?squash=false"
+glab api --hostname "$TW_GITLAB_HOST" --method PUT "projects/$TW_GITLAB_PROJECT/merge_requests/<IID>/merge?squash=false"
 for k in <every KEY of the batch>; do tuntun-ios jira issue issue transition "$k" --status fixed --insecure; done
 ```
 
-`release_candidate/*` branches are unprotected, so I can merge them as Developer — `main` and `dev`
+`$TW_RC_PREFIX/*` branches (`release_candidate/*`) are unprotected, so I can merge them as Developer — `main` and `dev`
 are Maintainers-only and will refuse. `--squash` matches the box §7 ticked at create time — pass
 it anyway, so an MR opened without it still lands as one commit. Fast-forward only, so if the target moved while you were
 testing, rebase again (§9), re-push and re-merge. There is **no CI on project 49**, so there is no
