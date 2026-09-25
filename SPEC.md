@@ -522,6 +522,13 @@ shutdown at 06:00 and wake-or-power-on at 08:45 every day. That is the one step 
 so it runs only when `pmset -g sched` differs. A LaunchAgent cannot power a Mac on, so this part
 is pmset's, not launchd's.
 
+`mac-cleanup/` is this Mac's disk hygiene — Xcode build output, simulators, caches and stale
+Claude Code scratchpads — and is installed separately, because it is not the bot's:
+`sh mac-cleanup/install.sh` symlinks the script to `~/.local/bin/friday-cleanup.sh` and the
+`/mac-cleanup` command into `~/.claude/commands`. Its unattended Friday `--apply` run deletes
+things with nobody watching, so it is opt-in: `--schedule [HH:MM]` loads
+`com.tommy.mac-cleanup`, `--unschedule` removes it.
+
 ```sh
 install:  sh launchd/install.sh     # writes __CHECKOUT__ and __HOME__ in, bootstraps each agent, then power.sh
 power:    sh launchd/power.sh --check   # does pmset's schedule match the committed one
