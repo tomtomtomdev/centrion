@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""A Terminal window onto a running session: watch it, and type into it. POSIX only.
+"""A terminal window onto a running session: watch it, and type into it. POSIX only.
 
 The runner still owns the pty, and that is the whole reason this exists as a second process
-rather than as `claude` started straight into Terminal.app. §2: sessions must outlive the
+rather than as `claude` started straight into a terminal app. §2: sessions must outlive the
 listener, the link is scraped off the master, and a window somebody closes by accident must not
 take the session with it. So the runner keeps the terminal exactly as before and also serves it
 on a Unix socket in the session directory; a viewer connects, sees what the pty draws, and what
@@ -53,6 +53,14 @@ DETACH = b"\x1d"
 #: A viewer that stops reading (a suspended Terminal, a stuck ssh) must cost the session one
 #: second once, not its life — `broadcast` is called from the loop that holds the session open.
 SEND_TIMEOUT = 1.0
+
+#: Which terminal the window is opened in, most wanted first. The window is Warp's: it is what
+#: this Mac reaches for, and a `.command` runs in it exactly as it does in Terminal, because Warp
+#: declares itself a handler for `com.apple.terminal.shell-script` too. So the app is the only
+#: thing that changes — not `open`, not the `.command`, not the socket underneath it. Terminal
+#: stays at the end of the list as the one app a Mac is guaranteed to have: a Mac without Warp
+#: still gets a window rather than nothing.
+APPS = ("Warp", "Terminal")
 
 #: How long the resize nudge holds the off-by-one size. Long enough for the child to see two
 #: SIGWINCHes rather than coalescing them into none.
@@ -184,7 +192,7 @@ class Server:
 
 
 def command_file(directory, script, python=sys.executable):
-    """Write the `.command` Terminal.app runs, and return its path.
+    """Write the `.command` the terminal app runs, and return its path.
 
     A `.command` handed to `open` rather than `osascript -e 'tell application "Terminal"'`,
     because the AppleScript route needs an Automation grant for whatever process asks — the
@@ -199,16 +207,37 @@ def command_file(directory, script, python=sys.executable):
     return path
 
 
-def open_window(directory, script, log=_stderr):
-    """Open a Terminal window attached to the session in `directory`. Never raises: a session
+def installed(app):
+    """Whether LaunchServices can find `app`. `open -Ra` resolves the name without launching it,
+    so asking costs nothing a window does not already cost."""
+    try:
+        with open(os.devnull, "r+b") as devnull:
+            return subprocess.call(["open", "-Ra", app], stdin=devnull, stdout=devnull,
+                                   stderr=devnull) == 0
+    except OSError:
+        return False
+
+
+def preferred_app(apps=APPS):
+    """The first of `apps` this Mac has, and the last of them when it has none of the others —
+    an app `open` cannot find is a window that silently never appears, and Terminal is there."""
+    for app in apps[:-1]:
+        if installed(app):
+            return app
+    return apps[-1]
+
+
+def open_window(directory, script, app=None, log=_stderr):
+    """Open a terminal window attached to the session in `directory`. Never raises: a session
     without a window is still a session, and this is called from the read loop that holds it."""
     try:
+        app = app or preferred_app()
         path = command_file(directory, script)
         with open(os.devnull, "r+b") as devnull:
-            subprocess.Popen(["open", "-a", "Terminal", path], stdin=devnull, stdout=devnull,
+            subprocess.Popen(["open", "-a", app, path], stdin=devnull, stdout=devnull,
                              stderr=devnull, close_fds=True)
     except OSError as e:
-        log("could not open a Terminal window: %s" % e)
+        log("could not open a %s window: %s" % (app, e))
         return False
     return True
 

@@ -124,7 +124,7 @@ tmux (not installed; `pty` does the job without a dependency), Docker, any web f
   commands.py               message → intent, pure, no I/O
   config.py                 config load + project resolution (§3), shared by bot and runner
   session.py                PTY runner; also runnable by hand for debugging
-  attach.py                 the Terminal window onto a session: socket server + viewer
+  attach.py                 the terminal window onto a session: socket server + viewer
   telegram.py               Bot API client (lift from stock-watch-project/notify.py)
   .telegram.json            0600, gitignored — token, allowlist, root
   tests/
@@ -142,7 +142,7 @@ tmux (not installed; `pty` does the job without a dependency), Docker, any web f
     sessions/<sid>/pty.log    full ANSI transcript of that session's terminal, capped (§10.7)
     sessions/<sid>/pty.log.1  the transcript before the last rotation; the tail reads both
     sessions/<sid>/tty.sock   0600 Unix socket a viewer attaches through (attach.py)
-    sessions/<sid>/attach.command  what Terminal.app is handed to open that viewer
+    sessions/<sid>/attach.command  what Warp (or Terminal) is handed to open that viewer
 ```
 
 `/usr/bin/python3` (3.9.6, system), stdlib only — `urllib`, `json`, `pty`, `select`, `os`,
@@ -165,8 +165,11 @@ over.
 }
 ```
 
-**`terminal_window` opens a Terminal.app window onto each session once it is live**, default
-on, Mac only. The runner still owns the pty (§2) and serves it on `tty.sock`; the window is a
+**`terminal_window` opens a Warp window onto each session once it is live**, default on, Mac
+only. Warp because it is what this Mac reaches for; Terminal.app when Warp is not installed,
+which is the only app a Mac is guaranteed to have. Nothing but the app name changes between the
+two — Warp declares itself a handler for `com.apple.terminal.shell-script`, so the same
+`.command` runs in either. The runner still owns the pty (§2) and serves it on `tty.sock`; the window is a
 viewer (`session.py --attach <sid>`) that mirrors the screen and types into it, resizes the pty
 to itself, and can be closed — or left with Ctrl-] — without ending the session. It opens only
 after the link is scraped, because until then the pty must stay at §6's size. `open` and a

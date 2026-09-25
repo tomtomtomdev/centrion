@@ -35,8 +35,9 @@ if sys.platform == "win32":
 else:
     DEFAULT_CLAUDE_BIN = "~/.local/bin/claude"
 DEFAULT_MAX_SESSIONS = 2          # SPEC.md §3: 8 GB on this box.
-#: Open a Terminal window onto every session once it is live (attach.py). Mac only: the window
-#: is Terminal.app and the socket it attaches through is a Unix one.
+#: Open a terminal window onto every session once it is live (attach.py). Mac only: the window
+#: is Warp's — Terminal.app where there is no Warp — and the socket it attaches through is a
+#: Unix one.
 DEFAULT_TERMINAL_WINDOW = sys.platform == "darwin"
 REQUIRED_MODE = 0o600             # The Mac's secrecy check. Windows has no mode; see below.
 
@@ -376,7 +377,8 @@ def _window(path, data):
     if type(on) is not bool:
         raise ConfigError("%s: `terminal_window` must be true or false, found %r" % (path, on))
     if on and sys.platform != "darwin":
-        raise ConfigError("%s: `terminal_window` opens Terminal.app and is Mac only" % path)
+        raise ConfigError("%s: `terminal_window` opens Warp or Terminal.app and is Mac only"
+                          % path)
     return on
 
 

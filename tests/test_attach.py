@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""attach.py — the Terminal window onto a session. POSIX only, no network, no Terminal.app.
+"""attach.py — the terminal window onto a session. POSIX only, no network, no window opened.
 
 Stdlib only: `/usr/bin/python3 -m unittest discover -s tests -t . -v`.
 """
@@ -156,9 +156,40 @@ class TestTheWindow(unittest.TestCase):
 
     def test_it_is_opened_with_open_and_not_applescript(self):
         with mock.patch.object(attach.subprocess, "Popen") as popen:
-            self.assertTrue(attach.open_window(self.dir, "/x/session.py", log=lambda _m: None))
+            self.assertTrue(attach.open_window(self.dir, "/x/session.py", app="Warp",
+                                               log=lambda _m: None))
         argv = popen.call_args[0][0]
-        self.assertEqual(argv[:3], ["open", "-a", "Terminal"])
+        self.assertEqual(argv[:3], ["open", "-a", "Warp"])
+        self.assertEqual(argv[3], os.path.join(self.dir, attach.COMMAND))
+
+    def test_the_window_is_warps_when_warp_is_installed(self):
+        with mock.patch.object(attach, "installed", lambda app: app == "Warp"):
+            self.assertEqual(attach.preferred_app(), "Warp")
+
+    def test_it_falls_back_to_terminal_when_warp_is_not(self):
+        with mock.patch.object(attach, "installed", lambda _app: False):
+            self.assertEqual(attach.preferred_app(), "Terminal")
+
+    def test_terminal_is_never_asked_after_because_it_is_the_fallback(self):
+        asked = []
+        with mock.patch.object(attach, "installed", lambda app: asked.append(app) or False):
+            attach.preferred_app()
+        self.assertEqual(asked, ["Warp"])
+
+    def test_the_default_app_is_the_preferred_one(self):
+        with mock.patch.object(attach, "preferred_app", lambda: "Warp"):
+            with mock.patch.object(attach.subprocess, "Popen") as popen:
+                attach.open_window(self.dir, "/x/session.py", log=lambda _m: None)
+        self.assertEqual(popen.call_args[0][0][:3], ["open", "-a", "Warp"])
+
+    def test_an_app_launchservices_cannot_find_is_not_installed(self):
+        with mock.patch.object(attach.subprocess, "call", return_value=1) as call:
+            self.assertFalse(attach.installed("Warp"))
+        self.assertEqual(call.call_args[0][0], ["open", "-Ra", "Warp"])
+
+    def test_it_is_installed_when_open_resolves_it(self):
+        with mock.patch.object(attach.subprocess, "call", return_value=0):
+            self.assertTrue(attach.installed("Warp"))
 
     def test_a_window_that_cannot_open_is_not_an_error(self):
         with mock.patch.object(attach.subprocess, "Popen", side_effect=OSError("no")):
