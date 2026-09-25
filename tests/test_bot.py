@@ -1545,10 +1545,13 @@ class TestFittingIntoOneMessage(unittest.TestCase):
                          10000)
 
 
-#: The three checks below compare the plist against *this* checkout, and the plist names the
-#: Mac's. The Windows startup is a Task Scheduler XML (WINDOWS.md W5) with its own checks.
+#: The three checks below compare the plist, as install.sh renders it, against *this* checkout.
+#: The Windows startup is a Task Scheduler XML (WINDOWS.md W5) with its own checks.
 this_mac_checkout = unittest.skipUnless(
     POSIX, "the plist names the Mac checkout's paths; Task Scheduler is WINDOWS.md W5")
+
+#: What the committed plist says where install.sh writes the checkout's path.
+CHECKOUT = "__CHECKOUT__"
 
 
 class TestTheLaunchdInstall(unittest.TestCase):
@@ -1563,7 +1566,22 @@ class TestTheLaunchdInstall(unittest.TestCase):
     def setUpClass(cls):
         cls.dir = os.path.join(ROOT, "launchd")
         with open(os.path.join(cls.dir, "com.tommy.centrion.bot.plist"), "rb") as fh:
-            cls.plist = plistlib.load(fh)
+            cls.template = fh.read()
+        # Checked as install.sh would install it here. The committed file names no home at all,
+        # because the repo is checked out under a different one on each Mac (fce1d4a set it to
+        # one and broke these three on the other).
+        cls.plist = plistlib.loads(cls.template.replace(CHECKOUT.encode(), ROOT.encode()))
+
+    def test_the_committed_plist_names_no_home(self):
+        self.assertNotIn(b"/Users/", self.template)
+        self.assertIn(CHECKOUT.encode(), self.template)
+
+    @this_mac_checkout
+    def test_install_renders_the_plist_these_checks_read(self):
+        got = subprocess.run(["/bin/sh", os.path.join(self.dir, "install.sh"), "--print"],
+                             stdout=subprocess.PIPE, check=True).stdout
+        self.assertNotIn(CHECKOUT.encode(), got)
+        self.assertEqual(plistlib.loads(got), self.plist)
 
     def test_the_label_matches_the_filename_and_the_box_convention(self):
         self.assertEqual(self.plist["Label"], "com.tommy.centrion.bot")

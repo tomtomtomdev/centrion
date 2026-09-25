@@ -509,8 +509,7 @@ StandardErrorPath .../var/bot.log
   never opened.
 
 ```sh
-install:  cp launchd/com.tommy.centrion.bot.plist ~/Library/LaunchAgents/
-          launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tommy.centrion.bot.plist
+install:  sh launchd/install.sh     # writes this checkout's path in for __CHECKOUT__, then bootstraps
 restart:  launchctl kickstart -k gui/$(id -u)/com.tommy.centrion.bot
 status:   launchctl print gui/$(id -u)/com.tommy.centrion.bot | head -30
 remove:   launchctl bootout gui/$(id -u)/com.tommy.centrion.bot

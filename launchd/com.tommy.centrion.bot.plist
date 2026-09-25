@@ -32,9 +32,11 @@
   opens it itself, before the script runs. This is also why the bot's whole reachable world is
   ~/Projects (SPEC.md §9.2), and why var/ must exist before the first bootstrap.
 
-  install:  mkdir -p /Users/tommyyohanes/Projects/centrion/var
-            cp launchd/com.tommy.centrion.bot.plist ~/Library/LaunchAgents/
-            launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.tommy.centrion.bot.plist
+  __CHECKOUT__ is a placeholder, not a path: this repo is checked out under more than one home,
+  and a plist naming any one of them is wrong on every other Mac. launchd expands nothing — no
+  ~, no $HOME — so install.sh writes the checkout's absolute path in as it copies.
+
+  install:  sh launchd/install.sh
   restart:  launchctl kickstart -k gui/$(id -u)/com.tommy.centrion.bot
   status:   launchctl print gui/$(id -u)/com.tommy.centrion.bot | head -30
   remove:   launchctl bootout gui/$(id -u)/com.tommy.centrion.bot
@@ -52,11 +54,11 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>
-    <string>/Users/tommyyohanes/Projects/centrion/launchd/bot.sh</string>
+    <string>__CHECKOUT__/launchd/bot.sh</string>
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/tommyyohanes/Projects/centrion</string>
+  <string>__CHECKOUT__</string>
 
   <key>RunAtLoad</key>
   <true/>
@@ -70,9 +72,9 @@
   <string>Standard</string>
 
   <key>StandardOutPath</key>
-  <string>/Users/tommyyohanes/Projects/centrion/var/bot.log</string>
+  <string>__CHECKOUT__/var/bot.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/tommyyohanes/Projects/centrion/var/bot.log</string>
+  <string>__CHECKOUT__/var/bot.log</string>
 
   <key>EnvironmentVariables</key>
   <dict>
