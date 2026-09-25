@@ -113,6 +113,18 @@ class Terminal:
             raise ValueError("write to a closed terminal")
         os.write(self._master, data)
 
+    def size(self):
+        """(rows, cols) as the kernel has them for this pty."""
+        rows, cols, _, _ = struct.unpack(
+            "HHHH", fcntl.ioctl(self._master, termios.TIOCGWINSZ, b"\0" * 8))
+        return rows, cols
+
+    def resize(self, rows, cols):
+        """Set the window size. On the master, after the start, which §6 says not to do for
+        the *first* size — this is for an attached viewer (attach.py), long after the link was
+        scraped. The kernel sends the child its SIGWINCH."""
+        fcntl.ioctl(self._master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
     def alive(self):
         """Is there more output coming? False once the pty has hung up, and once this is
         closed."""

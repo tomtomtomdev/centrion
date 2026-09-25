@@ -35,6 +35,9 @@ if sys.platform == "win32":
 else:
     DEFAULT_CLAUDE_BIN = "~/.local/bin/claude"
 DEFAULT_MAX_SESSIONS = 2          # SPEC.md §3: 8 GB on this box.
+#: Open a Terminal window onto every session once it is live (attach.py). Mac only: the window
+#: is Terminal.app and the socket it attaches through is a Unix one.
+DEFAULT_TERMINAL_WINDOW = sys.platform == "darwin"
 REQUIRED_MODE = 0o600             # The Mac's secrecy check. Windows has no mode; see below.
 
 #: Windows: the principals that may appear in the config file's DACL. Everyone else is a
@@ -67,6 +70,7 @@ ICACLS_FIX = 'icacls "%s" /inheritance:r%s /grant:r "%%USERNAME%%":F'
 
 KNOWN_KEYS = frozenset({
     "bot_token", "allowed_chat_ids", "projects_root", "claude_bin", "max_sessions",
+    "terminal_window",
 })
 
 
@@ -77,14 +81,17 @@ class ConfigError(Exception):
 class Config:
     """Validated settings. Immutable, and deliberately unprintable in full."""
 
-    __slots__ = ("bot_token", "allowed_chat_ids", "projects_root", "claude_bin", "max_sessions")
+    __slots__ = ("bot_token", "allowed_chat_ids", "projects_root", "claude_bin", "max_sessions",
+                 "terminal_window")
 
-    def __init__(self, bot_token, allowed_chat_ids, projects_root, claude_bin, max_sessions):
+    def __init__(self, bot_token, allowed_chat_ids, projects_root, claude_bin, max_sessions,
+                 terminal_window=False):
         object.__setattr__(self, "bot_token", bot_token)
         object.__setattr__(self, "allowed_chat_ids", allowed_chat_ids)
         object.__setattr__(self, "projects_root", projects_root)
         object.__setattr__(self, "claude_bin", claude_bin)
         object.__setattr__(self, "max_sessions", max_sessions)
+        object.__setattr__(self, "terminal_window", terminal_window)
 
     def __setattr__(self, *_):
         raise AttributeError("Config is immutable")
@@ -364,6 +371,15 @@ def _cap(path, data):
     return n
 
 
+def _window(path, data):
+    on = data.get("terminal_window", DEFAULT_TERMINAL_WINDOW)
+    if type(on) is not bool:
+        raise ConfigError("%s: `terminal_window` must be true or false, found %r" % (path, on))
+    if on and sys.platform != "darwin":
+        raise ConfigError("%s: `terminal_window` opens Terminal.app and is Mac only" % path)
+    return on
+
+
 def load(path=CONFIG, check_claude=True):
     """Read and validate `path`. Raises ConfigError, never returns a partial Config."""
     data = _raw(path)
@@ -374,6 +390,7 @@ def load(path=CONFIG, check_claude=True):
         projects_root=_directory(path, data),
         claude_bin=_binary(path, data, check_claude),
         max_sessions=_cap(path, data),
+        terminal_window=_window(path, data),
     )
 
 

@@ -584,7 +584,8 @@ class Runner:
     """One session, from `starting` to `ended`, and the pty held open in between."""
 
     def __init__(self, sid, cwd, name, root=SESSIONS, binary=None, argv=None, project=None,
-                 chat_id=None, prompt=None, projects_root=None, trust=False, log=_stderr):
+                 chat_id=None, prompt=None, projects_root=None, trust=False, window=False,
+                 log=_stderr):
         self.sid = sid
         self.cwd = cwd
         self.name = name
@@ -598,6 +599,11 @@ class Runner:
         # argument is the half only the listener knows. The empty half is checked in run(),
         # where the directory is — see there.
         self.trusting = trust
+        # A Terminal window onto the session once it is live (attach.py). The socket a window
+        # attaches through is served on every POSIX session regardless, so `session.py
+        # --attach <sid>` reaches a session this was off for.
+        self.window = window
+        self.viewers = None
         self.log = log
         self.scrape = Scrape()
         self.trust = None
@@ -698,9 +704,12 @@ class Runner:
         # terminate() for the window in which that does not happen.
         previous = self._catch_signals()
         transcript = Transcript(os.path.join(self.dir, TRANSCRIPT), log=self.log)
+        self.viewers = self._serve_viewers(terminal)
         try:
             self.pump(terminal, transcript)
         finally:
+            if self.viewers is not None:
+                self.viewers.close()
             transcript.close()
             terminate(pid, log=self.log, terminal=terminal)
             # Last, and that order is the point on both platforms (§9.10, WINDOWS.md §4):
@@ -715,6 +724,21 @@ class Runner:
         self.update(state=state)
         self.log("session %s: %s" % (self.sid, state))
         return state
+
+    def _serve_viewers(self, terminal):
+        """attach.Server on the Mac, None where there are no Unix sockets to serve it on.
+
+        Never fatal: a session nobody can watch from a window is still the session the phone
+        asked for.
+        """
+        if sys.platform == "win32":
+            return None
+        try:
+            import attach
+            return attach.Server(self.dir, terminal, log=self.log)
+        except OSError as e:
+            self.log("session %s: no viewer socket: %s" % (self.sid, e))
+            return None
 
     def _catch_signals(self):
         """SIGTERM ends the session rather than the runner, so meta.json is left truthful.
@@ -817,6 +841,8 @@ class Runner:
         if not chunk:
             return
         transcript.write(chunk)
+        if self.viewers is not None:
+            self.viewers.broadcast(chunk)
         if not self.scrape.url and self.scrape.feed(chunk):
             self.went_live()
 
@@ -834,12 +860,20 @@ class Runner:
         """The record and the log, from either of the two ways a link is finished."""
         self.update(state=LIVE, url=self.scrape.url)
         self.log("live: %s" % self.scrape.url)
+        # Only now: until the link is scraped the pty has to stay at §6's size, and a window
+        # attaching resizes it to the window's.
+        if self.window and self.viewers is not None:
+            import attach
+            attach.open_window(self.dir, os.path.abspath(__file__), log=self.log)
 
 
 def main():
     ap = argparse.ArgumentParser(description="centrion — the PTY runner for one session.")
-    ap.add_argument("--cwd", required=True, help="the project directory to start in")
-    ap.add_argument("--name", required=True, help="the --remote-control session name")
+    ap.add_argument("--attach", metavar="SID", default=None,
+                    help="watch and type into a running session, by sid or directory; "
+                         "Ctrl-] leaves it running")
+    ap.add_argument("--cwd", help="the project directory to start in")
+    ap.add_argument("--name", help="the --remote-control session name")
     ap.add_argument("--sid", default=None, help="6 hex; generated when absent")
     ap.add_argument("--project", default=None, help="defaults to the basename of --cwd")
     ap.add_argument("--chat-id", type=int, default=None, help="who to tell when it ends")
@@ -850,6 +884,13 @@ def main():
     ap.add_argument("--foreground", action="store_true",
                     help="do not detach; for debugging by hand (SPEC.md §12)")
     a = ap.parse_args()
+
+    if a.attach:
+        import attach
+        target = a.attach if os.sep in a.attach else os.path.join(a.root, a.attach)
+        return attach.attach(target)
+    if not a.cwd or not a.name:
+        ap.error("--cwd and --name are required to start a session")
 
     try:
         cfg = config.load()
@@ -864,7 +905,8 @@ def main():
 
     runner = Runner(a.sid or os.urandom(3).hex(), os.path.abspath(os.path.expanduser(a.cwd)),
                     a.name, root=a.root, binary=cfg.claude_bin, project=a.project,
-                    chat_id=a.chat_id, prompt=a.prompt, trust=a.trust)
+                    chat_id=a.chat_id, prompt=a.prompt, trust=a.trust,
+                    window=cfg.terminal_window)
     if a.foreground:
         print("session %s · %s" % (runner.sid, runner.dir), file=sys.stderr)
     state = runner.run()

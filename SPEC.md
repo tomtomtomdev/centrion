@@ -124,6 +124,7 @@ tmux (not installed; `pty` does the job without a dependency), Docker, any web f
   commands.py               message → intent, pure, no I/O
   config.py                 config load + project resolution (§3), shared by bot and runner
   session.py                PTY runner; also runnable by hand for debugging
+  attach.py                 the Terminal window onto a session: socket server + viewer
   telegram.py               Bot API client (lift from stock-watch-project/notify.py)
   .telegram.json            0600, gitignored — token, allowlist, root
   tests/
@@ -140,6 +141,8 @@ tmux (not installed; `pty` does the job without a dependency), Docker, any web f
     sessions/<sid>/meta.json
     sessions/<sid>/pty.log    full ANSI transcript of that session's terminal, capped (§10.7)
     sessions/<sid>/pty.log.1  the transcript before the last rotation; the tail reads both
+    sessions/<sid>/tty.sock   0600 Unix socket a viewer attaches through (attach.py)
+    sessions/<sid>/attach.command  what Terminal.app is handed to open that viewer
 ```
 
 `/usr/bin/python3` (3.9.6, system), stdlib only — `urllib`, `json`, `pty`, `select`, `os`,
@@ -157,9 +160,18 @@ over.
   "allowed_chat_ids": [987654321],
   "projects_root": "/Users/tomtomtomtom/Projects",
   "claude_bin": "/Users/tomtomtomtom/.local/bin/claude",
-  "max_sessions": 2
+  "max_sessions": 2,
+  "terminal_window": true
 }
 ```
+
+**`terminal_window` opens a Terminal.app window onto each session once it is live**, default
+on, Mac only. The runner still owns the pty (§2) and serves it on `tty.sock`; the window is a
+viewer (`session.py --attach <sid>`) that mirrors the screen and types into it, resizes the pty
+to itself, and can be closed — or left with Ctrl-] — without ending the session. It opens only
+after the link is scraped, because until then the pty must stay at §6's size. `open` and a
+`.command` file rather than AppleScript, so no Automation grant is ever asked of launchd.
+`session.py --attach <sid>` from any terminal does the same by hand, with this set or not.
 
 **`bot_token` is a bot of its own, not the stock-watch one.** Sharing would break in a way that
 is hard to see: `notify.py --whoami` calls `getUpdates` (notify.py:171), and two consumers on one
