@@ -513,8 +513,18 @@ StandardErrorPath .../var/bot.log
   before `setsid()`, guarded with `try/except OSError` for the hand-run case where fd 9 was
   never opened.
 
+`install.sh` sets up the rest of this Mac's schedule too, so a new Mac gets all of it from the one
+command. `com.tommy.tt-lcmp-pull` runs the tuntun tooling's `~/.tuntun/bin/tt-lcmp-pull` at 09:00;
+its plist says `__HOME__` where it needs the home directory, and install.sh skips it with a warning
+when that program is not installed yet. `launchd/power.sh` then sets pmset's repeating events,
+shutdown at 06:00 and wake-or-power-on at 08:45 every day. That is the one step that needs `sudo`,
+so it runs only when `pmset -g sched` differs. A LaunchAgent cannot power a Mac on, so this part
+is pmset's, not launchd's.
+
 ```sh
-install:  sh launchd/install.sh     # writes this checkout's path in for __CHECKOUT__, then bootstraps
+install:  sh launchd/install.sh     # writes __CHECKOUT__ and __HOME__ in, bootstraps each agent, then power.sh
+power:    sh launchd/power.sh --check   # does pmset's schedule match the committed one
+lcmp:     launchctl print gui/$(id -u)/com.tommy.tt-lcmp-pull | head -30
 restart:  launchctl kickstart -k gui/$(id -u)/com.tommy.centrion.bot
 status:   launchctl print gui/$(id -u)/com.tommy.centrion.bot | head -30
 remove:   launchctl bootout gui/$(id -u)/com.tommy.centrion.bot

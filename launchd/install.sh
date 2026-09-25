@@ -1,44 +1,67 @@
 #!/bin/sh
-# Install the LaunchAgent for *this* checkout (SPEC.md §8).
+# Install this Mac's LaunchAgents for *this* checkout, then its power schedule (SPEC.md §8).
 #
-# The committed plist says __CHECKOUT__ wherever it needs the repo's path, because the repo lives
-# under a different home on each Mac and launchd expands nothing. This writes the real path in,
-# copies the result to ~/Library/LaunchAgents, and (re)loads it.
+# The committed plists say __CHECKOUT__ and __HOME__ wherever they need the repo's path or the
+# home directory, because both differ on each Mac and launchd expands nothing. This writes the
+# real paths in, copies each result to ~/Library/LaunchAgents, and (re)loads it. power.sh then
+# sets pmset's daily shutdown and power-on, which is the one step that asks for a password.
 #
-#   sh launchd/install.sh           install, or replace the installed copy and restart it
-#   sh launchd/install.sh --print   the rendered plist on stdout, and nothing else
+#   sh launchd/install.sh                 install, or replace the installed copies and restart them
+#   sh launchd/install.sh --print [label] the rendered plist on stdout (default: the bot), and nothing else
+#
+#   com.tommy.centrion.bot    the Telegram listener
+#   com.tommy.tt-lcmp-pull    tt-lcmp-pull at 09:00, from the tuntun tooling in ~/.tuntun/bin
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 CHECKOUT=$(cd "$HERE/.." && pwd)
-LABEL=com.tommy.centrion.bot
-TEMPLATE="$HERE/$LABEL.plist"
-TARGET="$HOME/Library/LaunchAgents/$LABEL.plist"
+LABELS="com.tommy.centrion.bot com.tommy.tt-lcmp-pull"
+AGENTS="$HOME/Library/LaunchAgents"
+DOMAIN="gui/$(id -u)"
 
 render() {
-    # `|` as the delimiter: the path is full of `/`. A `|` or `&` in it would be misread, and
+    # `|` as the delimiter: the paths are full of `/`. A `|` or `&` in one would be misread, and
     # neither is in any home on this box.
-    sed "s|__CHECKOUT__|$CHECKOUT|g" "$TEMPLATE"
+    sed -e "s|__CHECKOUT__|$CHECKOUT|g" -e "s|__HOME__|$HOME|g" "$HERE/$1.plist"
 }
 
 if [ "${1:-}" = "--print" ]; then
-    render
+    render "${2:-com.tommy.centrion.bot}"
     exit 0
 fi
 
-# var/ first: launchd opens StandardOutPath itself, before bot.sh runs, and a missing directory
-# is a job that never starts and says nothing.
-mkdir -p "$CHECKOUT/var" "$(dirname "$TARGET")"
-render > "$TARGET.tmp"
-plutil -lint -s "$TARGET.tmp"
-mv "$TARGET.tmp" "$TARGET"
+install_agent() {
+    label=$1
+    target="$AGENTS/$label.plist"
+    render "$label" > "$target.tmp"
+    plutil -lint -s "$target.tmp"
+    # Every file launchd opens itself (the program, the log's directory) has to exist before the
+    # job runs: a missing one is a job that never starts and says nothing.
+    program=$(plutil -extract ProgramArguments.0 raw -o - "$target.tmp")
+    if [ ! -x "$program" ]; then
+        rm "$target.tmp"
+        echo "skipped $label: $program is not installed" >&2
+        return 0
+    fi
+    for key in StandardOutPath StandardErrorPath; do
+        log=$(plutil -extract "$key" raw -o - "$target.tmp" 2>/dev/null) && mkdir -p "$(dirname "$log")"
+    done
+    mv "$target.tmp" "$target"
 
-DOMAIN="gui/$(id -u)"
-launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-# bootout returns before the job is gone, and bootstrapping over it fails with an I/O error.
-i=0
-while launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 && [ $i -lt 50 ]; do
-    sleep 0.2
-    i=$((i + 1))
+    launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
+    # bootout returns before the job is gone, and bootstrapping over it fails with an I/O error.
+    i=0
+    while launchctl print "$DOMAIN/$label" >/dev/null 2>&1 && [ $i -lt 50 ]; do
+        sleep 0.2
+        i=$((i + 1))
+    done
+    launchctl bootstrap "$DOMAIN" "$target"
+    echo "installed $target"
+}
+
+mkdir -p "$CHECKOUT/var" "$AGENTS"
+for label in $LABELS; do
+    install_agent "$label"
 done
-launchctl bootstrap "$DOMAIN" "$TARGET"
-echo "installed $TARGET for $CHECKOUT"
+echo "for $CHECKOUT"
+
+sh "$HERE/power.sh"
