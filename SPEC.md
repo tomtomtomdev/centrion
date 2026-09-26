@@ -531,7 +531,8 @@ things with nobody watching, so it is opt-in: `--schedule [HH:MM]` loads
 
 ```sh
 install:  sh launchd/install.sh     # writes __CHECKOUT__ and __HOME__ in, bootstraps each agent, then power.sh
-power:    sh launchd/power.sh --check   # does pmset's schedule match the committed one
+power:    sh launchd/power.sh --check   # pmset's schedule matches, and automatic login is on
+lock:     cat var/lockscreen.log        # did the last automatic login get locked
 lcmp:     launchctl print gui/$(id -u)/com.tommy.tt-lcmp-pull | head -30
 restart:  launchctl kickstart -k gui/$(id -u)/com.tommy.centrion.bot
 status:   launchctl print gui/$(id -u)/com.tommy.centrion.bot | head -30
@@ -546,6 +547,28 @@ than fatal: Remote Control needs this Mac awake regardless, so a sleeping Mac me
 either way. Telegram holds the message and §7's staleness check decides whether to honour it on
 wake. If the bot should answer with the lid shut, run it under `caffeinate -s` — and accept the
 power cost.
+
+**The same is true of a cold boot, and pmset's power-on is not a login.** 2026-09-26: the Mac
+booted at 08:02, sat at the login window, and the listener started only when a password was
+typed at 08:11 — so the phone's 08:03 message was dropped by §7 as stale. The fix is macOS's
+automatic login (System Settings → Users & Groups → "Automatically log in as"; FileVault must be
+off, which it is here, because FileVault disables it). `power.sh --check` fails while it is off.
+
+Automatic login leaves the desktop open, so `com.tommy.centrion.lock` puts the lock screen back
+the moment that login lands. It is a one-shot RunAtLoad agent running `launchd/lockscreen.sh`,
+which does nothing unless `autoLoginUser` is this user — a login that typed a password is not
+locked again — and then runs `var/lockscreen`, built by install.sh from `launchd/lockscreen.c`.
+That calls `SACLockScreenImmediate` from the private `login.framework` (`CGSession -suspend` is
+gone from macOS 26) and then asks CoreGraphics whether the screen really is locked, retrying for
+30s and logging `NOT LOCKED` to `var/lockscreen.log` if it never is. install.sh copies this
+agent but never bootstraps it: a bootstrap fires RunAtLoad and would lock the installer's screen.
+
+What remains open, knowingly: a few seconds of desktop between the login and the lock;
+`/etc/kcpassword`, where automatic login keeps the password under a trivial XOR that root can
+undo; and a private symbol an update can remove, which install.sh's rebuild and the log's
+`NOT LOCKED` are there to catch. The alternative — a LaunchDaemon that needs no login — cannot
+work: the keychain is locked before login, and the `claude setup-token` token that avoids it
+"can't establish Remote Control sessions" (code.claude.com/docs/en/authentication).
 
 ---
 

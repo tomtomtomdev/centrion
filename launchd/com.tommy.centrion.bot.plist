@@ -26,6 +26,10 @@
   message for 24h and §7's date guard decides on wake whether it is still worth honouring. Run
   it under `caffeinate -s` if it should answer with the lid shut, and accept the power cost.
 
+  A power-on is not a login either: pmset's 08:45 wake lands on the login window and this job
+  does not run until someone logs in. Automatic login fixes that, and com.tommy.centrion.lock
+  locks the desktop it lands on. power.sh, in its check mode, says whether it is on.
+
   Every path below must stay outside ~/Documents, ~/Desktop and ~/Downloads. A launchd-spawned
   process does not inherit the terminal's Full Disk Access grant and dies before its first line,
   exit 126 — beacon on 2026-09-10, stockwatch on 2026-09-08. StandardOutPath counts: launchd

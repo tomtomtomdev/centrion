@@ -1756,6 +1756,63 @@ class TestTheLaunchdInstall(unittest.TestCase):
             self.assertNotIn(name, env)
 
 
+class TestTheLoginLock(unittest.TestCase):
+    """SPEC.md §8: automatic login gets the listener up after a power-on; this locks the desktop.
+
+    Both ways of getting it wrong are quiet. A lock that runs on an ordinary login locks the
+    screen in the face of someone who just typed the password; one that install.sh bootstraps
+    locks the screen of whoever is installing. And one that does not lock leaves the desktop open
+    with nothing in any log unless the binary says so.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = os.path.join(ROOT, "launchd")
+        with open(os.path.join(cls.dir, "com.tommy.centrion.lock.plist"), "rb") as fh:
+            cls.template = fh.read()
+        cls.plist = plistlib.loads(cls.template.replace(CHECKOUT.encode(), ROOT.encode()))
+        with open(os.path.join(cls.dir, "lockscreen.sh")) as fh:
+            cls.script = fh.read()
+        with open(os.path.join(cls.dir, "install.sh")) as fh:
+            cls.install = fh.read()
+
+    def test_the_committed_plist_names_no_home(self):
+        self.assertNotIn(b"/Users/", self.template)
+        self.assertIn(CHECKOUT.encode(), self.template)
+
+    def test_it_runs_once_per_login(self):
+        self.assertEqual(self.plist["Label"], "com.tommy.centrion.lock")
+        self.assertIs(self.plist["RunAtLoad"], True)
+        self.assertNotIn("KeepAlive", self.plist)
+        self.assertNotIn("StartInterval", self.plist)
+
+    def test_install_copies_it_but_never_bootstraps_it(self):
+        self.assertIn("com.tommy.centrion.lock", re.search(r'LABELS="([^"]*)"', self.install).group(1))
+        self.assertIn("com.tommy.centrion.lock",
+                      re.search(r'AT_LOGIN_ONLY="([^"]*)"', self.install).group(1))
+
+    def test_it_locks_only_after_an_automatic_login(self):
+        guard = self.script.index("autoLoginUser")
+        self.assertLess(guard, self.script.index("exec var/lockscreen"))
+
+    def test_no_path_is_inside_a_tcc_protected_folder(self):
+        paths = (self.plist["ProgramArguments"] + [self.plist["WorkingDirectory"],
+                 self.plist["StandardOutPath"], self.plist["StandardErrorPath"]])
+        for path in paths:
+            for folder in ("/Documents/", "/Desktop/", "/Downloads/"):
+                self.assertNotIn(folder, path)
+
+    @this_mac_checkout
+    def test_the_binary_builds_and_reads_the_lock_state_without_locking(self):
+        out = os.path.join(tempfile.mkdtemp(), "lockscreen")
+        self.addCleanup(shutil.rmtree, os.path.dirname(out), ignore_errors=True)
+        subprocess.run(["cc", "-Wall", "-Werror", "-o", out, os.path.join(self.dir, "lockscreen.c"),
+                        "-F/System/Library/PrivateFrameworks", "-framework", "login",
+                        "-framework", "CoreGraphics", "-framework", "CoreFoundation"], check=True)
+        got = subprocess.run([out, "--status"], stdout=subprocess.PIPE, check=True).stdout
+        self.assertIn(got.strip(), (b"locked", b"unlocked"))
+
+
 class TestTheListenerUsesThePlatformSeam(unittest.TestCase):
     """WINDOWS.md §6, W1b: every process question bot.py asks goes through `session.procs`.
 

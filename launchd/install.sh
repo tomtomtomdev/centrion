@@ -10,11 +10,15 @@
 #   sh launchd/install.sh --print [label] the rendered plist on stdout (default: the bot), and nothing else
 #
 #   com.tommy.centrion.bot    the Telegram listener
+#   com.tommy.centrion.lock   locks the screen after an automatic login; copied, not bootstrapped
 #   com.tommy.tt-lcmp-pull    tt-lcmp-pull at 09:00, from the tuntun tooling in ~/.tuntun/bin
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 CHECKOUT=$(cd "$HERE/.." && pwd)
-LABELS="com.tommy.centrion.bot com.tommy.tt-lcmp-pull"
+LABELS="com.tommy.centrion.bot com.tommy.centrion.lock com.tommy.tt-lcmp-pull"
+# Installed for the next login and never started here: bootstrapping a RunAtLoad job runs it,
+# and this one locks the screen of whoever is running install.sh (see lockscreen.sh).
+AT_LOGIN_ONLY="com.tommy.centrion.lock"
 AGENTS="$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
 
@@ -47,6 +51,11 @@ install_agent() {
     done
     mv "$target.tmp" "$target"
 
+    case " $AT_LOGIN_ONLY " in *" $label "*)
+        echo "installed $target (runs at the next login)"
+        return 0 ;;
+    esac
+
     launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
     # bootout returns before the job is gone, and bootstrapping over it fails with an I/O error.
     i=0
@@ -59,6 +68,10 @@ install_agent() {
 }
 
 mkdir -p "$CHECKOUT/var" "$AGENTS"
+# The lock agent's binary. Rebuilt every install, so an OS update that moves the private symbol
+# fails here, loudly, rather than at a login nobody is watching.
+cc -Wall -o "$CHECKOUT/var/lockscreen" "$HERE/lockscreen.c" -F/System/Library/PrivateFrameworks \
+    -framework login -framework CoreGraphics -framework CoreFoundation
 for label in $LABELS; do
     install_agent "$label"
 done
