@@ -16,6 +16,15 @@ half-read sections; none of that belongs in the context that decides *which* sli
 
 Four phases, in order. Do not start a later phase before an earlier one has answered.
 
+**This session does not execute slices. It reads, audits, dispatches, verifies and relays —
+and nothing else.** Concretely: in this session you never write or edit a source file, a test,
+or the plan's body; you never run the suite, the build or the hand-run; you never make the
+slice's commit or fill its row. Every one of those is the subagent's, without exception. The
+only writes this session makes are the ones the *user* asks for outside a slice. Your own tool
+use here is `git log`, `git show`, `git status`, and reading the few parts of the plan that
+phase 1 names — if you are about to reach for `Edit`, `Write`, or a command that runs tests,
+you have already left the skill, and the fix is to dispatch, not to continue.
+
 ## 1. Find the plan, and read only what selects the slice
 
 The plan is a tracked markdown file at the repo root with a `Status:` line near the top and a
@@ -78,6 +87,19 @@ file edits, git). Never `fork`: inheriting this conversation defeats the point. 
 once — slices are strictly ordered, and the plan forbids starting one before the previous
 row is filled in.
 
+**There is no slice small enough to do inline, and the small ones are the trap.** A slice that
+reads like a one-line fix still owes the full ritual — a red test, a build, a hand-run against
+the real thing, the whole suite, a commit, a row — and the sitting where that gets skipped is
+the sitting the record stops being true. The size of the diff is not the size of the slice:
+W5c was one line of `bot.cmd` and took a four-item checklist against a registered scheduled
+task to find it. Dispatch it. The same holds when the previous subagent has just finished and
+its findings are fresh in your context: that is an argument for putting them in the next
+prompt, never for keeping the work.
+
+If a slice turns out to be genuinely trivial, the cost of dispatching it is one subagent and a
+few minutes. The cost of getting that judgement wrong is a plan whose table says a ritual ran
+that never did.
+
 The subagent has no history, so the prompt must stand alone. It carries pointers, not content:
 name the sections and let it read them, rather than quoting the plan into the prompt.
 
@@ -138,6 +160,11 @@ audit is cheap enough to repeat.
 The subagent's report is not shown to the user, so relay it: what the audit found, what the
 slice did, what the run step showed, the suite numbers, what contradicted the plan, what debt
 was recorded, and which slice is next.
+
+Verifying is reading, not repairing. If the close is wrong — a row half-filled, a stale
+`Status:` line, a commit that never landed — that is the subagent's to finish: relay the gap
+and continue it with `SendMessage`. Fixing it yourself puts the main session's hand in the
+record and hides, from the next audit, that the ritual did not close on its own.
 
 For several slices in one sitting, loop phases 2–4 — a fresh audit, then a fresh subagent, per
 slice. The record has changed between them, which is exactly why the next slice gets a context
