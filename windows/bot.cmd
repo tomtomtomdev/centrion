@@ -22,6 +22,19 @@ rem
 rem   windows\install.ps1              build the venv and check the token's permissions
 rem   windows\bot.cmd                  run the listener here, in this console, forever
 rem   type var\bot.log                 SPEC.md section 14 starts here, on this platform too
+rem   type var\sessions\<sid>\runner.log   ... and finishes there, which is W5e's doing
+rem
+rem Section 14 is two files on Windows and one on the Mac, and that is this loop's fault
+rem rather than a preference. The redirection below opens var\bot.log the way cmd opens any
+rem redirection target - denying other writers - and until W5e the listener passed that
+rem handle on to every runner it started, so a live session pinned the log for its whole
+rem life and the loop below could not restart a listener that died while one was running:
+rem 5m10s of a wrapper doing nothing, measured under the task (W5c). The runner's own
+rem stdout and stderr now go to its session directory instead (session_win.runner_output),
+rem which costs the Mac nothing because the seam there still yields nothing at all. What
+rem is here is the listener's side of the story - a session starting, coming up live and
+rem stopping - and the runner's own four lines are one `type` away, named in the log line
+rem that starts the session.
 rem
 rem Ctrl-C in the console ends the listener and then asks about the batch file; answering N
 rem leaves the loop, answering Y does the same thing more slowly. To stop it from elsewhere,

@@ -230,6 +230,10 @@ class TestThePlatformSeam(unittest.TestCase):
                # filter is SPEC.md §6 and stays in session.py; what a child needs in order to
                # be a child at all is the platform's, and that half is this name.
                "child_env",
+               # W5e: where the runner's own stdout and stderr go. Inheriting the listener's
+               # is free on POSIX and is a lock on Windows, where `cmd` opened var\bot.log
+               # denying other writers — so the answer is the platform's, not bot.py's.
+               "runner_output",
                # W3d: `spawn` hands back one of these and `pump` knows nothing else about a
                # terminal, so it is as much a part of the contract as the functions are.
                "Terminal")
@@ -321,6 +325,29 @@ class TestThePlatformSeam(unittest.TestCase):
         self.assertFalse(session_posix.stop_requested(d))
         session_posix.request_stop(d)
         self.assertTrue(session_posix.stop_requested(d))
+
+    @needs_session_posix
+    def test_the_runner_still_inherits_the_listeners_log_on_the_mac(self):
+        r"""W5e: the Mac must not pay for the Windows fix, and this is where that is said.
+
+        SPEC.md §14 has one diagnostic — `tail -f var/bot.log` — and the reason the runner's
+        lines are in it is that `Sessions.start` inherits stdout and stderr. On Windows that
+        inheritance became a lock, because `cmd` opened the log denying other writers and the
+        runner held the handle for the life of a session; the fix is a seam, and the whole of
+        the seam's POSIX side is *nothing*. No second file, no writer process, no extra open:
+        `runner_output` yields empty kwargs, so `Popen` is called exactly as it was before
+        W5e and the Mac's log is one file, as §14 says.
+
+        Asserted rather than assumed because the cheap way to write the fix is in shared
+        code, and this test is what fails when somebody does.
+        """
+        import session_posix
+        d = os.path.join(tempfile.mkdtemp(), "sessions", "3f2a91")
+        self.addCleanup(shutil.rmtree, os.path.dirname(os.path.dirname(d)),
+                        ignore_errors=True)
+        with session_posix.runner_output(d) as kwargs:
+            self.assertEqual(kwargs, {}, "the Mac's runner inherits, and inherits for free")
+        self.assertFalse(os.path.exists(d), "nothing here may create a session directory")
 
 
 #: WINDOWS.md W0a: the same startup captured through ConPTY on the Windows box. ConPTY does

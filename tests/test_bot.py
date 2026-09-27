@@ -1537,6 +1537,92 @@ class TestSpawningForRealOnWindows(unittest.TestCase):
     def test_no_prompt_means_no_prompt_flag(self):
         self.assertNotIn("--prompt", self.spawn())
 
+    def test_a_live_session_does_not_pin_the_listeners_log(self):
+        r"""WINDOWS.md W5e, and it is the whole slice: `bot.cmd` must be able to restart.
+
+        The chain this reproduces, one hop at a time, is the one W5c measured under the
+        registered task. `cmd` opens the target of a `>>` with `FILE_SHARE_READ` alone, so
+        the handle behind `bot.py --serve >> var\bot.log` denies every other writer. The
+        listener inherits it as its standard output; `Sessions.start` inherited it onwards to
+        the runner, and the runner outlives the listener by design (§6, W0c). So from the
+        moment a session starts, no second `bot.cmd` can open the log — which means the
+        KeepAlive loop that exists to restart a dead listener cannot run at all in the one
+        state that needs it: **5m10s of a wrapper doing nothing, and the log opening 1.1s
+        after the runner exited**, with the bot down for all of it.
+
+        `SetStdHandle` rather than `dup2` because that is what `subprocess` reads: with
+        `stdout=None` it passes `GetStdHandle(STD_OUTPUT_HANDLE)` to `CreateProcess`, not fd
+        1. The parent then puts its own handles back and closes the file, so the only process
+        that can still be holding it is the runner — and `cmd` is asked the question directly,
+        because a failed redirection leaves `ERRORLEVEL` at 0 (W5c) and the only honest
+        witness is whether the bytes arrived.
+        """
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = ctypes.c_void_p
+        k32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                                    ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                    ctypes.c_void_p]
+        k32.GetStdHandle.restype = ctypes.c_void_p
+        k32.GetStdHandle.argtypes = [ctypes.c_uint32]
+        k32.SetStdHandle.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        STD_OUTPUT, STD_ERROR = 0xFFFFFFF5, 0xFFFFFFF4      # -11, -12 as DWORDs
+        GENERIC_WRITE, FILE_SHARE_READ, OPEN_ALWAYS = 0x40000000, 0x1, 4
+
+        log = os.path.join(self.tmp, "bot.log")
+        # Exactly the sharing `cmd` asks for. Opened with anything more permissive this test
+        # would pass against the bug, which is the only way for it to be useless.
+        handle = k32.CreateFileW(log, GENERIC_WRITE, FILE_SHARE_READ, None, OPEN_ALWAYS,
+                                 0x80, None)
+        self.assertNotIn(handle, (0, None, 2 ** 64 - 1, 2 ** 32 - 1),
+                         "could not open the log the way cmd does: %d"
+                         % ctypes.get_last_error())
+
+        # A runner that is still there to be asked about. The argv stub above exits at once.
+        stub = os.path.join(self.tmp, "live.py")
+        quit_marker = os.path.join(self.tmp, "quit")
+        with open(stub, "w", encoding="utf-8") as fh:
+            fh.write("import os, sys, time\n"
+                     "sys.stderr.write('runner up\\n')\n"
+                     "sys.stderr.flush()\n"
+                     "open(%r, 'w').close()\n"
+                     "deadline = time.time() + 120\n"
+                     "while time.time() < deadline and not os.path.exists(%r):\n"
+                     "    time.sleep(0.05)\n" % (self.out, quit_marker))
+
+        sessions = bot.Sessions(root=self.root, script=stub, log=lambda m: None)
+        self.addCleanup(self.finish, sessions)
+        self.addCleanup(lambda: open(quit_marker, "w").close())
+        saved = (k32.GetStdHandle(STD_OUTPUT), k32.GetStdHandle(STD_ERROR))
+        try:
+            k32.SetStdHandle(STD_OUTPUT, handle)
+            k32.SetStdHandle(STD_ERROR, handle)
+            sessions.start("3f2a91", "beacon-3f2a", self.tmp, "beacon", ME)
+        finally:
+            k32.SetStdHandle(STD_OUTPUT, saved[0])
+            k32.SetStdHandle(STD_ERROR, saved[1])
+            k32.CloseHandle(handle)
+
+        deadline = time.time() + 30
+        while time.time() < deadline and not os.path.exists(self.out):
+            time.sleep(0.01)
+        self.assertTrue(os.path.exists(self.out), "the runner never started")
+        self.assertIsNone(sessions.children[0].poll(), "the runner is not alive to pin it")
+
+        # One string and not a list: `list2cmdline` escapes an embedded quote as `\"`, which
+        # `cmd` does not understand, and the redirection then fails for the wrong reason.
+        probe = subprocess.run('cmd /c echo probe>> "%s"' % log,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        with open(log, "rb") as fh:
+            body = fh.read()
+        self.assertIn(b"probe", body,
+                      "a live session pins var\\bot.log, so bot.cmd cannot restart the "
+                      "listener: cmd exited %d saying %r — and inside a batch file the "
+                      "ERRORLEVEL after that is still 0 (W5c), which is why the loop could "
+                      "not notice"
+                      % (probe.returncode, probe.stderr.decode("cp1252", "replace").strip()))
+
 
 class TestFittingIntoOneMessage(unittest.TestCase):
     """§7: 4096 is Telegram's cap, and going over it is a 400 rather than a truncation."""
@@ -1833,6 +1919,40 @@ class TestTheListenerUsesThePlatformSeam(unittest.TestCase):
         self.assertEqual(kwargs.get("creationflags"), 9)
         self.assertTrue(kwargs.get("close_fds"))
         self.assertEqual(self.sessions.children, [fake])
+
+    def test_start_sends_the_runners_output_where_the_platform_says(self):
+        r"""WINDOWS.md W5e: the fifth question the listener asks the seam.
+
+        The other four are "is that pid alive", "when did it start", "how do I start a runner
+        so it outlives me" and "am I the only listener". This one is *where do the runner's
+        lines go*, and it is a platform question for exactly the reason the class docstring
+        gives: the Mac's answer is nothing at all — the runner inherits the listener's stdout
+        and stderr, which `launchd/bot.sh` has pointed at `var/bot.log` since slice 8, and an
+        inherited append fd on POSIX denies nobody anything. On Windows the same inheritance
+        is a *lock*: `cmd` opens `var\bot.log` denying other writers, the listener inherits
+        that handle from `bot.cmd` and hands a duplicate to a runner that outlives it, so no
+        second `bot.cmd` can open the log while a session is live — measured at 5m10s of a
+        KeepAlive loop that could not restart anything (§7).
+
+        Three claims, and each of them is one line of `start` that a merge can drop in
+        silence: the seam is asked, it is asked about *this session's* directory, and what it
+        yields reaches `Popen`. The fourth is the `with`: the listener opens the runner's log
+        and must not keep it, or the fix has only moved which process pins which file.
+        """
+        fake = mock.Mock(pid=777)
+        sink = object()
+        output = mock.MagicMock()
+        output.return_value.__enter__.return_value = {"stdout": sink, "stderr": sink}
+        with mock.patch.object(bot.procs, "runner_output", output), \
+             mock.patch.object(bot.procs, "spawn_flags", return_value={}), \
+             mock.patch.object(bot.subprocess, "Popen", return_value=fake) as popen:
+            self.assertEqual(self.sessions.start("abc123", "name", self.dir, "proj", 1), 777)
+        output.assert_called_once_with(self.sessions.directory("abc123"))
+        kwargs = popen.call_args.kwargs
+        self.assertIs(kwargs.get("stdout"), sink, "the runner's stdout is the platform's call")
+        self.assertIs(kwargs.get("stderr"), sink, "and session.py logs to stderr")
+        self.assertTrue(output.return_value.__exit__.called,
+                        "the listener must not keep the handle it gave the runner")
 
     def test_serve_takes_the_lock_before_it_touches_telegram(self):
         lock = mock.Mock()

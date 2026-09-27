@@ -18,6 +18,7 @@ runner outside `pump` hears only that.
 
 Stdlib only, same as session.py (SPEC.md §3).
 """
+import contextlib
 import errno
 import fcntl
 import os
@@ -375,6 +376,31 @@ def detach():
 def spawn_flags():
     """Popen kwargs for starting a runner. Nothing on POSIX: the runner detaches itself."""
     return {}
+
+
+@contextlib.contextmanager
+def runner_output(directory):
+    """Popen kwargs for the runner's stdout and stderr. Nothing on POSIX, and that is a fact
+    about this platform rather than a gap. WINDOWS.md W5e.
+
+    `Sessions.start` has inherited its own stdout and stderr to the runner since slice 7, so
+    the runner's `stop requested` and `ended` lines land in `var/bot.log` beside the
+    listener's and SPEC.md §14 has one diagnostic to name. What makes that free here is the
+    open: `launchd/bot.sh` appends with `>>`, an append `open(2)` denies nobody anything, and
+    a descriptor a child inherits is a *resource* and not a lock. Two processes appending to
+    one file is the ordinary POSIX arrangement and `O_APPEND` keeps their writes whole.
+
+    Windows spells the same inheritance as a lock — `cmd` opens a redirection target with
+    `FILE_SHARE_READ` alone — so a runner holding a duplicate of the listener's handle stops
+    any second `bot.cmd` opening `var\\bot.log`, and with it the KeepAlive loop that is the
+    only thing restarting a dead listener there. `session_win.runner_output` therefore gives
+    the runner a log of its own. This one gives it nothing, because nothing is what the Mac
+    needs and anything more would be the Mac paying for a Windows file-sharing rule.
+
+    `directory` is the session's, unused here, and deliberately not created: on this side the
+    runner's own `begin()` is still the first thing to make it.
+    """
+    yield {}
 
 
 class Lock:

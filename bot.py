@@ -437,13 +437,24 @@ class Sessions:
         # ending in a backslash is how the argument *after* it disappears (WINDOWS.md W3c).
         #
         # stdin is /dev/null because the runner has a terminal of its own for the session and no
-        # use for launchd's; stdout and stderr are inherited, so the runner's log lines land in
-        # var/bot.log beside the listener's (§14).
+        # use for launchd's.
+        #
+        # Where its stdout and stderr go is the platform's answer, and it stopped being the
+        # same answer in W5e. On the Mac they are still inherited — `runner_output` yields
+        # nothing — so the runner's log lines land in var/bot.log beside the listener's (§14),
+        # which costs nothing because an append fd a child inherits denies no one. On Windows
+        # `bot.cmd` opened that log with a `cmd` redirection, which denies other writers, and
+        # a runner holding a duplicate of it for the life of a session meant no second
+        # `bot.cmd` could open the log at all — so the KeepAlive loop could not restart a
+        # listener that died while a session was running (measured: 5m10s down). There the
+        # runner gets `var\sessions\<sid>\runner.log` of its own, and §14 is two files.
+        # The `with` matters: the handle is the runner's, and a listener that kept its copy
+        # would have moved the lock rather than removed it.
         # `spawn_flags()` is empty on the Mac — the runner detaches itself with setsid() — and
         # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP on Windows (WINDOWS.md §6).
-        with open(os.devnull, "rb") as devnull:
+        with open(os.devnull, "rb") as devnull, procs.runner_output(self.directory(sid)) as out:
             child = subprocess.Popen(argv, stdin=devnull, cwd=HERE, close_fds=True,
-                                     **procs.spawn_flags())
+                                     **out, **procs.spawn_flags())
         self.children.append(child)
         return child.pid
 

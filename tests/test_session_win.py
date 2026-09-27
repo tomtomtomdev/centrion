@@ -1001,5 +1001,84 @@ class TestTheSignalsThatAreLeftOnWindows(unittest.TestCase):
         self.assertTrue(r.stopping, "Ctrl-C in a --foreground run did not end the session")
 
 
+@unittest.skipUnless(WIN, "the runner's own log: session_win.runner_output, WINDOWS.md W5e")
+class TestWhereTheRunnersLinesGoOnWindows(unittest.TestCase):
+    r"""W5e: the runner writes to its session's directory, because `var\bot.log` is a lock.
+
+    The Mac's side of this seam is `{}` — the runner inherits, `bot.sh`'s `>>` denies nobody,
+    and SPEC.md §14's one diagnostic stays one file. Here the same inheritance is what stops
+    `bot.cmd` restarting a dead listener while a session runs (W5c: 5m10s), so the answer is
+    a second file next to `pty.log`, and §14's first diagnostic is two places on this
+    platform rather than one.
+
+    `TestSpawningForRealOnWindows::test_a_live_session_does_not_pin_the_listeners_log` is the
+    property; this is the mechanism, which is the half that says *where* to look.
+    """
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.dir = os.path.join(self.tmp, "sessions", "3f2a91")
+
+    def test_it_opens_this_sessions_own_log_and_makes_the_directory_for_it(self):
+        # The listener gets here before the runner has written `starting`, so the directory
+        # it names does not exist yet. `Runner.begin` makes it too, with exist_ok.
+        import session_win
+        with session_win.runner_output(self.dir) as kwargs:
+            self.assertEqual(sorted(kwargs), ["stderr", "stdout"])
+            self.assertIs(kwargs["stdout"], kwargs["stderr"],
+                          "one file, or the runner's lines interleave into two")
+            self.assertEqual(os.path.realpath(kwargs["stdout"].name),
+                             os.path.join(self.dir, session_win.RUNNER_LOG))
+        self.assertTrue(os.path.isdir(self.dir))
+
+    def test_the_listener_does_not_keep_the_handle_it_hands_over(self):
+        """The fix is about who holds a file, so a fix that leaks its own is not one."""
+        import session_win
+        with session_win.runner_output(self.dir) as kwargs:
+            handle = kwargs["stdout"]
+            self.assertFalse(handle.closed)
+        self.assertTrue(handle.closed, "the listener kept the runner's log open")
+
+    def test_it_appends_and_never_truncates(self):
+        """A session restarted into the same directory must not lose the first attempt's
+        diagnostics, which are exactly the ones worth reading."""
+        import session_win
+        os.makedirs(self.dir)
+        path = os.path.join(self.dir, session_win.RUNNER_LOG)
+        with open(path, "wb") as fh:
+            fh.write(b"first\n")
+        with session_win.runner_output(self.dir) as kwargs:
+            kwargs["stdout"].write(b"second\n")
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), b"first\nsecond\n")
+
+    def test_it_can_be_read_while_the_runner_still_holds_it(self):
+        r"""§14 is an instruction to *read* a log, and a session's worst hour is while it runs.
+
+        The half of `cmd`'s sharing rule that is easy to get backwards: a `>>` asks for
+        `GENERIC_WRITE` with `FILE_SHARE_READ` alone, so it fails against **any** existing
+        writer however permissive that writer's own share mode is — appending to this file
+        from a second process is refused too, and that is not what makes it different from
+        `var\bot.log`. What makes it different is that the only writer is the runner, and
+        `bot.cmd` never touches it. Python's `open` restricts nothing in turn, so `type`, a
+        tail, and §10.7's sweep once the runner is gone all work while a session is live —
+        which is the whole of what the split in §14 has to be worth.
+
+        `type` and not `open()` because `open()` would only prove Python can share with
+        Python; the reader that matters is the console one in the instruction.
+        """
+        import session_win
+        with session_win.runner_output(self.dir) as kwargs:
+            path = kwargs["stdout"].name
+            kwargs["stdout"].write(b"a diagnostic worth reading\n")
+            # One string, not a list: `list2cmdline` would escape the quotes as `\"` and
+            # `cmd` would fail on the path rather than on the sharing this is asking about.
+            probe = subprocess.run('"%s" /c type "%s"' % (CMD, path),
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        self.assertIn(b"a diagnostic worth reading", probe.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

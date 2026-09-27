@@ -38,6 +38,7 @@ Dependencies: pywinpty (`Terminal`, from W3b), pywin32 (the Job Object, W3e) and
 (`_reaped` here, `alive`/`started` in W4a) — `requirements-win.txt`. The imports are inside
 the functions that need them, so the module still loads on a bare interpreter.
 """
+import contextlib
 import hashlib
 import os
 import signal
@@ -680,6 +681,66 @@ def detach():
 def spawn_flags():
     """Popen kwargs for starting a runner. See DETACH_FLAGS."""
     return {"creationflags": DETACH_FLAGS}
+
+
+#: The runner's own diagnostics, one file per session, next to `pty.log` (WINDOWS.md W5e).
+#: Not `var\bot.log`: see runner_output.
+RUNNER_LOG = "runner.log"
+
+
+@contextlib.contextmanager
+def runner_output(directory):
+    r"""Popen kwargs sending the runner's stdout and stderr to this session's own log.
+
+    The Mac's side of this seam is empty — the runner inherits the listener's descriptors and
+    its lines land in `var/bot.log` beside them, which is SPEC.md §14's one diagnostic. Here
+    the same inheritance is a lock rather than a resource, and W5c measured what that costs.
+
+    `bot.cmd` runs the listener as `... bot.py --serve >> var\bot.log 2>&1`. `cmd` opens a
+    redirection target with `FILE_SHARE_READ` alone, so that handle denies every other
+    writer; the listener inherits it as its standard output, and `Sessions.start` used to
+    hand a duplicate to the runner, which outlives the listener by design (§6, W0c). From the
+    first session onwards, therefore, **no second `bot.cmd` could open `var\bot.log`** — and
+    `bot.cmd`'s KeepAlive loop is a `cmd` whose every line is a `>>`. Measured under the
+    registered task: a listener killed with a session live left the wrapper sitting for
+    **5m10s** doing nothing at all, and it opened the log **1.1s** after the runner exited.
+    The loop that exists to restart a dead listener was unavailable in the one state that
+    needs it, and the bot was down for all of it.
+
+    Two fixes were on the table (WINDOWS.md W5e) and this is the one that costs the Mac
+    nothing: the other is a writer process behind a pipe in `bot.cmd`, which buys a process
+    and a file on every iteration, and loses `%errorlevel%` after the listener — a pipeline's
+    level is its last command's, and `=== listener exited N ===` is one of the two lines §7's
+    log is made of. Moving the runner's own lines here costs one file per session and splits
+    §14's first diagnostic in two on this platform: `type var\bot.log` for the listener,
+    `var\sessions\<sid>\runner.log` for the session. `bot.py` prints the session directory
+    with every start, so the second path is never guessed.
+
+    Three properties, each of them load-bearing:
+
+    - **Append, never truncate.** A directory reused by a retried session keeps the first
+      attempt's diagnostics, which are the ones worth reading.
+    - **Python's `open`, which restricts sharing not at all.** §14 is an instruction to read
+      a log, and `type`, a tail and §10.7's `shutil.rmtree` after the runner is gone all have
+      to work while a session is live. Note which half of the rule that is: a `cmd` `>>`
+      fails against *any* existing writer, whatever that writer permitted, so this file is
+      not appendable from a second process either. What makes it safe is not its share mode
+      but that `bot.cmd` never opens it.
+    - **The listener does not keep it.** This is a context manager because the handle is the
+      runner's; the parent closes its copy as soon as `CreateProcess` has duplicated it, or
+      the fix has only moved which process pins which file.
+
+    The directory is made here because the listener gets here first: `Runner.begin` creates
+    it too, with `exist_ok`, but not until the runner is running. A session directory with
+    nothing in it but a `runner.log` is a runner that died before it wrote `starting`, which
+    is the case this file is most useful in.
+    """
+    os.makedirs(directory, exist_ok=True)
+    handle = open(os.path.join(directory, RUNNER_LOG), "ab", buffering=0)
+    try:
+        yield {"stdout": handle, "stderr": handle}
+    finally:
+        handle.close()
 
 
 #: The mutexes this process holds, for as long as it runs. Nothing removes one: the release

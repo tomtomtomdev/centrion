@@ -8,9 +8,30 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **W5c done (2026-09-27); W5d next — the not-logged-on case, and it is optional; W5e,
-which W5c found, is not.**
-W5c took the restart-survival checklist against the registered task and two of its four items
+Status: **W5e done (2026-09-27); W5d is all that is left of W5 and it is optional — the
+not-logged-on case. After that, W6's CI matrix, also optional.**
+W5e took the decision W5c left it and gave the runner a log of its own. `bot.cmd` opens
+`var\bot.log` with a `cmd` redirection, which denies other writers; the listener inherits
+that handle and used to hand a duplicate to every runner, so a live session pinned the log
+for its whole life and the `KeepAlive` loop could not restart a listener that died while a
+session was running. The two fixes on the table were "the runner logs somewhere else" and "a
+writer process behind a pipe in `bot.cmd`", and the pipe loses on measurements rather than
+taste: it costs a process and a file per iteration of the loop whose job is reliability, it
+puts a new single point of failure in front of the only log there is, and **a pipeline's
+`%errorlevel%` is its last command's** — so `=== listener exited N ===`, one of the two lines
+§7's log is made of, would have reported the writer. So `procs.runner_output` yields `{}` on
+POSIX, where an inherited append fd costs nothing, and `var\sessions\<sid>\runner.log` here;
+SPEC.md §14's first diagnostic is two files on Windows and `bot.cmd`'s header says so.
+Measured against W5c's 5m10s, same scenario under the registered task: listener killed with a
+session live, exit line in the log **0.02s** later, restart line **10.03s** after that,
+listening 0.11s after that, the session untouched and adopted by the new listener at the same
+runner pid. What is left is the `/End` orphan, bounded rather than removed: the `/Run` after
+a `/End` still cannot open the log, but it now throttles at **0.00s of CPU** and takes the
+log 4.67s after the orphan dies — and an orphaned listener is still answering the phone, so
+that state is a bot that is up. The `||` half of W5e's entry is decided *against*: an
+unredirected listener under the scheduler is up and permanently blind and holds the mutex, so
+the loop never replaces it.
+W5c, before this, took the restart-survival checklist against the registered task and two of its four items
 came back as §7 says: `schtasks /End` kills the `cmd.exe` and **nothing else** — the runner,
 the `claude.exe` under it and the orphaned listener all live on, and that listener went on
 answering `ls` while `schtasks` reported the task `Ready` — and a listener restarted against
@@ -719,7 +740,10 @@ things on the two platforms, and the process that knows what the session was doi
 that should end it. Unverified on the Mac, like everything since W1a.
 
 **`Sessions.start()`** — `Popen(argv, stdin=DEVNULL, cwd=HERE, close_fds=True,
-creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)`. No `CREATE_BREAKAWAY_FROM_JOB`
+**procs.runner_output(dir), creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)`.
+The `runner_output` half is W5e's and is the second name on this seam that answers
+differently on the two platforms for a reason neither side chose; see §7 and W5e. No
+`CREATE_BREAKAWAY_FROM_JOB`
 and no retry logic: W0c showed the scheduler's job refuses breakaway outright, and showed the
 runner does not need it — a child of a scheduled task survives the task being stopped. The
 runner therefore stays *inside* the scheduler's job for its life. That is harmless today
@@ -819,6 +843,36 @@ processes on Windows and always will, so a `tasklist` started from the log line 
 launcher and not the runner. Both die together on `stop` (measured, every session in W4e's
 run), and W5a's `install.ps1` will make this the shape under the scheduled task's job too.
 
+*W5e, 2026-09-27 — an inherited handle is a resource on one platform and a lock on the other,
+and this seam now has a name for the difference.* Every version of this document has said
+that `Sessions.start` inherits stdout and stderr so the runner's lines land in `var/bot.log`
+beside the listener's, and on the Mac that sentence costs nothing: `bot.sh` appends with `>>`,
+an append `open(2)` denies nobody, and two processes writing one file with `O_APPEND` is the
+ordinary arrangement. On Windows the same words describe a lock. `cmd` opens a redirection
+target with `FILE_SHARE_READ` alone, the listener inherits *that* handle, and a runner
+holding a duplicate of it outlives the listener by design — so `bot.cmd` could not reopen
+`var\bot.log` while a session was live, and the `KeepAlive` loop was unavailable for as long
+as the session lasted (§7; 5m10s, measured). **`procs.runner_output(directory)`** is where
+that now diverges: a context manager yielding `Popen` kwargs, `{}` on POSIX — no file, no
+process, no open, `Popen` called exactly as before — and `{"stdout": fh, "stderr": fh}` on a
+`var\sessions\<sid>\runner.log` here, closed by the listener the moment `CreateProcess` has
+duplicated it. It is a context manager rather than a function because the parent must not
+keep the handle: a fix for who holds a file that leaks its own has moved the lock rather
+than removed it, and that is one of the four mutations §11's row names.
+
+Three things the shape costs, all of them on this platform only. **SPEC.md §14's first
+diagnostic is two files here** — `var\bot.log` still carries the listener's side of a session
+(started, live, stopped) and `var\sessions\<sid>\runner.log` carries the runner's four lines
+(`spawned pid`, `live:`, `stop requested`, `ended`), which is what W5e's decision traded away
+and `windows\bot.cmd`'s header now says in words. **The listener creates the session
+directory**, a beat before `Runner.begin` would have; `read_meta` already returns `None` for a
+directory with no record and §4's walk already skips it, and the consolation is that a
+directory holding nothing but a `runner.log` is a runner that died before it wrote `starting`,
+which is the case that used to leave nothing at all. And **`runner.log` is not appendable from
+a second process** either, because a `cmd` `>>` fails against *any* existing writer whatever
+that writer permitted — the difference that matters is not its share mode but that `bot.cmd`
+never opens it. Reading it while the session runs works, which is what §14 asks for.
+
 ---
 
 ## 7. Startup — `windows\`
@@ -879,21 +933,44 @@ registered task: **13% of a core, four failing redirections an iteration, nothin
 fail, so a wait redirected only there always runs. The cost is that `timeout`'s complaint no
 longer reaches the log, and it only ever could in the case where the log opens — which is the
 case where the throttle was never in danger. `||` *does* see a failed redirection even though
-`ERRORLEVEL` does not, and that is the hook the fix in W5e will need.
+`ERRORLEVEL` does not, and that is the hook the fix in W5e will need. **Wrong on the last
+clause: W5e needed no hook here at all** — it took the *writer* off the log instead of
+teaching this file to cope with a log it cannot open, and `bot.cmd` is unchanged below the
+header. The `||` half is not built and is decided against rather than deferred; see W5e.
+W5e also sharpens the ERRORLEVEL sentence, which is true of a batch file and not of a
+process: `cmd /c echo x >> <a locked file>` **exits 1**, and it is only the in-script
+`ERRORLEVEL` that stays 0, because a command that did not run sets nothing. That is the same
+fact `||` sees from the other side, and it is why a wrapper *around* `cmd` can tell what a
+line *inside* `cmd` cannot.
 
 **The log handle outlives the wrapper, and that is the bigger half of W5c.** `cmd` opens
-`var\bot.log` for the `>>`, the listener inherits it, and `Sessions.start` hands it on to the
-runner (`Sessions.start` inherits stdout and stderr on purpose, so the runner's lines land in
-`var\bot.log` beside the listener's — SPEC.md §14). The handle is
-therefore held by every live session, and by any listener a `schtasks /End` has orphaned —
-`/End` kills the `cmd.exe` and nothing under it. So a second `bot.cmd`, started by a `/Run`
-or by a logon, cannot open the log at all; and worse, **the loop in the *first* `bot.cmd`
-cannot either, from the moment a session starts.** Measured: with one session live and its
-listener killed, the wrapper sat for **5m10s** without starting anything, and opened the log
-**1.1s** after the runner exited — the `KeepAlive` this whole file exists for is not
-available in exactly the state that most needs it. The throttle fix above bounds the damage
-(a silent 10s retry instead of a spin) and does not remove it. The fix is W5e: the runner
-must not hold this handle.
+`var\bot.log` for the `>>`, the listener inherits it, and until W5e `Sessions.start` handed
+it on to the runner as well — stdout and stderr were inherited on purpose, so the runner's
+lines landed in `var\bot.log` beside the listener's (SPEC.md §14). The handle was
+therefore held by every live session, and is still held by any listener a `schtasks /End`
+has orphaned — `/End` kills the `cmd.exe` and nothing under it. So a second `bot.cmd`, started
+by a `/Run` or by a logon, cannot open the log at all; and worse, **the loop in the *first*
+`bot.cmd` could not either, from the moment a session started.** Measured: with one session
+live and its listener killed, the wrapper sat for **5m10s** without starting anything, and
+opened the log **1.1s** after the runner exited — the `KeepAlive` this whole file exists for
+was not available in exactly the state that most needs it. The throttle fix above bounds the
+damage (a silent 10s retry instead of a spin) and does not remove it.
+
+**W5e removed it, at the runner's end and not at this file's.** `session_win.runner_output`
+gives the runner `var\sessions\<sid>\runner.log` and the listener closes its own copy of that
+handle the moment `CreateProcess` has duplicated it, so nothing but the listener itself holds
+`var\bot.log` any more. Re-measured under the registered task, same scenario as the 5m10s:
+listener killed with a session live, `=== listener exited 15 ===` in the log **0.02s** later,
+`=== centrion listener starting ===` **10.03s** after that, `centrion listening` 0.11s after
+that, and the session untouched — `ls` from the restarted listener rendered it at the same
+runner pid with its link. **What is left is the orphan case, and it is bounded rather than
+gone**: after a `/End` the orphaned listener still holds the log, so the `/Run` after it
+starts a `cmd.exe` that can do nothing but throttle (measured: 25s, `timeout.exe` in the
+tree, **0.00s of CPU**, not one byte written) until that orphan dies — and then takes the log
+**4.67s** later and has a listener up 0.02s after that. That is the acceptable half of the
+same shape, because an orphaned listener *is still answering the phone*: the state W5e had to
+remove was the one where nothing was listening and nothing could start, and after a `/End`
+something is.
 
 Nothing in this file is substituted at install time, and that is the one place the Windows
 side is simpler than the Mac's. `%~dp0` is the file's own directory, so the committed `bot.cmd`
@@ -1762,7 +1839,7 @@ needs. Two things W5b leaves on this entry's desk:
   there is nowhere else to stand. `.telegram.json` still holds W3g's placeholder token.
 - Commit: the fix, the test, §7, this entry, W5e, and the §11 row.
 
-**W5e — the runner must not pin `var\bot.log`.** Blocked on nothing; found by W5c (§7).
+**W5e — the runner must not pin `var\bot.log`.** Done; see §11. Found by W5c (§7).
 - The problem: `cmd`'s `>>` opens the log denying other writers; the listener inherits that
   handle and `Sessions.start` passes it to the runner, which keeps it for the life of the
   session. So `bot.cmd`'s own loop cannot restart a listener that died while a session was
@@ -1775,12 +1852,41 @@ needs. Two things W5b leaves on this entry's desk:
   keeping them where they are means the wrapper must stop using `cmd` redirection — a writer
   process behind a pipe, which costs a process and a file. The Mac needs neither and must
   not pay for either, so whatever this is, it goes behind the `procs` seam (§6).
+  **Decided: the runner logs somewhere else**, and the evidence decided it rather than a
+  preference. Three things against the pipe. It costs a process and a file *per iteration of
+  a loop whose whole job is to be reliable*, and the process is a new single point of failure
+  in front of the only log there is. It breaks `%errorlevel%` after the listener — a
+  pipeline's level is its last command's, so `=== listener exited N ===`, one of the two
+  lines §7's log is made of, would report the writer's status and not the listener's. And it
+  puts new untested machinery in the path W5a and W5c have each already had to repair, which
+  is the shape W5c named: *a fallback that shares a dependency with the thing it is backing
+  up is not a fallback.* Against that, "the runner logs somewhere else" is one seam function,
+  `{}` on the Mac, and it is the Mac that settles it — W5c's own Pending row asks the Mac to
+  confirm that an inherited append fd costs POSIX nothing, which is an argument for changing
+  nothing there and everything for changing the side that pays. The price is §14's first
+  diagnostic in two files on this platform, and that price is paid in `bot.cmd`'s header.
 - A third, cheaper half that stands on its own: `bot.cmd` can *detect* the failure even
   though `ERRORLEVEL` cannot — `||` fires on a failed redirection (measured, W5c) — so the
   loop can run the listener unredirected rather than not at all, and a listener that is up
   and blind beats a bot that is down. Whether that is wanted is part of the same decision.
+  **Decided against, and not deferred.** It is wanted only in a state that the decision above
+  removes: after the fix the only thing that can still pin the log is a listener, and a
+  listener holding the log is a listener *answering the phone*. What the `||` branch would
+  buy in that state is a second listener that the mutex refuses; what it would cost is the
+  case where it succeeds — an unredirected listener under the scheduler writes to a console
+  nobody has, so §14's log stops with no line saying it did, and because that listener holds
+  the mutex the loop never replaces it. A bot that is up and permanently blind is worse than
+  a ten-second retry that heals itself, which is what the measurement showed it doing.
 - Red: a test that a live session does not stop a second `bot.cmd` from opening the log;
-  it needs a real runner, so it belongs with `TestSpawningForRealOnWindows`.
+  it needs a real runner, so it belongs with `TestSpawningForRealOnWindows`. **Written, and
+  three things it needed that this line did not say.** `subprocess` with `stdout=None` passes
+  `GetStdHandle(STD_OUTPUT_HANDLE)` to `CreateProcess` and not fd 1, so a test that wants to
+  reproduce an inherited `cmd` redirection has to `SetStdHandle` — `dup2` changes the wrong
+  thing and the test would pass against the bug. The probe has to be `cmd` itself and it has
+  to be passed as one string, because `list2cmdline` escapes a quote as `\"` and `cmd` then
+  fails on the path rather than on the sharing. And the property test says *that* the log
+  opens, never *where* the runner's lines went, so the mechanism needs its own three in
+  `test_session_win.py` and the wiring one portable test in `test_bot.py`.
 
 **W5d — the not-logged-on case.** Optional.
 - Run: switch the task to `LogonType Password` and "run whether user is logged on or not";
@@ -1851,7 +1957,7 @@ the Mac when the slice touched shared or posix code.
 | W5b scheduled task | done · Mac pending | 2026-09-27 | a33eccb | **699 ran: 605 pass, 94 skip, 0 xfail**, 37.2s · **not run** | **The task defaults into the plist's loudest bug under a different name, and the file W5a committed one slice ago does not parse at all.** **(1) `Priority`.** A task registered with no `<Priority>` gets **7**, which is `BELOW_NORMAL_PRIORITY_CLASS`, and a child inherits its parent's priority class — so every Claude Code session started from the phone would run below normal for as long as it lived, with the symptom "Remote Control feels slow" days later and nothing in any log. That is word for word the plist's `ProcessType Standard, NOT Background` warning, and §7's table did not have the row. Measured with the whole tree cleared between registrations: **no element → `cmd.exe`, the venv launcher and the interpreter all `BelowNormal`; `<Priority>5</Priority>` → all three `Normal`.** **(2) `windows\install.ps1`, as `178b5fa` committed it, answered nine parse errors and ran nothing.** Windows PowerShell 5.1 reads a BOM-less `.ps1` in the ANSI code page; a U+2014 em dash is `E2 80 94`, `0x94` in cp1252 is a curly closing quote, PowerShell honours it as a string terminator, and one of them inside one `throw "…"` unbalances every quote after it. There is no `pwsh` here and `pwsh` is the only version that would have read it as UTF-8. W5a's twelve tests all read that file as text and none of them ran it — **a run step measures the bytes that were run, and the commit is a different set of bytes unless something checks.** The rule is now one per directory, everything under `windows\` is ASCII, and `test_nothing_under_windows_is_anything_but_ascii` is portable so the Mac holds it too. **Three of this entry's own predictions were wrong and §7 and §9 are amended in place.** `install.ps1` has **two** `-replace`s, not one: a task lives in a machine-global store, so its `LogonTrigger` must name a `UserId` or it means *any* user's logon, which `schtasks /Create` refuses from an unelevated shell with **"ERROR: Access is denied"** and no mention of the trigger (the *principal's* `UserId` may be omitted; the trigger's may not). The XML **cannot** carry `PYTHONIOENCODING` or anything else, because the schema has no environment element at all — `<EnvironmentVariables>` and `<Environment>`, in `Settings` and in `Exec`, are each "ERROR: The task XML contains an unexpected node" — so the only place left is the `set` in `bot.cmd` this entry said it did not belong in; **decided rather than inherited, it stays unset**, with the reasoning written above the loop (`type var\bot.log` is §14's instruction, ASCII escapes stay readable there and UTF-8 would not, and `sys.stderr`'s `backslashreplace` means nothing raises either way). And the third `this_mac_checkout` counterpart has nothing to compare against: **Task Scheduler has no `StandardOutPath`**, so the test asserts the join instead — the action is `bot.cmd` and `bot.cmd` is the only thing that appends `var\bot.log`. **Encoding, measured five ways, because every wrong answer is the same "ERROR: The task XML is malformed" with a column number**: `schtasks` refuses `encoding="UTF-8"` in the prolog outright ("unable to switch the encoding") and refuses a UTF-8 BOM ("incorrect document syntax" at (1,2)); it accepts `encoding="UTF-16"` over ASCII bytes and UTF-16LE-with-BOM over UTF-16 ones, but expat then will not read the committed file and UTF-16 is a blob git diffs as binary. `<?xml version="1.0"?>`, ASCII, no BOM is the one spelling both accept — and PowerShell 5.1's `Out-File -Encoding utf8` writes a BOM, so the natural way to write the rendered file is the broken one. **Red: the new class errored in `setUpClass` on the missing file (its 13 blocked) plus one failure, count and skips unchanged at 683/94** — and **one existing test passed before the code existed**, `test_the_startup_files_are_tracked`, vacuously and for W5a's exact reason, so it is now written as a pair with the presence check and the comment says why. **Mutation of the green, twenty-two ways, twenty caught one-for-one and two by nobody at first.** One of those two was the mutation script's own whitespace bug. The other was real: `test_install_registers_the_task_from_the_rendered_xml` stayed green through a mutation that deleted the `schtasks /Create` call, because the header block *documents* that command and the script's own `throw "schtasks /Create failed …"` names it — comments **and** string literals now come out before the assertion, and the mutation is caught. W4c's rule for the third slice running. **Run step, three parts, `scratch\w5b_handrun.ps1`, `w5b_restart.ps1`, `w5b_priority2.ps1`.** `install.ps1` end to end, exit 0 in **2.1s** on a re-run with the registration (W5a's 1.7s without it), `config.load()` still green on the token, task `Ready`. Then `schtasks /Run`: **`centrion listening` 0.37s after the scheduler was asked, first Telegram call at 0.92s**, three processes (`cmd.exe` → venv launcher → interpreter, all `Normal`), and `schtasks /Query /TN centrion /XML` shows `PT0S`, `IgnoreNew`, both battery settings `false`, `StartWhenAvailable`, `Hidden`, `InteractiveToken`, `Priority 5` and `RestartOnFailure PT1M`/3 all surviving the round trip (the trigger's `UserId` comes back as a SID, the principal's as the name). Then `taskkill /F /T` on the venv launcher: exit line **0.16s** later, restart line **9.36s** after that — **and the console question is answered, `timeout` did not complain and 0 `ping.exe` ran, so the scheduler's action has a console after all** (§7 amended; the fallback is kept for the launchers that are neither). **`schtasks /End` kills the action and leaves the pythons** — W0c from the other direction, noted on W5c. **What could not be proved here**: the logon leg of "logon to first poll". Logging off ends the session driving the slice, the Task Scheduler operational log is disabled on this box and enabling it needs elevation, so **the measured figure is 0.92s from the scheduler starting the action to the first `getUpdates`** and the logon-to-action leg is a named debt below. The Telegram call was HTTP 401 as it has been since W3g — placeholder token, a standing debt, not a slice failure. **+16 tests, 13 of them portable and undecorated and 3 gated `this_windows_checkout` — the counterparts of the `this_mac_checkout` three, because "absolute, and present" about `__CHECKOUT__\windows\bot.cmd` is a question only this platform can answer. No skip count change, because a `skipUnless(win32)` runs here.** Two consecutive full runs, 37.7s and 37.2s against W5a's 37.2s. Mac: not run — see Pending, which gains four rows here. |
 | W5c restart survival | done · Mac pending | 2026-09-27 | 67fc632 | **700 ran: 606 pass, 94 skip, 0 xfail**, 37.7s · **not run** | **Two of the four checklist items came back exactly as §7 says, and the third could not be taken against the task at all, because `schtasks /Run` starts a `bot.cmd` that cannot open `var\bot.log` while the session it is asking about is alive — and the wrapper does not fail, it spins.** **The checklist, written into this row before the run (step 1):** (1) `/Run`, then a session through that listener; (2) `/End` — runner and `claude.exe` still alive, record still `live`; (3) `/Run` — the new listener adopts the record and `ls` shows the same runner pid; (4) `stop 1` ends it. Predicted: all four hold and no new code. **Item 1, and it is the first Claude Code session ever started by a Task Scheduler listener.** `/Run` at 12:53:53.74 → `centrion listener starting` at 12:53:53.89 → `centrion listening` at 12:53:54, and the tree is **three processes plus a `conhost.exe`** — `cmd.exe` 13772 ← the scheduler, the venv launcher 8528, the interpreter 952, all `Normal` (W5b's `<Priority>5</Priority>` holding), and the conhost is the console W5b inferred from `timeout` not complaining, now visible as a process. `claude Beacon` at 12:54:14.13 → `state: live` with a scraped link at **12:54:17**, and the session is itself **five more processes**: a runner launcher 9312, the runner 8112 (which is what `meta.json` calls `runner_pid` — `Sessions.start` returns the *launcher's* pid, 9312, and the two are not the same number), an `OpenConsole.exe`, a `conhost.exe` and `claude.exe` 2240. **Item 2, `/End` at 12:54:46.25:** `cmd.exe` 13772 is the only thing that dies. The launcher, the interpreter, the runner, OpenConsole and `claude.exe` are all alive two seconds later, the record still says `live`, and **the orphaned listener is still serving** — an `ls` sent at 12:54:56, with `schtasks` reporting `Status: Ready`, was answered by pid 952 with the session at 41s old. W5b's `/End` finding confirmed from the other side, and the entry's warning — do not read "the task is not running" as "nothing is listening" — is now a measured sentence rather than an inference. **Then item 3 did not happen, and that is the slice.** `/Run` at 12:55:06.76 started `cmd.exe` 2016 which, 80 seconds later, had **no python child, no `ping.exe`, not one byte in `var\bot.log`, and 8.9s of CPU** — 13% of a core, measured over a 6.8s window, with the task showing `Running` and last result `267009`. **`cmd` opens a redirection target denying other writers, so a process holding `var\bot.log` open for writing makes every `>>` in `bot.cmd` fail** — and after `/End` there is always one, because the orphaned listener keeps the handle its dead `cmd.exe` created (verified directly: `open_files()` on both leftover pythons names `var\bot.log`). **A failed redirection leaves `ERRORLEVEL` at 0** — measured in both spellings with the level reset to 0 before each — so `if errorlevel 1 ping`, W5a's entire belt, never fires; and the command it guards was itself skipped, because `timeout /t 10 /nobreak > nul 2>> var\bot.log` redirects to the same log. Two failures that each look survivable compose into the one §7 exists to prevent: **a hot loop, and this time a silent one, with not even the two log lines a second that would have named it.** W5a's rule for the third time — the throttle does not get to depend on how the file was launched — extended: it does not get to depend on the log either. **Green: one line, `2>> var\bot.log` off the `timeout`**, held by `test_the_throttle_does_not_redirect_to_the_log_it_cannot_always_open`, portable and undecorated because it is a property of the committed bytes. Re-measured after the fix: the same `/Run` against the same locked log used **0.00s of CPU over 24s** with `timeout.exe` visible in the tree, and an ordinary restart under the task (no session, log free) was an exit line **0.04s** after the kill and a start line **9.66s** later with 0 `ping.exe` — the console path is untouched, against W5b's 9.36s. **The bigger finding, which the fix bounds and does not remove: the runner holds the log too.** `Sessions.start` inherits stdout and stderr so the runner's lines land in `var\bot.log` (§6), which on Windows means a live session pins the file for its whole life — `open_files()` on runner 8112 and its launcher 9312 both named it, and the runner's own `stop requested` and `ended` lines reached the log at 13:05:10 through a handle whose listener had been dead for four minutes. So the `KeepAlive` loop cannot restart a listener that died while a session was running: `cmd.exe` 552 sat from 13:00:03 doing nothing but throttling, and opened the log **1.1s** after the runner exited at 13:05:12. That is the loop being unavailable in the one state it exists for, and it is **W5e**, added to §9 — the shape of the fix is a decision (the runner's stderr moves to the session directory, or the wrapper stops using `cmd` redirection) and it goes behind the `procs` seam because the Mac has no such problem. `||` *does* see a failed redirection although `ERRORLEVEL` does not, measured, which is the hook W5e will want. **Items 3 and 4 taken against a listener started the way `bot.cmd` will start one after W5e** — same venv interpreter, same `--serve`, same mutex, same records, stderr to a file of its own — because the task's wrapper could not start one while the session was live. It came up at 13:04:41 with `offset 1003` carried across, **announced no ending** and did not touch the record (mtime still 12:54:17), and `ls` at 13:04:56 rendered `Beacon-4c93 · 10m` with the link and **runner pid 8112 unchanged, started 12:54:15, `claude.exe` 2240 still under it** — a listener holding a record whose runner it never spawned, which is SPEC.md §12 slice 9's real claim and the reason that slice was about reconciliation more than about launchd. `stop 1`: **2.3s** from the message file appearing to the runner being gone, all five pids gone, record `ended`, reply `■ Beacon · Beacon-4c93 stopped.` (W4b's 5.70s was a session with a `ping` under it ignoring its Ctrl-C). **And the loop recovered on its own, which is the last thing this slice has to say.** The moment the runner exited, `cmd.exe` 552 — blocked for 5m10s — opened the log at 13:05:13.15, started a listener that W4d's mutex refused in **0.14s** with status 0, and tried again **9.87s** later; when the hand listener was killed at 13:05:43.03 the task's own listener was up **0.12s** later with the offset again carried across. That is this entry's own prediction, "refused by the mutex in about a tenth of a second and restarted every ten thereafter", measured — and it only reads that way because the throttle was fixed first. **Red, and W5c predicted green, so the ritual's second clause applies: four mutations, one per checklist item, each caught.** `DETACH_FLAGS = 0` (the runner not detached from its listener) → 1, `test_both_detach_flags_are_actually_set`, W4c's vacuity case again and still the only one. `alive()` trusting `kill(pid, 0)` alone with no start-time check → 3. `Sessions.stop` reporting success without asking or waiting → 5. `AllowStartOnDemand` false → 1, `test_the_task_can_be_started_on_demand`, which W5b wrote for this slice. **Nothing in the suite held the thing the run actually broke**, which is the fifth slice running where the mutation aimed at the entry's predictions and the run found the defect somewhere else. **The run needed the wire, and the wire could not be a script.** `.telegram.json` holds W3g's placeholder token, so every real Telegram call is a 401 and no message can reach a task-started listener; W4f's answer — replace `telegram.Telegram._open` and nothing above it — could not be used as written, because the scheduler runs `bot.cmd` and there is no script to wrap. The substitution is a `.pth` dropped into `.venv\Lib\site-packages` that arms on a marker file (`scratch\w5c_wire.py`), so the registered task, `bot.cmd`, `centrion.xml` and `bot.py` are all the committed bytes. Worth writing down for whoever needs it next: `site.addpackage` execs a `.pth` line with **site's** globals and its own locals, so a module written the ordinary way sees none of its own names from inside a function — it needs a namespace passed to `exec`. **+1 test, portable, no skip count change.** Two consecutive full runs, 37.7s and 37.8s against W5b's 37.2s. Mac: not run — see Pending, which gains four rows here. |
 | W5d not-logged-on | todo | | | | |
-| W5e runner pins `var\bot.log` | todo | | | | found by W5c (§7): a live session's runner holds the log handle, so `bot.cmd` cannot restart a listener while a session runs |
+| W5e runner pins `var\bot.log` | done · Mac pending | 2026-09-27 | | **707 ran: 612 pass, 95 skip, 0 xfail**, 37.9s · **not run** | **The decision went to the runner and not to the wrapper, and the thing that decided it is the Mac.** W5e's entry offered two fixes — the runner logs somewhere else, or `bot.cmd` stops using `cmd` redirection and puts a writer process behind a pipe — and the pipe loses on three counts, none of them taste. It costs a process and a file on every iteration of the loop whose entire job is to be reliable, and that process is a new single point of failure standing in front of the only log there is. It **breaks `%errorlevel%` after the listener**: a pipeline's level is its last command's, so `=== listener exited N ===`, one of the two lines §7's whole log is made of, would report the writer's status instead of the listener's. And it adds untested machinery to the path W5a and W5c have each already had to repair — which is W5c's own rule, *a fallback that shares a dependency with the thing it is backing up is not a fallback*, pointed at the fallback. The other side needs one seam function, and **W5c's Pending row is the argument for it**: `bot.sh` appends with `>>`, the Mac's runner inherits the same fd, and on POSIX that costs nothing — so the platform that pays is the platform that changes, and `session_posix.runner_output` yields `{}` with `Popen` called exactly as before. The price is that **SPEC.md §14's first diagnostic is two files on Windows**: `var\bot.log` keeps the listener's side of a session and `var\sessions\<sid>\runner.log` takes the runner's four lines. Paid in `windows\bot.cmd`'s header, which now names both. **The third half of the entry — `\|\|` to run the listener unredirected — is decided against rather than deferred.** It is only wanted in a state the fix removes: afterwards the only thing that can still pin the log is a *listener*, and a listener holding the log is a listener answering the phone. Where it would fire it buys a copy the mutex refuses; where it would succeed it costs §14 entirely — an unredirected listener under the scheduler writes to a console nobody has, and it holds the mutex, so the loop never replaces it. Up and permanently blind is worse than a ten-second retry that heals. **Run step, against the registered task, `scratch\w5e_run.py` and `scratch\w5e_probe.py` with W5c's `.pth` wire re-armed as `w5e_wire.pth`.** `/Run` at 13:30:49.35 → wrapper 10292, venv launcher 8124, interpreter 18888, `centrion listening` at 13:30:49; `claude Beacon` → session `203b0b` **live with a scraped link at 13:31:24**, runner 10084 (record) under launcher 10928 (the W4e split again, and the log line still names the launcher). **The measurement that is the slice**: `open_files()` with the session live names `var\bot.log` on the three listener processes **and nothing else** — runner 10084 and its launcher 10928 name `var\sessions\203b0b\runner.log` instead, where under W5c there were five holders. Listener killed at 13:32:16.12 with the session still live: `=== listener exited 15 ===` reached the log **0.02s** later — under W5c it reached nothing at all — `=== centrion listener starting ===` **10.03s** after that, `centrion listening` **0.11s** after that, **against W5c's 5m10s of a wrapper that could do nothing and a recovery 1.1s after the runner exited.** The throttle's own figures are untouched (W5c: exit +0.04s, restart +9.66s). The restarted listener adopted the record and `ls` rendered `Beacon-203b · 2m` with the link at the same runner pid; `stop 1` ended it in ~2s, record `ended`, and the runner's `spawned pid 1516`, `live: <url>`, `stop requested` and `ended` are all in `runner.log` — the four lines that used to be §14's. **The `/End` case is bounded, not removed, and that is deliberate.** `/End` took cmd.exe 10292 and left the pythons holding the log (W5c confirmed from a third side); the `/Run` after it started cmd.exe 15892 which for 25s wrote nothing, started nothing, kept `timeout.exe` in its tree and used **0.00s of CPU** — W5c's throttle fix doing exactly its job — and took the log **4.67s** after the orphan was killed, with a listener up 0.02s later. An orphaned listener is still serving, so that state is a bot that is up; the state W5e existed to remove was a bot that was down and could not start. **Red: 6 of the 7 new tests ran here and all 6 were red, the seventh is posix-only and skipped, and one existing test changed colour on purpose** — `test_session_exposes_the_chosen_module_as_procs`, because `TestThePlatformSeam.SURFACE` gaining `runner_output` *is* part of the red. 707/605/95 before the code, nothing else moved. **Mutation of the green, four ways, all caught and three one-for-one.** `runner_output` yielding `{}` on Windows (the fix undone at the platform) → 5, including the property test; the `with` dropped from `Sessions.start` → exactly 2, the property test and the wiring test; the `finally: handle.close()` dropped, so the listener keeps the runner's log → exactly 1, `test_the_listener_does_not_keep_the_handle_it_hands_over`; `"ab"` → `"wb"` → exactly 1, `test_it_appends_and_never_truncates`. **The fifth mutation is the one this box cannot run and it is the important one**: making `session_posix.runner_output` yield the Windows shape — the Mac paying for a Windows file-sharing rule — is caught by **0 of 707 here**, because `session_posix` will not even import without `fcntl`. `test_the_runner_still_inherits_the_listeners_log_on_the_mac` is that guard and it is a Mac row below. **Three things the entry's Red line did not say and the test needed.** `subprocess` with `stdout=None` hands `CreateProcess` the value of `GetStdHandle(STD_OUTPUT_HANDLE)` and **not fd 1**, so reproducing an inherited `cmd` redirection needs `SetStdHandle`; a `dup2` test would have passed against the bug. The `cmd` probe must be one string, because `list2cmdline` escapes an embedded quote as `\"` and `cmd` then fails on the *path* — which is how this test first went green-for-the-wrong-reason with the message `The filename, directory name, or volume label syntax is incorrect.` instead of `The process cannot access the file because it is being used by another process.` And a fourth, found by a test that failed: **a `cmd` `>>` fails against any existing writer, however permissive that writer's own share mode** — Python's `open` restricts nothing and `runner.log` is still not appendable from a second process. What makes it safe is not its sharing but that `bot.cmd` never opens it; what §14 needs is a *reader*, and `type` works while the session runs. **§7 amended three ways and §6 gains a W5e note.** §7's promise that `\|\|` "is the hook the fix in W5e will need" is **wrong** — the fix took the writer off the log instead, and `bot.cmd` is unchanged below its header. §7's ERRORLEVEL sentence is sharpened rather than corrected: `cmd /c echo x >> <locked>` **exits 1**, and it is only the in-script `ERRORLEVEL` that stays 0, because a command that did not run sets nothing — the same fact `\|\|` sees from the other side, and the reason a wrapper around `cmd` can tell what a line inside `cmd` cannot. And §7's log-handle paragraph now carries the after figures and the orphan residual. **+7 tests: 5 win32 (1 in `TestSpawningForRealOnWindows`, 4 in a new `TestWhereTheRunnersLinesGoOnWindows`), 1 portable and undecorated in `TestTheListenerUsesThePlatformSeam`, 1 posix-only — so skips go 94 → 95, and that one skip is the Mac's row below.** Two consecutive full runs, 37.9s and 37.9s against W5c's 37.7s; W3c's unidentified ~3% error did not recur. Box left as W5b and W5c left it: task registered and `Ready`, nothing running, no process holding `var\bot.log`, the `.pth` disarmed and removed. Mac: not run — see Pending, which gains four rows here. |
 | W6 CI matrix | todo | | | | |
 | retention day 1 on NTFS | — | | | | |
 | first sleep/wake with a session open | — | | | | |
@@ -1956,6 +2062,10 @@ verified until then, and W1c's first Windows-green run is not a substitute.
 | W5c | `/usr/bin/python3 -m compileall -q .` | clean — 3.9. `tests/test_layout.py` is the only Python file this slice touches and the only new thing in it is one `for` loop over strings; the Mac is still the only interpreter that can say so. |
 | W5c | **nothing to hand-run, and nothing installed** | **named so the row is not mistaken for an omission**, the third time W5 has had to say it. No posix, shared or program code moved: the change is one line of `windows\bot.cmd` with the `rem` block above it, one test, and this document. The line is a `cmd` redirection and the bug behind it is a Windows file-sharing rule, so there is nothing on a Mac for it to be right or wrong about. The Mac's startup is still `launchd/install.sh`, `launchd/bot.sh` and the plist, all three untouched for the third slice running, and the check that they still are is that `TestTheLaunchdInstall` passes there as it always has. |
 | W5c | **the `KeepAlive` question, asked of launchd** | **the counterpart nobody has to build, and the one thing a Mac can settle for W5e.** `bot.sh` appends to `var/bot.log` with `>>`, the listener inherits that fd and hands it to the runner exactly as it does here — and on POSIX that costs nothing, because an append open denies no one. So the Mac should be able to do what this box cannot: with a session live, kill the listener and watch launchd bring it back inside `ThrottleInterval`, with both `===`-equivalent lines in the log and the session untouched. If that is true there, it is the cleanest statement of what W5e is fixing: the same three-process design, the same inherited handle, and a platform rule that makes one of them a daemon that cannot restart itself. |
+| W5e | `/usr/bin/python3 -m unittest -q` | green, and **two newly run, one newly skipped**. `TestThePlatformSeam.SURFACE` gains `runner_output`, so both surface tests assert it there; `test_the_runner_still_inherits_the_listeners_log_on_the_mac` is `@needs_session_posix` and is the one new test the Mac runs and this box cannot. The five `win32` ones come back skipped there and `test_start_sends_the_runners_output_where_the_platform_says` is portable and undecorated, because the three claims it makes — the seam is asked, asked about this session's directory, and what it yields reaches `Popen` — are true of `Sessions.start` on both platforms whatever each side answers. The count is W5c's plus 7, skips 94 → 95 here and 94 → 99 there (four `win32` unit tests plus the real-runner one; the posix-only one un-skips). |
+| W5e | **`session_posix.runner_output` must yield `{}`, and this box cannot prove it** | **the single most important Mac row in this table, because a mutation of it is caught by 0 of 707 here.** `session_posix` will not import without `fcntl`, so every assertion about the Mac's half of W5e's seam is unrun on Windows — and the failure it guards against is not a crash but a silent tax: the cheap way to write this fix is in shared code, and a Mac runner that stops inheriting would put SPEC.md §14's diagnostics in a second file on a platform where the first one was never locked. `test_the_runner_still_inherits_the_listeners_log_on_the_mac` asserts the two halves that matter — the kwargs are empty, so `Popen` is called exactly as it was before W5e, and nothing under the seam creates a session directory, so `Runner.begin` is still the first thing to make one there. If it fails on the Mac, somebody has made the Mac pay for a Windows file-sharing rule. |
+| W5e | `/usr/bin/python3 -m compileall -q .` | clean — 3.9. Three Python files move in this slice (`bot.py`, `session_posix.py`, `session_win.py`) and the new syntax is `@contextlib.contextmanager`, a `yield` in a generator, and **two `**` unpackings in one call** (`**out, **procs.spawn_flags()`), which is 3.5+ and therefore fine — but `session_win.py` is the file the Mac never runs and `bot.py` is one it runs constantly, and only that interpreter can say so. |
+| W5e | **nothing to hand-run, and nothing installed** | **named so the row is not mistaken for an omission**, the fourth time W5 has had to say it — and the first time it is *not* quite the whole truth, because this slice moves shared code. `bot.py`'s `Sessions.start` is the Mac's line too: it now calls `procs.runner_output(self.directory(sid))` and unpacks the result into `Popen`. The claim is that this changes nothing there, and the way to see it rather than believe it is the ordinary one — start a session from the phone on the Mac and check that `var/bot.log` still carries the runner's `spawned pid`, `live:`, `stop requested` and `ended` lines, and that `var/sessions/<sid>/` has no `runner.log` in it. The Mac's startup is still `launchd/install.sh`, `launchd/bot.sh` and the plist, all four untouched now for four slices running. |
 | W4b | a runner deliberately wedged outside `pump` | **the cost of the slice, if anyone wants to measure it.** Start a session, `kill -STOP` the runner, then `stop` it from the phone: this used to be `SIGTERM` immediately and `SIGKILL` at `STOP_GRACE`; it is now fifteen seconds of marker-polling *before* the `SIGTERM`. Nothing is broken by it — the session still ends — but the number is the honest price of one `stop` meaning one thing on both platforms, and §6 says it is paid on purpose. |
 
 ### Decisions changed by evidence
@@ -2268,3 +2378,30 @@ Appended, dated, when a run step contradicts the plan above and a section was am
   it is the same shape as W5b's `Priority` one: **an inherited handle is a resource on both
   platforms and a lock on only one**, and every place SPEC.md says "inherits" is a place to
   ask what Windows makes of it.
+- **2026-09-27, W5e → §6, §7, §9's W5e.** The decision that entry framed is taken: **the
+  runner logs somewhere else.** `procs.runner_output(directory)` yields `{}` on POSIX and a
+  `var\sessions\<sid>\runner.log` here, and SPEC.md §14's first diagnostic is two files on
+  this platform. Three measurements decided it against the pipe, and the third is the one
+  worth keeping: a pipeline's `%errorlevel%` is its **last** command's, so a writer process
+  behind `bot.py --serve` would have made `=== listener exited N ===` report the writer — and
+  that line, with its twin, is the entire log §7 exists to produce. The general rule, which
+  is W5c's turned around: *when a fallback and the thing it backs up cannot share a
+  dependency, neither can a fix and the thing it fixes.* Two of §7's own sentences were
+  wrong. `||` was named as "the hook the fix in W5e will need" and the fix needed no hook at
+  all, because taking the writer off the log is cheaper than teaching a batch file to cope
+  with a log it cannot open; `bot.cmd` is unchanged below its header. And the ERRORLEVEL
+  finding is narrower than it reads: `cmd /c echo x >> <a locked file>` **exits 1**, and it
+  is only the *in-script* `ERRORLEVEL` that stays 0, because a command that did not run sets
+  nothing — which is why `||` sees what `if errorlevel 1` cannot, and why W5c's hot loop was
+  invisible from inside and would not have been from outside.
+- **2026-09-27, W5e → §9's W5e Red line.** A property test says *that* the log opens and
+  never *where* the lines went, so "a test that a live session does not stop a second
+  `bot.cmd` from opening the log" is one test of four. The other three are the mechanism, and
+  the reason to write them is that the property test is expensive (a real runner, a real
+  `cmd`) and says nothing about append-versus-truncate, about the listener closing its own
+  copy, or about the file staying readable while the session runs. Two mechanics the next
+  real-process test on this platform will want: `subprocess` with `stdout=None` passes
+  `GetStdHandle(STD_OUTPUT_HANDLE)` to `CreateProcess` and **not fd 1**, so `dup2` cannot
+  reproduce an inherited redirection and `SetStdHandle` must; and a `cmd` probe has to be
+  passed as one string, because `list2cmdline` escapes an embedded quote as `\"` and `cmd`
+  fails on the path instead of on the thing under test.
