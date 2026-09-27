@@ -1067,10 +1067,23 @@ class Listener:
             # record right now, and at-most-once is the side to err on — the same side the
             # offset errs on, for the same reason. A deadline that expired claims *nothing*,
             # which is what leaves §9.12's late link for the tick to announce an hour later.
+            #
+            # **And the answer is acted on.** claim() is the arbitration between this thread
+            # and the tick, so losing it means the tick has already told this chat about this
+            # session and there is exactly one reply owed (§4.6). Until W4e this line claimed
+            # and then sent regardless, which made the marker a record of who got there first
+            # rather than a decision — and the phone got the same link twice, seconds apart,
+            # whenever a getUpdates happened to return inside the 0.25s between two polls of
+            # meta.json below.
+            claimed = True
             if state == session.LIVE:
-                self.sessions.claim(sid, LINK_SENT)
+                claimed = self.sessions.claim(sid, LINK_SENT)
             elif state in (session.FAILED, session.ENDED):
-                self.sessions.claim(sid, END_SENT)
+                claimed = self.sessions.claim(sid, END_SENT)
+            if not claimed:
+                self.log("session %s: %s — the tick announced it first, so this waiter says "
+                         "nothing (§4.6: one reply per session)" % (sid, state))
+                return
             sent = self.say(chat_id,
                             self.outcome(record, state, sid, project, name, created))
             self.log("session %s: %s — %s" % (sid, state or "no link in %ds" % self.timeout,

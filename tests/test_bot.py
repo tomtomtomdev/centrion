@@ -2809,6 +2809,56 @@ class TestALateLinkIsStillAnnounced(Base):
         listener.tick()
         self.assertEqual(len(tg.sent), 2)
 
+    def test_the_waiter_says_nothing_when_the_tick_announced_the_link_first(self):
+        """The other direction of the arbitration, and W4e caught it end to end on Windows.
+
+        `test_a_session_its_waiter_answered_is_not_announced_again` pins the case where the
+        waiter wins; nothing pinned the case where the *tick* does, and that is the one the
+        code got wrong. `waited()` claims before it sends — its comment says so and says why —
+        but it throws the answer away, so a session the tick has already announced is
+        announced a second time by its own waiter. §4.6 promises exactly one reply per
+        session, and the phone gets two links to the same session, seconds apart.
+
+        Rare on the wire and not rare enough: the window is the 0.25s between two polls of
+        meta.json, and every message that arrives while a session is coming up is another
+        return from getUpdates landing in it (W4e measured both replies on the box).
+        """
+        self.place("aa11aa", announced=False, runner_pid=4001, name="beacon-aa11",
+                   chat_id=ME, url=LINK)
+        tg = FakeTelegram([])
+        listener = self.listener(tg)
+        listener.tick()
+        self.assertEqual(len(tg.sent), 1, "the tick got there first and claimed the link")
+        listener.waited(ME, "aa11aa", "beacon", "beacon-aa11")
+        self.assertEqual(len(tg.sent), 1,
+                         "the waiter lost the claim and must not send the link again")
+        self.assertTrue(any("aa11aa" in line for line in self.logged),
+                        "and §14 has to be able to say why the phone heard nothing more")
+
+    def test_the_waiter_says_nothing_when_the_tick_announced_the_ending_first(self):
+        # The same bug spends the other marker: a session that ended before its waiter noticed
+        # is announced by the tick, and the waiter follows it with the failure tail.
+        self.place("aa11aa", session.ENDED, announced=False, runner_pid=4001,
+                   name="beacon-aa11", chat_id=ME)
+        tg = FakeTelegram([])
+        listener = self.listener(tg)
+        listener.tick()
+        self.assertEqual(len(tg.sent), 1, "the tick got there first and claimed the ending")
+        listener.waited(ME, "aa11aa", "beacon", "beacon-aa11")
+        self.assertEqual(len(tg.sent), 1,
+                         "the waiter lost the claim and must not report the ending again")
+
+    def test_a_waiter_that_claims_the_session_does_answer(self):
+        """The vacuity guard on the two above: a waiter that stayed quiet whatever happened
+        would pass both of them and would be a bot that never answers `claude` at all."""
+        self.place("bb22bb", announced=False, runner_pid=4002, name="beacon-bb22",
+                   chat_id=ME, url=LINK)
+        tg = FakeTelegram([])
+        listener = self.listener(tg)
+        listener.waited(ME, "bb22bb", "beacon", "beacon-bb22")
+        self.assertEqual(len(tg.sent), 1, "nothing had claimed it; the waiter owes the link")
+        self.assertIn(LINK, tg.texts[0].splitlines())
+
     def test_a_session_that_is_still_starting_is_not_announced(self):
         # The ten to twenty seconds §4 budgets, during which its waiter is still watching and
         # there is nothing to say. The tick speaks only once the record does.
