@@ -62,8 +62,21 @@
   <Triggers>
     <!-- The plist's RunAtLoad. InteractiveToken means the bot exists only while this user is
          logged on, which is where launchd's GUI domain leaves the Mac too (SPEC.md section 14: "a
-         login after a cold boot is still unwatched"). W5d is the slice that tries the other
-         way, and it is optional. -->
+         login after a cold boot is still unwatched"). W5d went to try the other way and
+         could not, and the reason is worth more than the attempt was.
+
+         This trigger and the LogonType below are one decision written in two places. A
+         LogonTrigger fires on a logon and on nothing else, so switching the principal to
+         Password or S4U - "run whether user is logged on or not" - buys nothing on its
+         own: with nobody logged on there is no logon, so nothing starts the task and the
+         bot is exactly as absent as it was. The other half of that move is a BootTrigger
+         here, and the pair is held by
+         tests/test_layout.py::test_the_logon_type_and_the_trigger_agree_about_when_the_bot_runs.
+         Neither half can be registered from this box today (W5d, measured): a BootTrigger
+         is "ERROR: Access is denied" unelevated, S4U likewise, and Password is refused
+         with ERROR_ACCOUNT_RESTRICTION because this account has no password at all -
+         LogonUser answers 1327 for BATCH, SERVICE, NETWORK and INTERACTIVE alike, so no
+         batch logon of this user is possible until it has one. -->
     <LogonTrigger>
       <Enabled>true</Enabled>
       <UserId>__USER__</UserId>
@@ -73,7 +86,12 @@
   <Principals>
     <Principal id="Author">
       <UserId>__USER__</UserId>
-      <!-- Run as the logged-on user, no stored password. -->
+      <!-- Run as the logged-on user, no stored password. Measured under this task (W5d):
+           all three of the processes it starts - cmd.exe, the venv launcher and the
+           interpreter - live in the interactive logon session, the one a logoff destroys.
+           That is what "the bot exists only while this user is logged on" means in
+           processes rather than in words. See the note on the trigger above before
+           changing this line; the two move together or not at all. -->
       <LogonType>InteractiveToken</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
@@ -95,7 +113,11 @@
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
 
-    <!-- A missed logon trigger still fires. -->
+    <!-- A missed logon trigger still fires - which W5d doubts and could not check.
+         Microsoft documents this setting for time-based triggers, and a logon trigger is
+         not one; telling the two apart needs a boot with nobody signed in, which is the
+         one thing this desk cannot do. It stays because it costs nothing if it is inert.
+         WINDOWS.md section 11's logoff time item names the observation that settles it. -->
     <StartWhenAvailable>true</StartWhenAvailable>
 
     <!-- W5c's checklist is `schtasks /End` and then `schtasks /Run`; without this the second

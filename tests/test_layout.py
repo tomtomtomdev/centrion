@@ -448,6 +448,45 @@ class TestTheScheduledTask(unittest.TestCase):
         self.assertEqual(self.one("Triggers/LogonTrigger/Enabled"), "true")
         self.assertNotEqual(self.one("Triggers/LogonTrigger/UserId"), "")
 
+    def test_the_logon_type_and_the_trigger_agree_about_when_the_bot_runs(self):
+        r"""W5d, and the pair is the claim — neither element alone says anything.
+
+        §7 offered `LogonType Password` and "run whether user is logged on or not" as the
+        way to close the gap where the bot exists only while this user is logged on, and
+        W5d went to try it. It cannot be tried on this box, and two of the three reasons
+        are about registration rather than about being logged on: this account has no
+        password at all, so *every* non-console logon is refused with
+        ERROR_ACCOUNT_RESTRICTION (1327) — `schtasks /Create` says so, and `LogonUser` says
+        the same for BATCH, SERVICE, NETWORK and INTERACTIVE alike — and `S4U`, the
+        no-stored-password spelling of the same principal, is "ERROR: Access is denied"
+        from an unelevated shell.
+
+        The third reason is the one this holds, because it costs nothing to get wrong and
+        nothing would report it. The only trigger in this file is a `LogonTrigger`, so a
+        principal that *could* run with nobody logged on would still not run, because
+        nothing would start it — W5d's own run step (switch the logon type, reboot, do not
+        log in, message the bot) would have measured a bot that was never triggered and
+        read it as a bot that does not work. The two elements move together or not at all,
+        and the other half of the move is a `BootTrigger`, which is also refused
+        unelevated. Symmetrically, a `BootTrigger` under `InteractiveToken` is a task the
+        scheduler cannot start at boot, for the same reason read backwards.
+        """
+        logon = self.one("Principals/Principal/LogonType")
+        triggers = [el.tag[len(TASK_NS):]
+                    for el in self.task.find(TASK_NS + "Triggers")]
+        if logon == "InteractiveToken":
+            self.assertEqual(
+                triggers, ["LogonTrigger"],
+                "InteractiveToken runs only inside a logon session — measured under the "
+                "registered task, W5d: all three of its processes live in the interactive "
+                "session, the one a logoff destroys. Any other trigger here is a start "
+                "the scheduler cannot make; %s" % triggers)
+        else:
+            self.assertIn(
+                "BootTrigger", triggers,
+                "%s can run with nobody logged on, but only a trigger that fires with "
+                "nobody logged on will ever start it; %s" % (logon, triggers))
+
     def test_the_action_runs_bot_cmd_through_the_command_processor(self):
         r"""`cmd.exe /c <checkout>\windows\bot.cmd`, and the loop is in the batch file.
 
