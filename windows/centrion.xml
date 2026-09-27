@@ -1,0 +1,139 @@
+<?xml version="1.0"?>
+<!--
+  centrion's listener as a Task Scheduler task. WINDOWS.md section 7, slice W5b. The analogue of
+  launchd/com.tommy.centrion.bot.plist, and the four places it differs are all here.
+
+  1. There is no KeepAlive. launchd restarts the job itself; the scheduler runs an action
+     once and is finished, so the restart loop is written down in windows\bot.cmd and the
+     action is that batch file rather than bot.py. RestartOnFailure below is not the same
+     thing - it is for the wrapper dying, three tries a minute apart, where bot.cmd's loop
+     is unconditional and forever.
+
+  2. There is no StandardOutPath. launchd opens the log itself, before the job runs; the
+     scheduler opens nothing at all, and the whole of SPEC.md section 14's first diagnostic is the
+     append redirections inside bot.cmd. Nothing in this file names var\bot.log, on purpose:
+     a path here would be a comment that goes stale rather than a setting that does anything.
+
+  3. There is no environment. The plist sets PYTHONUNBUFFERED and a PATH; the task schema
+     has no element for either, measured (W5b) rather than assumed, so a task cannot set an
+     environment variable at all. Neither is needed - bot.log() writes to stderr and flushes
+     every line, and every Windows session has a usable PATH. PYTHONIOENCODING, which section 9's
+     W5b hoped to put here, is therefore not something this file can decide; see bot.cmd.
+
+  4. Priority 5, NOT the default. This is the setting to get wrong, and it is the plist's
+     "ProcessType Standard, NOT Background" with the numbers changed. A task created without
+     a <Priority> gets 7, which is BELOW_NORMAL_PRIORITY_CLASS, and a spawned process
+     inherits its parent's priority class - so every Claude Code session started from the
+     phone would run below normal for as long as it lived. Measured on this box (W5b): the
+     listener comes up at BELOW_NORMAL with no Priority element and at NORMAL with this one.
+     4, 5 and 6 are all NORMAL_PRIORITY_CLASS; 5 is the middle of them. The symptom of
+     getting it wrong is "Remote Control feels slow", days later, with nothing in any log -
+     which is word for word what the plist says about ProcessType, because it is the same bug.
+
+  __CHECKOUT__ and __USER__ are placeholders, not values. The checkout for the plist's
+  reason - this repo lives under a different path on every box, and neither launchd nor the
+  scheduler expands a ~. The user for a reason the Mac does not have: a LaunchAgent is this
+  user's because of the directory it is installed into, where a task lives in one
+  machine-global store, and a LogonTrigger with no UserId means *any* user's logon, which
+  schtasks refuses with "Access is denied" unless it is run elevated (measured, W5b).
+  windows\install.ps1 writes both in.
+
+  install:  powershell -ExecutionPolicy Bypass -File windows\install.ps1
+  print:    powershell -ExecutionPolicy Bypass -File windows\install.ps1 -Print
+  status:   schtasks /Query /TN centrion /V /FO LIST
+  start:    schtasks /Run /TN centrion
+  stop:     schtasks /End /TN centrion
+  remove:   schtasks /Delete /TN centrion /F
+  logs:     type var\bot.log
+
+  The prolog is bare on purpose and this file must stay ASCII with no byte order mark.
+  `schtasks /Create /XML` refuses encoding="UTF-8" outright ("unable to switch the
+  encoding") and refuses a UTF-8 BOM as "incorrect document syntax" at (1,2); it accepts
+  encoding="UTF-16", but then Python's expat will not parse the file unless the bytes really
+  are UTF-16, and UTF-16 in a repository is a file git diffs as binary. All measured, W5b.
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <URI>\centrion</URI>
+    <Author>__USER__</Author>
+    <Description>centrion: long-polls Telegram and starts Claude Code sessions on this box (SPEC.md 8).</Description>
+  </RegistrationInfo>
+
+  <Triggers>
+    <!-- The plist's RunAtLoad. InteractiveToken means the bot exists only while this user is
+         logged on, which is where launchd's GUI domain leaves the Mac too (SPEC.md section 14: "a
+         login after a cold boot is still unwatched"). W5d is the slice that tries the other
+         way, and it is optional. -->
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>__USER__</UserId>
+    </LogonTrigger>
+  </Triggers>
+
+  <Principals>
+    <Principal id="Author">
+      <UserId>__USER__</UserId>
+      <!-- Run as the logged-on user, no stored password. -->
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+
+  <Settings>
+    <!-- The default is 3 days, after which the scheduler kills the task and the loop with
+         it. A daemon has no time limit; PT0S is how this schema spells "none". -->
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+
+    <!-- Belt for W4d's braces. The mutex inside the listener is what actually refuses a
+         second copy, and it is the one with tests; this stops the scheduler from starting a
+         second bot.cmd whose only job would be to be refused every ten seconds forever. -->
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+
+    <!-- This is a laptop, and both of these default the wrong way for a bot: a task that
+         will not start on battery is a phone that gets no reply whenever the charger is out,
+         with nothing in var\bot.log because the listener never ran. -->
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+
+    <!-- A missed logon trigger still fires. -->
+    <StartWhenAvailable>true</StartWhenAvailable>
+
+    <!-- W5c's checklist is `schtasks /End` and then `schtasks /Run`; without this the second
+         half is refused and nothing else explains why. -->
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+
+    <!-- For the wrapper itself dying. bot.cmd's own loop handles the listener. -->
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+
+    <!-- See note 4 in the header. Not a tuning knob: 7, the default, is BELOW_NORMAL and is
+         inherited by every session the listener spawns. -->
+    <Priority>5</Priority>
+
+    <!-- No console window on the desktop. -->
+    <Hidden>true</Hidden>
+
+    <Enabled>true</Enabled>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <WakeToRun>false</WakeToRun>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+  </Settings>
+
+  <Actions Context="Author">
+    <!-- cmd.exe because the action is a batch file and CreateProcess cannot run one. The
+         scheduler expands environment variables in Command, which is how this is absolute
+         without hard-coding a drive letter - the plist's /bin/sh, spelled for Windows. -->
+    <Exec>
+      <Command>%SystemRoot%\system32\cmd.exe</Command>
+      <Arguments>/c "__CHECKOUT__\windows\bot.cmd"</Arguments>
+      <WorkingDirectory>__CHECKOUT__</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

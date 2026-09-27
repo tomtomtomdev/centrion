@@ -8,15 +8,25 @@ Windows equivalent. What *is* portable is the shape: three processes, files as t
 protocol, a runner that outlives its launcher, a scraper that finds one URL in a terminal
 stream. This document is the plan for keeping that shape and replacing the mechanisms under it.
 
-Status: **W5a done (2026-09-27); W5b next — the scheduled task, `windows\centrion.xml`.**
-W5a wrote the two startup files and found that §7's restart throttle, copied out of this
-document verbatim, does not throttle at all unless the file happens to have been launched
-with a console: `timeout /t 10 /nobreak` returns in 0.02s with an error instead of waiting ten
-seconds, so a listener that cannot start would have written two log lines every twenty
-milliseconds until the disk filled — silently, a hot loop and a healthy listener being
-indistinguishable from outside. §7 now carries a `ping` fallback and both measurements. The
-loop itself works: killed, the listener is back 10.07s later and takes W4d's mutex with
-nothing stale to clear, and `install.ps1` builds a usable checkout from a bare clone in 10.1s.
+Status: **W5b done (2026-09-27); W5c next — restart survival, the launchd §12 slice 9 test.**
+W5b wrote `windows\centrion.xml`, taught `install.ps1` to render and register it, and found
+two things this document had wrong. Task Scheduler defaults a task to priority 7, which is
+`BELOW_NORMAL_PRIORITY_CLASS` and is inherited by every session the listener spawns — the
+plist's loudest warning, `ProcessType Standard, NOT Background`, with a different name and no
+row in §7's table until now; measured, the whole tree runs `BelowNormal` without a
+`<Priority>` and `Normal` with one. And `windows\install.ps1` **as W5a committed it did not
+parse at all**: nine errors from `powershell -File`, because Windows PowerShell 5.1 reads a
+BOM-less `.ps1` as cp1252 and a UTF-8 em dash terminates a string there — a run step measures
+the bytes that were run, and the commit is a different set of bytes unless something checks.
+Everything under `windows\` is now ASCII and a portable test holds it. The task is registered
+and works: `schtasks /Run` to `centrion listening` in **0.37s** and to the first poll in
+**0.92s**, the whole tree at `Normal`, the KeepAlive loop restarting a killed listener 9.36s
+later — and the console question W5a left open is answered *yes*, the action has one, so
+`timeout` is what throttles under the scheduler and the `ping` fallback never fires.
+**The logon leg of "logon to first poll" could not be measured from this desk**, because
+logging off ends the session driving the slice; §11 carries it as a time item with the one
+elevated command it needs. W5a, before this, found §7's restart throttle silently did nothing
+without a console and put a `ping` fallback behind it.
 **What is still owed is the literal run from a phone**: `.telegram.json` here holds W3g's
 placeholder token and every Telegram call answers `HTTP 401 Unauthorized`, so no phone can
 reach this listener until a real token is put in that file — a user's decision, not a slice's,
@@ -25,8 +35,8 @@ drove the whole acceptance checklist against the shipped `serve()` and five of i
 behaved exactly as specified; the sixth found that W3h's trust finding is half wrong (§4), and
 the run found a double reply in shared code that §4.6 forbids and nothing tested (§6, fixed,
 three portable tests). The suite
-runs natively on Windows since W1c: 683
-tests, 589 pass, 94 skipped as the Mac's (each skip names its reason or the slice that
+runs natively on Windows since W1c: 699
+tests, 605 pass, 94 skipped as the Mac's (each skip names its reason or the slice that
 un-gates it), and since W3h **no expected failure at all** — the one there had been was W3h's
 own. One unidentified error seen once in 35 runs remains, which W3c's row records rather than
 explains and which has not recurred since. Since W2b it is run from the venv —
@@ -824,8 +834,15 @@ until the disk is full, so it does not get to depend on how the file was launche
 no console and no venv, and eleven echoes a second apart is ten seconds of gaps. Measured both
 ways: 10.09s with the fallback, 0.02s with the original line alone. On a console the fallback
 never fires (`ping.exe` count 0 across a full hand-run), so it costs nothing where `timeout`
-works. Whether Task Scheduler gives its action a console is a W5b question and this makes it
-stop mattering.
+works. Whether Task Scheduler gives its action a console was a W5b question and this made it
+stop mattering. **W5b's answer: it does.** A task action is `cmd.exe /c`, and `cmd.exe`
+allocates a console even under `Hidden` — a restart driven by the scheduler waited **9.36s**
+between the exit line and the next start line, with no `Input redirection is not supported`
+anywhere in `var\bot.log` and 0 `ping.exe` processes. So the fallback never fires on either
+of the two ways this file is actually launched, which does not make it wrong: it is now the
+only thing standing behind a launcher that is neither (a service wrapper, `nssm`, a
+`CreateProcess` from something that closed its handles) and it costs nothing where `timeout`
+works.
 
 Nothing in this file is substituted at install time, and that is the one place the Windows
 side is simpler than the Mac's. `%~dp0` is the file's own directory, so the committed `bot.cmd`
@@ -833,20 +850,58 @@ is already correct in every clone — where the plist has to carry a `__CHECKOUT
 that `install.sh` renders, because launchd expands nothing. The installer here has one fewer
 thing to get wrong and the XML below is the only thing left that needs rendering.
 
-**`windows\centrion.xml`** — a Task Scheduler task definition, imported with
-`schtasks /Create /TN centrion /XML windows\centrion.xml`. The settings that matter:
+**`windows\centrion.xml`** — a Task Scheduler task definition. **Not** imported with
+`schtasks /Create /TN centrion /XML windows\centrion.xml`, which is what this line said
+until W5b and cannot work: the committed file holds placeholders, and `install.ps1` renders
+it to a temp file and imports *that*. The settings that matter:
 
 | Setting | Value | Why |
 |---|---|---|
 | Trigger | `LogonTrigger` for this user | `RunAtLoad` |
-| Action | `cmd.exe /c "<repo>\windows\bot.cmd"` | |
+| Action | `%SystemRoot%\system32\cmd.exe /c "<repo>\windows\bot.cmd"` | the scheduler expands the variable; `cmd.exe` because `CreateProcess` cannot run a `.cmd` |
+| `Priority` | `5` | **the default is 7, which is `BELOW_NORMAL_PRIORITY_CLASS`, and every session inherits it** — see below |
 | `ExecutionTimeLimit` | `PT0S` | the default is 3 days, after which the task is killed |
 | `MultipleInstancesPolicy` | `IgnoreNew` | belt for the mutex's braces |
 | `DisallowStartIfOnBatteries`, `StopIfGoingOnBatteries` | `false` | this is a laptop |
 | `StartWhenAvailable` | `true` | a missed logon trigger still fires |
+| `AllowStartOnDemand` | `true` | W5c's checklist is `schtasks /End` then `schtasks /Run` |
 | `RestartOnFailure` | `PT1M`, count 3 | for the wrapper itself dying; the loop handles the listener |
 | `Hidden` | `true` | no console window on the desktop |
 | `LogonType` | `InteractiveToken` | run as the logged-on user, no stored password |
+
+**`Priority` is this file's `ProcessType`** (W5b, measured). The plist's loudest warning is
+that `ProcessType Background` throttles every session the listener spawns, because a child
+inherits it, and the symptom is "Remote Control feels slow" days later with nothing in any
+log. Task Scheduler has exactly the same trap under a different name and defaults *into* it:
+a task registered with no `<Priority>` gets 7, which is `BELOW_NORMAL_PRIORITY_CLASS`.
+Measured on this box with the whole tree cleared between runs — **no element: `cmd.exe`, the
+venv launcher and the interpreter all `BelowNormal`; `<Priority>5</Priority>`: all `Normal`**.
+4, 5 and 6 are all `NORMAL_PRIORITY_CLASS`. This row did not exist in the table above before
+W5b and is the one thing in it that is wrong by default.
+
+**Two placeholders, not one.** §9's W5b said `install.ps1` had one `-replace` to do because
+`bot.cmd` needs none; it has two. `__CHECKOUT__` is the plist's reason. `__USER__` is a
+reason the Mac does not have: a LaunchAgent is this user's because of the directory it is
+installed into, where a task lives in one machine-global store, so both the `LogonTrigger`
+and the `Principal` name a `UserId` — and a `LogonTrigger` with none means *any* user's
+logon, which `schtasks /Create` refuses from an unelevated shell with **"ERROR: Access is
+denied"** and no mention of the trigger or the element (measured; it is the principal's
+`UserId` that may be omitted, not the trigger's).
+
+**The XML has no environment, and cannot have one.** The plist carries `PYTHONUNBUFFERED`
+and a `PATH`; this schema has no element for either — `<EnvironmentVariables>` and
+`<Environment>`, in `Settings` and in `Exec`, are all "ERROR: The task XML contains an
+unexpected node". So `PYTHONIOENCODING`, which §9's W5b wanted put here, could only ever
+have been a `set` in `bot.cmd`; W5b decided against it and wrote the decision into that file.
+
+**Encoding: `<?xml version="1.0"?>`, ASCII, no byte order mark**, and every other spelling
+fails as `ERROR: The task XML is malformed` with a column number. Measured: `schtasks` refuses
+`encoding="UTF-8"` in the prolog outright ("unable to switch the encoding") and refuses a
+UTF-8 BOM ("incorrect document syntax" at (1,2)); it accepts `encoding="UTF-16"` over ASCII
+bytes and UTF-16LE-with-BOM over UTF-16 ones, but Python's expat then will not read the
+committed file, and UTF-16 in a repository is a blob git diffs as binary. A bare prolog is
+the one spelling both accept. PowerShell 5.1's `Out-File -Encoding utf8` writes a BOM, which
+makes the natural way to write the rendered file the broken one.
 
 `InteractiveToken` means the bot exists only while this user is logged on. That is the same
 place launchd's GUI domain leaves the Mac (SPEC.md §14: "a login after a cold boot is still
@@ -855,15 +910,32 @@ close that gap but runs the bot in a non-interactive session; ConPTY does not ca
 Claude Code's login lives in `%USERPROFILE%\.claude` rather than in an interactive keychain, so
 it may well just work — but it is a W5 verification, not an assumption. The paths in the XML
 are absolute and specific to this checkout, exactly as the plist's are; the install script
-writes them.
+writes them, and the user with them.
 
 **`windows\install.ps1`** — creates `.venv`, installs `requirements-win.txt`, makes `var\`,
-and checks `.telegram.json`'s permissions. Then, from W5b, writes the XML with this
-checkout's path substituted and registers the task. Idempotent; re-running it reuses the venv,
-re-installs the pinned wheels (a no-op) and re-registers. Measured (W5a): **10.1s on a fresh
-clone, 1.7s on a re-run**, and a clone it has installed runs the suite from its own venv.
+checks `.telegram.json`'s permissions, and (W5b) renders the XML and registers the task with
+`schtasks /Create /TN centrion /XML <temp> /F`. `-Print` writes the rendered XML to stdout
+and does nothing else, which is `install.sh --print`; `-NoTask` installs everything but the
+task, for a clone that only exists to run the suite. Idempotent; re-running reuses the venv,
+re-installs the pinned wheels (a no-op) and re-registers (`/F` replaces, with no `bootout`
+and no wait loop — the scheduler replaces a registration synchronously where `launchctl
+bootout` returns before the job is gone). Measured: **10.1s on a fresh clone and 1.7s on a
+re-run** (W5a), **2.1s on a re-run with the task** (W5b), and a clone it has installed runs
+the suite from its own venv.
 
-Two things it does differently from the sentence above, both W5a findings:
+**W5b found that this file did not run at all.** As W5a committed it, `powershell
+-ExecutionPolicy Bypass -File windows\install.ps1` — the invocation in its own header —
+answered **nine parse errors** and executed nothing. Windows PowerShell 5.1 reads a BOM-less
+`.ps1` in the ANSI code page, not UTF-8; a U+2014 em dash is `E2 80 94` there, and `0x94` in
+cp1252 is a curly closing quote, which PowerShell honours as a string terminator, so one em
+dash inside one `throw "…"` unbalances every quote after it. There is no `pwsh` on this box,
+and `pwsh` is the only version that would have read the file as UTF-8. The rule is now one
+line per directory — **everything under `windows\` is ASCII** — and `test_layout.py`'s
+`test_nothing_under_windows_is_anything_but_ascii` is what holds it, on both platforms,
+because it is a property of the bytes and the Mac can read bytes.
+
+Three things it does differently from the sentence above, the first two W5a's findings and
+the third W5b's:
 
 - It **does not set** the token's DACL, it *asks*. A `.telegram.json` created under the
   checkout — or under `%TEMP%`, also measured — already inherits owner/SYSTEM/Administrators,
@@ -879,6 +951,11 @@ Two things it does differently from the sentence above, both W5a findings:
   because Windows 11 ships a `python.exe` app-execution alias that opens the Store and runs
   nothing. Probing with `--version` rather than `-c` is deliberate: a probe that can open a
   REPL is a probe that can hang an installer.
+- It writes the rendered XML with `[System.IO.File]::WriteAllText(…, UTF8Encoding($false))`
+  and not with `Out-File`. The latter is the natural PowerShell spelling and, in 5.1, the
+  broken one: `-Encoding utf8` there means UTF-8 *with* a byte order mark, which `schtasks`
+  rejects. The temp file is removed in a `finally`; the registered task is then readable with
+  `schtasks /Query /TN centrion /XML`, which is where to look rather than on disk.
 
 **Sleep and hibernate.** Not a launchd concern; very much a Windows-laptop one. A sleeping
 machine holds no `getUpdates`, and on wake Telegram returns the queued messages — §7's
@@ -1550,13 +1627,23 @@ its spaces (§4), and that every runner here is two processes (§6).
 - Run: `install.ps1` on a clean clone in `%TEMP%`; `windows\bot.cmd` from a console, then
   kill the Python process — the loop restarts it after 10s and `var\bot.log` shows both lines.
 - Test: both platforms (layout tests run everywhere; all twelve are portable and undecorated).
+- **Amended by W5b: the `install.ps1` that was committed here did not parse.** The run step
+  measured a script that then had its prose polished, and nine UTF-8 em dashes went into a
+  BOM-less `.ps1` that Windows PowerShell 5.1 reads as cp1252, where `0x94` is a closing
+  curly quote and terminates a string (§7). Every one of W5a's twelve tests read the file as
+  text and none of them ran it, which is the whole of the lesson: **a run step measures the
+  bytes that were run, and the commit is a different set of bytes unless something checks.**
+  W5b's `test_nothing_under_windows_is_anything_but_ascii` is that something.
 
-**W5b — the scheduled task.** Unblocked by W5a; `bot.cmd` exists and runs. Three things W5a
-leaves on this entry's desk:
+**W5b — the scheduled task.** Done; see §11. Three things W5a left on this entry's desk, and
+the answer to each:
 - **Does the task's action get a console?** `timeout /t 10` needs one and silently does not
   throttle without it (§7). W5a made that survivable with a `ping` fallback, so this is now a
   fact to record rather than a risk to carry — read `var\bot.log` after a task-driven restart
   and see whether the `ERROR: Input redirection is not supported` line is in it.
+  **Answered: it does.** The action is `cmd.exe /c`, which allocates a console even under
+  `Hidden`; 9.36s between the log's exit line and its next start line, no complaint, 0
+  `ping.exe`. §7 amended.
 - **The task's environment.** The plist sets `PYTHONUNBUFFERED=1` and a `PATH`; `bot.cmd` sets
   nothing, and neither is needed — `bot.log()` writes to stderr and flushes every line itself,
   and Windows has a usable `PATH` in every session. What is *not* set anywhere is
@@ -1564,19 +1651,44 @@ leaves on this entry's desk:
   project name outside it reaches the log backslash-escaped rather than as itself. Harmless —
   `sys.stderr` uses `backslashreplace`, so nothing raises — but if the XML is going to carry
   an environment at all, this is the one line worth putting in it.
+  **Answered: the XML cannot carry one.** There is no element for an environment in this
+  schema at all — `<EnvironmentVariables>` and `<Environment>`, in `Settings` and in `Exec`,
+  are each "ERROR: The task XML contains an unexpected node". So the only place it could go
+  is a `set` in `bot.cmd`, which is the place this entry said it did not belong. **Decided,
+  not inherited: it stays unset**, and the reasoning is written into `bot.cmd` above the loop
+  — `type var\bot.log` is the instruction §14 gives, ASCII escapes stay readable in a console
+  and UTF-8 would not, and nothing raises either way.
 - `bot.cmd` needs no path substitution (§7), so the XML is the only rendered file and
-  `install.ps1` has one `-replace` to do, not two.
+  `install.ps1` has one `-replace` to do, not two. **Wrong: two.** `__CHECKOUT__` for the
+  plist's reason and `__USER__` for one the Mac does not have — a task lives in a
+  machine-global store and its `LogonTrigger` must name a `UserId`, or it means every user's
+  logon and `schtasks /Create` answers "Access is denied" (§7).
 - Red: `test_layout.py::test_task_xml_settings` parses `windows/centrion.xml` and asserts
   the §7 table: `PT0S`, `IgnoreNew`, batteries `false`, `StartWhenAvailable true`,
   `InteractiveToken`, a `LogonTrigger`; and the win32 counterparts of the three
   `TestTheLaunchdInstall` checks W1c gated as `this_mac_checkout` — every path in the XML
   absolute and present, the working directory is this checkout, the log is `var\bot.log`.
+  The third has no counterpart to compare against, because **Task Scheduler has no
+  `StandardOutPath`**; what the test asserts instead is the join — the action is `bot.cmd`,
+  and `bot.cmd` is the only thing that appends `var\bot.log`.
 - Green: the XML template; `install.ps1` substitutes the path and runs `schtasks /Create`.
 - Run: register; log off and on; `var\bot.log` shows the listener up within a minute and a
-  phone `ls` answers. Record the seconds.
+  phone `ls` answers. Record the seconds. **The logoff/logon half could not be taken from
+  this desk** — logging off ends the session driving the slice — so the figure in §11 is the
+  leg that could be: scheduler start to first poll. The logon leg is a named debt.
 - Test: both platforms.
 
-**W5c — restart survival, the launchd §12 slice 9 test.** No new code expected.
+**W5c — restart survival, the launchd §12 slice 9 test.** No new code expected. Unblocked by
+W5b; the task is registered and `AllowStartOnDemand` is on, which is what `schtasks /Run`
+needs. Two things W5b leaves on this entry's desk:
+- **The listener is three processes under the task, not two.** `cmd.exe` (the action), the
+  venv launcher `python.exe`, and the real interpreter. W4e's "two processes" is the
+  console case; the scheduler adds the wrapper, and it is the wrapper that the loop lives in.
+- **`schtasks /End` kills the action and leaves the pythons**, observed while measuring the
+  priority counterfactual — which is W0c's finding arriving from the other direction, and is
+  exactly the property this slice exists to check. Do not read "the task is not running" as
+  "nothing is listening": the next `/Run` starts a `bot.cmd` whose listener is then refused
+  by W4d's mutex in about a tenth of a second and restarted every ten thereafter.
 - Red: checklist into §11 first: start a session; `schtasks /End /TN centrion`; `tasklist`
   shows runner and claude alive; `schtasks /Run`; `ls` shows the session live with the same
   runner pid; `stop 1` ends it.
@@ -1649,13 +1761,14 @@ the Mac when the slice touched shared or posix code.
 | W4f the Mac merge lands on Windows | done · Mac pending | 2026-09-27 | 28698b9 | **668 ran: 574 pass, 94 skip, 0 xfail**, 41.7s · **not run** | **A merge nobody had run here broke two tests, and only one of them was a break — the other was a test that had never been about the code.** `5174808` brought ~18 Mac commits into this tree (slice 13's project keyboard, a macOS-only `attach.py`, launchd and cleanup scripts) and the suite went to `668 ran — FAILED (failures=1, errors=1)` against W4d's 624/0/0. **(1)** `test_the_text_is_capped_and_the_keyboard_still_arrives` had never run on Windows: 30 directories of 203 characters under a temp root clears macOS and dies inside `makedirs` with `[WinError 206] The filename or extension is too long`. The property is real and portable — §7's 4096 caps the *text*, the markup is a separate field — so it is bought with the count instead of the width (80 names of 63 characters, ~5.3 KB of list) and **still runs on both platforms**; no decorator, per W4a's rule that only a mechanism that genuinely is the platform's earns one. A third assertion went in first, `assertIn("characters elided", …)`, because the other two are both true of a reply nothing happened to. **Mutation: dropping the markup in `say` fails it on `markups[0] is None`; sending `text` instead of `fit(text)` fails it on the elision guard.** **(2)** `test_a_pid_that_is_not_one_is_answered_rather_than_raised` is **not a regression and not new code** — it asserted `started("4242") is None`, which neither platform promises, because both guards are `int(pid)`. It passed for a year on a free pid and failed the day `EACefSubProcess.exe` took 4242: an assertion about this box's pid table. Now `"nope"`, which is unreadable as a pid on both sides; **mutation: deleting `session_win.started`'s `except (TypeError, ValueError, OverflowError)` makes it error with `ValueError: invalid literal for int()` on exactly that case.** **`bot.py` cannot produce a string pid at all** — `session.py` writes `os.getpid()`, and `Sessions.alive`'s `isinstance(pid, int)` stops one before `procs.alive`, `procs.started` and (through `alive`) `session.terminate` — which is why nothing above the seam ever noticed. §9's W4a and its row are amended; the correction is the finding. **The merge's shared-code diffs were read rather than assumed** (`session.py` +50, `session_posix.py` +21, `bot.py` +123, `config.py`, `telegram.py`), and three sections are amended: **§4** — the posix `Terminal` gained `size`/`resize` for `attach.py`, so the seam's `Terminal` is asymmetric and `test_session.py`'s `SURFACE` check cannot see it (it asserts module names, not class methods), and `session.py --attach` is an unguarded `import attach` → `ModuleNotFoundError: fcntl` here; `pump` still names its four calls and `_serve_viewers` returns `None` on win32 before the import, so nothing shared is broken. **§5** — a sixth config key, `terminal_window`, off by default here and *refused by name* off darwin. **§6** — the keyboard and `telegram.py`'s `reply_markup`/`set_commands` are platform-neutral; checked, and the line is there so nobody re-reads it. **Nothing in the merge contradicts a W-slice's claim.** **Run step, `scratch\w4f_handrun.py` — the merged Mac feature working on Windows, once.** The shipped `bot.serve()` with only `telegram.Telegram._open` replaced (the seam `telegram.py`'s own docstring names), so the real `config.load()`, W4d's real mutex, `Listener.run`, `reconcile` and the real JSON body all run: `centrion listening · 1 allowed chat(s) · root ~\Projects\tomtomtomdev · max_sessions 2 · offset None`, then `setMyCommands` with all five verbs before the first poll, then **`/ls` answered `No live sessions.` carrying a `reply_markup` of 12 `claude <project>` buttons and an `["ls","help"]` row**, `resize_keyboard` and `is_persistent` both set — and bare `claude` and `help` the same keyboard, with `The keyboard holds the first 12. ` in the text because the root holds **32** projects, all 32 `tappable` (none has a space in its name). Three replies in 0.9s; `CTRL_BREAK_EVENT` ended it 130 (this harness installs a `SIGBREAK` handler, where bare `--serve` is W4d's 3221225786). Reconciliation also swept five session directories left from W4d's runs, 7d old — §10.7 running for real. **Suite 624 → 668 is the merge, not this slice**: +44 tests, and skips 75 → 94 are +18 `tests/test_attach.py` (macOS-only, correctly gated) and one more in `test_bot.py`, where `TestTheLaunchdInstall` is now `skipUnless(POSIX)` with a reason that already names W5. This slice changed two existing tests and added none. Two consecutive full runs, 41.9s and 41.7s; W3c's unidentified ~3% error did not recur. Mac: not run — see Pending. |
 | W4e end to end from the phone | done · from the phone pending · Mac pending | 2026-09-27 |  8ccf7ad | **671 ran: 577 pass, 94 skip, 0 xfail**, 41.9s · **not run** | **Five of the six checklist items behaved exactly as written, the sixth rewrote a paragraph of §4, and the slice that expected no red found a bug in shared code that sends the phone the same link twice.** First, the part that cannot be done here: `.telegram.json` carries W3g's placeholder token, so the shipped `bot.py --serve` answers `deleteWebhook: HTTP 401 Unauthorized: invalid token specified`, then the same for `setMyCommands`, then `getUpdates: … retrying in 1s` — run for 14s and read, so the block is measured rather than assumed. **No phone reached this listener and the row says so**; the checklist was driven instead through the shipped `bot.serve()` with `telegram.Telegram._open` replaced (W4f's seam), over W4d's real mutex, real `Popen` runners, real ConPTY, real `claude.exe`, the real `projects_root`. **1 — the link: 2.44s and 12.92s on two runs, against a 45s deadline**, `▶ Beacon · Beacon-06a6` and the `session_` URL on its own line. **2 — `ls`: 0.03–0.23s**, numbered from 1, project · name · uptime, link on its own line, `starting…` for the one that had none, and W4f's 13-row keyboard on every one of them (`claude Allstocks` first, `ls`/`help` last). **3 — `stop 1`: 1.14s, 1.56s, 1.70s, 0.96s across the runs and `stop all` 3.45s for two** — all far under W4b's 5.70s, which was a `ping` ignoring its Ctrl-C and not a session; `ls` renumbered behind each one and then said `No live sessions.`, `meta.json` said `ended`, and **every runner and every ConPTY child was gone from `tasklist`**. **5 — the cap: 0.15s and 0.20s**, `2 of 2 sessions already running.`, and the third `claude` spawned nothing and resolved nothing. **6 — the failed tail: 0.83s** to `✗ Beacon · the session did not start.` carrying `unknown option --remote-control` and the real usage text, tilde-collapsed by `scrub` — provoked by pointing `claude_bin` at `python.exe` for one run, with `.telegram.json` written back byte-for-byte after. **4 is the one that did not do as it was told, and it contradicts W3h.** `new w4e-trust-a1` — fresh, empty, under `projects_root` — came up in **2.30s with no dialog**, `📁 … created` in the reply, and an entry written for it saying `hasTrustDialogAccepted: false` without anyone being asked: W3h's finding, still true. But `claude Lab` — an ordinary project **in that same root**, never trusted — **raised the panel every time**, on both runs, and the phone waited the full 45s for `… Lab · no link after 45s`. So W3h's "the variable is *where* the directory is and not what is in it" is **false**, and §4 now says so. `Lab` was left with no `~\.claude.json` entry at all, so the entry is the effect of not being asked rather than the cause; the four directories here that come straight up are the four with `hasTrustDialogAccepted: true`, which are also the four in `githubRepoPaths`, and the rule for a directory Claude Code has never seen is still unknown. **The consequence is the finding: `Trust` is armed only by `new` *and* an empty directory, which is exactly the case that never sees the panel, while the case that does never arms it.** The mechanism is sound — fed the 1622 bytes of the live panel this run captured, `Trust` reaches `asked` and emits Down at chunk sizes 1, 7, 64, 512, 4096 and whole — and it is simply never reached. `new Lab` showed the other half live for the first time: the listener arms it and the runner stands down, `Lab is not empty — leaving §9.3's dialog alone`. **The red nobody predicted.** The first `claude` of the run was answered **twice**, 28ms apart — §9.12's `arrived()` and then the session's own waiter — and so was the first `new`. `Listener.waited` claims before it sends and **ignores the answer**, so `claim()`, whose docstring calls itself the arbitration between the waiter and the tick, was an arbitration only one side listened to; §4.6 promises exactly one reply per session. Shared code, so **the Mac has it too**. Green is three lines: return when the claim is refused, and log which side won. **+3 tests, all portable, all red first** — `test_the_waiter_says_nothing_when_the_tick_announced_the_link_first` and `…_the_ending_first` failed 2 != 1 on the unfixed code, and `test_a_waiter_that_claims_the_session_does_answer` is the vacuity guard, **green before and after**, because a waiter that answered nothing would have passed the other two. Mutating the green the other way — `claimed = False`, a waiter silent even when nothing claimed it — is caught by three tests that were already there (`test_a_live_record_with_no_link_is_not_reported_as_a_link`, `test_a_session_that_never_comes_up_is_reported_rather_than_forgotten`, `test_giving_up_does_not_claim_the_session_is_gone`), so the timeout half was held all along. **Honest about the amplifier:** the driver's fake long poll returns in 0.2s rather than 50, which turns a window of about half a percent per session into a coin flip. The cadence is why it was seen; the discarded return value is the defect. **Two more, carried as notes and not as work.** A TUI panel's tail reaches the phone with its spaces gone — `Quicksafetycheck:Isthisaprojectyoucreated…` — because ConPTY positions each word with `ESC[<n>G` rather than writing a space, and turning those into whitespace would risk putting one inside the `session_` URL (§4; an ordinary error's tail, which is plain stdout, keeps its spacing). And **every runner here is two processes**: `.venv\Scripts\python.exe` is a 274 KB `venvlauncher`, not a copy of the 105 KB base, so the `Popen` pid §14 logs and the `runner_pid` in `meta.json` name the launcher and the runner respectively, forever (§6). Nothing reads the wrong one. **The run step's own bug, for the next person who scripts one:** a detached runner inherits the driver's stdout, so a hand-run piped into `tail` never sees EOF and hangs until the session is stopped — redirect to a file. +3 tests and **no skip count change** — all three are portable and must run on the Mac. Two consecutive full runs, 41.9s and 42.0s against W4f's 41.7s; W3c's unidentified ~3% error did not recur. Mac: not run — see Pending, which gains four rows here. |
 | W5a `bot.cmd`, `install.ps1` | done · Mac pending | 2026-09-27 | 178b5fa | **683 ran: 589 pass, 94 skip, 0 xfail**, 37.2s · **not run** | **The startup loop's throttle, written down in §7 and copied out of it verbatim, does not throttle unless the file happens to have been launched with a console — and the first test of it was caught by nothing.** `timeout /t 10 /nobreak` with stdin anything but a console prints `ERROR: Input redirection is not supported, exiting the process immediately`, sets `errorlevel` 1 and returns in **0.02s**; measured against 10.09s for the `ping -n 11 127.0.0.1` fallback that now sits behind it, and 0 `ping.exe` processes across a whole console hand-run, so the belt costs nothing where the braces hold. §7 amended with both figures. It matters more than a tidy loop: the throttle is the only thing between a listener that cannot start at all — a missing venv, a refused config — and two log lines every twenty milliseconds until the disk is full, and the failure is *silent*, because a hot loop and a healthy listener look identical from outside. **Red: 9 of the 12 new tests failed and 3 passed before the code existed, which the entry did not predict** — `requirements-win.txt` is W2b's, `.gitignore` has named `.venv/` and `scratch/` since slice 0 (its comment there already says "W5a's install.ps1 creates it"), and `test_the_startup_files_are_tracked` passed *vacuously*, because `git check-ignore --no-index` matches patterns and answers "not ignored" for a file that is not there. All three were mutated rather than waved through: dropping the two `.gitignore` lines, adding `windows/` to it, and moving `requirements-win.txt` aside were each caught by exactly one test and by nothing else in 683. §9's W5a amended to say which three and why. **Mutation of the green, eleven ways, ten caught one-for-one and the eleventh caught by nobody.** `--serve` removed, `goto loop` removed, the `goto` put behind an errorlevel, `>>` turned into `>`, `2>&1` dropped, `cd /d "%~dp0.."` replaced by `%CD%`, the venv python replaced by the system one, and the installer's three (hard-coding this checkout, dropping the lockfile, dropping `icacls`) — each caught by one test and only one. **Removing the throttle was caught by 0 of 683**, because the first `test_bot_cmd_throttles_the_restart_by_ten_seconds` accepted either wait and the conditional `ping` line still reads as a wait — while in fact, with the unconditional `timeout` gone, `errorlevel` after an `echo` is 0 and the `ping` never runs. The test now requires one wait that is not behind an `if`, and the mutation is caught. W4c's rule again, on a slice that thought it was writing two files: *"the test exists" and "the test would fail" are different claims.* **Run step, two parts.** `install.ps1` on a `git clone` into `%TEMP%`: **10.1s** fresh (venv plus three wheels), **1.7s** on a re-run, exit 0 both times, and the clone it left runs 73 of its own tests green from its own venv — which is the real claim, pywin32 being the thing the suite cannot start without (W2b). It also found a bug in its own first draft: `@(...) | Select-Object -Skip 1` returns a **scalar** when one element is left, and **splatting a scalar String in PowerShell 5.1 passes nothing at all** — measured, `$e = "-3"; & py @e -c "print(3)"` opens an interactive REPL — so the `py -3` probe answered nothing, `py` was skipped without a word, and the fall-through to `python` hid it on this box. On a stock python.org box, where "Add python.exe to PATH" is off by default and the launcher is all there is, that is `no python found on PATH` with `py.exe` sitting in front of it. The probe is now `--version` against a `[string[]]`, and the `2>$null` is gone with it: under `$ErrorActionPreference = "Stop"` redirecting a native command's stderr turns each line into a terminating error, so the Store alias's complaint would have been caught as a crash rather than read as a no. **Part two, `windows\bot.cmd` in a real console (`scratch\w5a_handrun.ps1`).** Listener up and logging at 11:53:43.01, mutex taken, then W3g's placeholder token's 401s exactly as W4e recorded them; `taskkill /F /T` on the venv launcher at 11:53:49, `=== listener exited 1 ===` **0.08s** later, `=== centrion listener starting ===` again at 11:53:59.15 — **10.07s after the exit line, 10.19s after the kill** — and the second listener reached `centrion listening` with no stale mutex to clear, which is W4d's 0.100s seen again from the loop's side. Both `===` lines in `var\bot.log`, exactly as the entry asks. Killing the `cmd.exe` tree left 0 listeners. **Two notes carried rather than built.** The listener is two processes like every runner (W4e): `.venv\Scripts\python.exe` is the launcher, its child is the real interpreter, and the loop restarts whichever of them dies. And **nothing sets `PYTHONIOENCODING`**, so `var\bot.log` is written in the ACP — cp1252 here — and a project name outside it reaches §14's one diagnostic backslash-escaped; nothing raises, `sys.stderr` being `backslashreplace`, and the fix if it is wanted belongs in W5b's XML environment and not in a batch file. §9's W5b carries both. **§7 amended three ways**: the throttle above; the note that `bot.cmd` needs no substitution at all, where the plist needs `__CHECKOUT__` rendered, so the XML is the only rendered file left; and the `install.ps1` paragraph, which claimed the script registers the task (W5b's half) and sets the token's DACL (it deliberately does not — a file created under the checkout, or under `%TEMP%`, already inherits owner/SYSTEM/Administrators, so the script runs `config.load()` and prints whatever `config.py` says, which is the only `icacls` line W2b found to work). **+12 tests, all portable, none decorated, no skip count change.** Two consecutive full runs, 37.3s and 37.2s against W4e's 41.9s; W3c's unidentified ~3% error did not recur. Mac: not run — see Pending, which gains four rows here. |
-| W5b scheduled task | todo | | | | seconds from logon to first poll: |
+| W5b scheduled task | done · Mac pending | 2026-09-27 | | **699 ran: 605 pass, 94 skip, 0 xfail**, 37.2s · **not run** | **The task defaults into the plist's loudest bug under a different name, and the file W5a committed one slice ago does not parse at all.** **(1) `Priority`.** A task registered with no `<Priority>` gets **7**, which is `BELOW_NORMAL_PRIORITY_CLASS`, and a child inherits its parent's priority class — so every Claude Code session started from the phone would run below normal for as long as it lived, with the symptom "Remote Control feels slow" days later and nothing in any log. That is word for word the plist's `ProcessType Standard, NOT Background` warning, and §7's table did not have the row. Measured with the whole tree cleared between registrations: **no element → `cmd.exe`, the venv launcher and the interpreter all `BelowNormal`; `<Priority>5</Priority>` → all three `Normal`.** **(2) `windows\install.ps1`, as `178b5fa` committed it, answered nine parse errors and ran nothing.** Windows PowerShell 5.1 reads a BOM-less `.ps1` in the ANSI code page; a U+2014 em dash is `E2 80 94`, `0x94` in cp1252 is a curly closing quote, PowerShell honours it as a string terminator, and one of them inside one `throw "…"` unbalances every quote after it. There is no `pwsh` here and `pwsh` is the only version that would have read it as UTF-8. W5a's twelve tests all read that file as text and none of them ran it — **a run step measures the bytes that were run, and the commit is a different set of bytes unless something checks.** The rule is now one per directory, everything under `windows\` is ASCII, and `test_nothing_under_windows_is_anything_but_ascii` is portable so the Mac holds it too. **Three of this entry's own predictions were wrong and §7 and §9 are amended in place.** `install.ps1` has **two** `-replace`s, not one: a task lives in a machine-global store, so its `LogonTrigger` must name a `UserId` or it means *any* user's logon, which `schtasks /Create` refuses from an unelevated shell with **"ERROR: Access is denied"** and no mention of the trigger (the *principal's* `UserId` may be omitted; the trigger's may not). The XML **cannot** carry `PYTHONIOENCODING` or anything else, because the schema has no environment element at all — `<EnvironmentVariables>` and `<Environment>`, in `Settings` and in `Exec`, are each "ERROR: The task XML contains an unexpected node" — so the only place left is the `set` in `bot.cmd` this entry said it did not belong in; **decided rather than inherited, it stays unset**, with the reasoning written above the loop (`type var\bot.log` is §14's instruction, ASCII escapes stay readable there and UTF-8 would not, and `sys.stderr`'s `backslashreplace` means nothing raises either way). And the third `this_mac_checkout` counterpart has nothing to compare against: **Task Scheduler has no `StandardOutPath`**, so the test asserts the join instead — the action is `bot.cmd` and `bot.cmd` is the only thing that appends `var\bot.log`. **Encoding, measured five ways, because every wrong answer is the same "ERROR: The task XML is malformed" with a column number**: `schtasks` refuses `encoding="UTF-8"` in the prolog outright ("unable to switch the encoding") and refuses a UTF-8 BOM ("incorrect document syntax" at (1,2)); it accepts `encoding="UTF-16"` over ASCII bytes and UTF-16LE-with-BOM over UTF-16 ones, but expat then will not read the committed file and UTF-16 is a blob git diffs as binary. `<?xml version="1.0"?>`, ASCII, no BOM is the one spelling both accept — and PowerShell 5.1's `Out-File -Encoding utf8` writes a BOM, so the natural way to write the rendered file is the broken one. **Red: the new class errored in `setUpClass` on the missing file (its 13 blocked) plus one failure, count and skips unchanged at 683/94** — and **one existing test passed before the code existed**, `test_the_startup_files_are_tracked`, vacuously and for W5a's exact reason, so it is now written as a pair with the presence check and the comment says why. **Mutation of the green, twenty-two ways, twenty caught one-for-one and two by nobody at first.** One of those two was the mutation script's own whitespace bug. The other was real: `test_install_registers_the_task_from_the_rendered_xml` stayed green through a mutation that deleted the `schtasks /Create` call, because the header block *documents* that command and the script's own `throw "schtasks /Create failed …"` names it — comments **and** string literals now come out before the assertion, and the mutation is caught. W4c's rule for the third slice running. **Run step, three parts, `scratch\w5b_handrun.ps1`, `w5b_restart.ps1`, `w5b_priority2.ps1`.** `install.ps1` end to end, exit 0 in **2.1s** on a re-run with the registration (W5a's 1.7s without it), `config.load()` still green on the token, task `Ready`. Then `schtasks /Run`: **`centrion listening` 0.37s after the scheduler was asked, first Telegram call at 0.92s**, three processes (`cmd.exe` → venv launcher → interpreter, all `Normal`), and `schtasks /Query /TN centrion /XML` shows `PT0S`, `IgnoreNew`, both battery settings `false`, `StartWhenAvailable`, `Hidden`, `InteractiveToken`, `Priority 5` and `RestartOnFailure PT1M`/3 all surviving the round trip (the trigger's `UserId` comes back as a SID, the principal's as the name). Then `taskkill /F /T` on the venv launcher: exit line **0.16s** later, restart line **9.36s** after that — **and the console question is answered, `timeout` did not complain and 0 `ping.exe` ran, so the scheduler's action has a console after all** (§7 amended; the fallback is kept for the launchers that are neither). **`schtasks /End` kills the action and leaves the pythons** — W0c from the other direction, noted on W5c. **What could not be proved here**: the logon leg of "logon to first poll". Logging off ends the session driving the slice, the Task Scheduler operational log is disabled on this box and enabling it needs elevation, so **the measured figure is 0.92s from the scheduler starting the action to the first `getUpdates`** and the logon-to-action leg is a named debt below. The Telegram call was HTTP 401 as it has been since W3g — placeholder token, a standing debt, not a slice failure. **+16 tests, 13 of them portable and undecorated and 3 gated `this_windows_checkout` — the counterparts of the `this_mac_checkout` three, because "absolute, and present" about `__CHECKOUT__\windows\bot.cmd` is a question only this platform can answer. No skip count change, because a `skipUnless(win32)` runs here.** Two consecutive full runs, 37.7s and 37.2s against W5a's 37.2s. Mac: not run — see Pending, which gains four rows here. |
 | W5c restart survival | todo | | | | checklist: End → pids alive · Run → ls same pid · stop |
 | W5d not-logged-on | todo | | | | |
 | W6 CI matrix | todo | | | | |
 | retention day 1 on NTFS | — | | | | |
 | first sleep/wake with a session open | — | | | | |
 | first self-update under a live runner | — | | | | |
+| first real logoff/logon after W5b | — | | | | **the half of W5b's figure this desk could not take.** Logging off ends the session driving a slice, so only the scheduler-start→first-poll leg is measured (0.92s). To get the other leg: one elevated `wevtutil sl "Microsoft-Windows-TaskScheduler/Operational" /e:true` (it is disabled on this box and enabling it is refused unelevated), then after the next logon compare that log's task-start event with the Security log's 4624, and add 0.92s. What must also be true and is not yet observed: the listener comes up **without** anyone asking, and `var\bot.log` gains a `centrion listener starting` line with a logon timestamp on it. |
 
 ### Pending on the Mac
 
@@ -1747,6 +1860,10 @@ verified until then, and W1c's first Windows-green run is not a substitute.
 | W5a | `/usr/bin/python3 -m compileall -q .` | clean — 3.9. `tests/test_layout.py` is the only Python file this slice touches and the only new syntax in it is an `import re` and a class attribute, but the Mac is still the only interpreter that can say so. |
 | W5a | **nothing to hand-run, and nothing installed** | **named so the row is not mistaken for an omission.** No posix, shared or program code moved: the change is `tests/test_layout.py`, two new files under `windows\`, and this document. `windows\bot.cmd` is a batch file and `windows\install.ps1` needs `py`, `pip` and a `.venv\Scripts\` — neither can run on the Mac at all, and neither is meant to. The Mac's startup is still `launchd/install.sh`, `launchd/bot.sh` and the plist, all three untouched, and the check that they still are is simply that `TestTheLaunchdInstall` passes there as it always has. |
 | W5a | `sh launchd/install.sh --print`, and `sh launchd/bot.sh` | **unchanged, and that is the claim** — the third time this table has made it, and the most load-bearing, because W5a is the slice most likely to have leaked. `windows\bot.cmd` was written *from* `launchd/bot.sh` and `windows\install.ps1` *from* `launchd/install.sh`, and the shapes deliberately differ in two places: the Windows loop is a `KeepAlive` the Mac gets from launchd, and the Windows file takes **no lock at all** because W4d's mutex is inside the listener. If a lock has appeared in `bot.sh` that python now also takes, or the rendered plist has changed by a byte, the porting went the wrong way. |
+| W5b | `/usr/bin/python3 -m unittest -q` | green, and **sixteen newly run, nothing newly skipped**. Thirteen of the new tests are portable and undecorated for `TestTheWindowsStartup`'s reason — `windows\centrion.xml` is in this repository on both boxes, and a merge that drops it, or an ignore rule that swallows it, should fail on the machine that cannot otherwise notice. The three `this_windows_checkout` ones (`test_every_path_in_the_task_is_absolute_and_present`, `test_it_runs_this_checkout`, `test_install_renders_the_task_xml_these_checks_read`) must come back **skipped** there, with the same reason `this_mac_checkout` gives in the mirror: a rendered `__CHECKOUT__\windows\bot.cmd` is not a path on a Mac. The count is W5a's plus 16, skips unchanged at 94 here and plus 3 there. |
+| W5b | `tests/test_layout.py::TestTheWindowsStartup::test_nothing_under_windows_is_anything_but_ascii` | **the one new test that matters most on the Mac, and the only one that would have caught W5a's break.** It is a property of the bytes, so the Mac can hold it, and the Mac is the likelier place for a UTF-8 em dash to get typed back into `windows\install.ps1` — an editor there has no reason to think twice about it, and no Mac will ever run the file and notice. If this fails on the Mac and passes here, somebody's checkout has re-smartened the punctuation. |
+| W5b | `/usr/bin/python3 -m compileall -q .` | clean — 3.9. `tests/test_layout.py` is the only Python file this slice touches; the new syntax in it is an `import xml.etree.ElementTree`, a `@classmethod` used as a helper and an f-string-free `%` format, none of it past 3.9 — but the Mac is still the only interpreter that can say so. |
+| W5b | **nothing to hand-run, and nothing installed** | **named so the row is not mistaken for an omission**, the second time W5 has had to say it. No posix, shared or program code moved: the change is `tests/test_layout.py`, one new file and two edited files under `windows\`, and this document. `windows\centrion.xml` is a Task Scheduler definition and `schtasks` does not exist on macOS; the Mac's startup is still `launchd/install.sh`, `launchd/bot.sh` and the plist, all three untouched again, and the check that they still are is that `TestTheLaunchdInstall` passes there as it always has. The two `windows\` files this slice *edited* were edited for reasons that cannot reach the Mac either: ASCII (a PowerShell 5.1 parser) and a `rem` block recording why `PYTHONIOENCODING` stays unset (a Windows ACP). |
 | W4b | a runner deliberately wedged outside `pump` | **the cost of the slice, if anyone wants to measure it.** Start a session, `kill -STOP` the runner, then `stop` it from the phone: this used to be `SIGTERM` immediately and `SIGKILL` at `STOP_GRACE`; it is now fifteen seconds of marker-polling *before* the `SIGTERM`. Nothing is broken by it — the session still ends — but the number is the honest price of one `stop` meaning one thing on both platforms, and §6 says it is paid on purpose. |
 
 ### Decisions changed by evidence
@@ -2008,3 +2125,30 @@ Appended, dated, when a run step contradicts the plan above and a section was am
   anywhere sets `PYTHONIOENCODING`, so that log is written in the ACP — cp1252 here — which
   puts a project name outside it into §14's one diagnostic as backslash escapes. Neither is a
   defect today; both belong in the XML's environment if anything does.
+- **2026-09-27, W5b → §7's table.** The table had no `Priority` row and should have had it
+  first. Task Scheduler defaults a task to priority **7**, which is
+  `BELOW_NORMAL_PRIORITY_CLASS`, and a child inherits its parent's priority class — so the
+  plist's loudest warning, the one about `ProcessType Background` throttling every session
+  the listener spawns, has an exact Windows twin that this document had walked straight past.
+  Measured with the tree cleared between registrations: no element and all three processes
+  are `BelowNormal`; `<Priority>5</Priority>` and all three are `Normal`. The porting rule
+  the plan was missing: **when a setting on one platform is dangerous because of its default,
+  look for the other platform's default, not for the same word.** "ProcessType" and
+  "Priority" share nothing but the bug.
+- **2026-09-27, W5b → §7, §9's W5a.** `windows\install.ps1` as committed in `178b5fa` did
+  not parse: nine errors from `powershell -File`, the invocation in its own header. Windows
+  PowerShell 5.1 reads a BOM-less `.ps1` as cp1252 and a UTF-8 em dash ends a string there.
+  W5a's run step had measured a working script and its prose was polished afterwards; twelve
+  tests read the file and none ran it. **A run step measures the bytes that were run, and the
+  commit is a different set of bytes unless something checks.** The check is now
+  `test_nothing_under_windows_is_anything_but_ascii`, portable, one rule for the directory.
+- **2026-09-27, W5b → §7, §9's W5b.** Three of the entry's own predictions were wrong.
+  `install.ps1` has two substitutions, not one, because a task lives in a machine-global
+  store and its `LogonTrigger` must name a `UserId` — without one it means every user's logon
+  and `schtasks /Create` says "Access is denied". The XML **cannot** carry `PYTHONIOENCODING`
+  at all: this schema has no environment element, so the only candidate place was the batch
+  file the entry ruled out, and the decision taken is to leave it unset with the reasoning in
+  `bot.cmd`. And Task Scheduler has no `StandardOutPath`, so the third `this_mac_checkout`
+  counterpart asserts a join between two files rather than one field. The one prediction that
+  was a genuine open question — does the action get a console — came back **yes**, which
+  retires the risk without retiring W5a's `ping` fallback.
