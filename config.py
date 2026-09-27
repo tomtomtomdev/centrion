@@ -471,7 +471,21 @@ def _child(name, root):
             or os.path.splitdrive(name)[0]):
         raise ProjectError("that is not a project name. " + _NOT_A_NAME)
 
-    # 2. Resolve it.
+    # 2. Resolve it. Once, and whatever comes back is what check 3 judges.
+    #
+    #    W7 decided this deliberately, against the alternative (WINDOWS.md §5.3, W6). On
+    #    Windows `realpath` cannot canonicalise a *dangling* reparse point — `ntpath` falls
+    #    back to `_readlink_deep` and returns the spelling stored in the link, verbatim — so a
+    #    broken link inside the root whose stored target is spelled through an alias of the
+    #    root (an 8.3 `C:\Users\FOO~1\...`) is refused by check 3 for containment rather than
+    #    by check 4 for existence. Both refuse it; only the sentence differs. Teaching this to
+    #    re-resolve the dirname of a path that has already failed check 3 would put a retry
+    #    after a refusal into the one function §10.4 is a promise about, and it would run
+    #    `realpath` over a string read out of a reparse point — text check 1 never saw, and
+    #    text the OS itself declined to resolve. "The resolution did not complete, so refuse"
+    #    is this module's fail-closed answer. It is held by
+    #    `tests/test_projects.TestAnUnresolvableReparseTarget`, which cannot run on a box
+    #    whose account may not make symlinks.
     path = os.path.realpath(os.path.join(root, name))
 
     # 3. It is a direct child of the root, after resolution.

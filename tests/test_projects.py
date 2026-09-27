@@ -251,6 +251,93 @@ class TestCheck4ItIsADirectory(Base):
         self.refuses("dangling", "exist")
 
 
+class TestAnUnresolvableReparseTarget(Base):
+    r"""W7's decision: `_child` does **not** canonicalise a link whose target is not there.
+
+    W6 found the behaviour and left the call to W7 (WINDOWS.md §5.3). The shape: on Windows,
+    for a dangling reparse point `ntpath.realpath` cannot ask the OS and falls back to
+    `_readlink_deep`, which returns **the spelling stored in the link, verbatim** — no
+    canonicalisation of any part of it. So a dangling link inside the root whose stored
+    target is spelled through an *alias* of the root (a runner's `%TEMP%` is the 8.3
+    `C:\Users\RUNNER~1\...`) has a dirname the resolved root does not equal, and check 3
+    refuses it for containment rather than check 4 for existence. On the Mac
+    `posixpath.realpath` resolves every component it can and only appends the missing leaf,
+    so the same fixture reaches check 4 there.
+
+    W7 decided to leave `_child` as it is, and the reason is the first test below: **the
+    refusal is the same refusal either way.** What canonicalising would buy is one nicer
+    sentence on a phone, for a name that only exists if somebody made a broken link by hand
+    inside `projects_root`; what it would cost is a second resolution pass inside the one
+    function §10.4 is a promise about, whose whole job is to give a name already judged
+    outside the root another chance — and it would run `realpath` over a string read out of
+    a reparse point, which is attacker-controlled text that check 1 never saw and that the
+    OS itself declined to resolve. `config.py`'s first paragraph says everything in it fails
+    closed; "the resolution did not complete, so refuse" is the closed answer and "resolve
+    it again, differently" is not.
+
+    Every test here needs a symlink, so **none of them can run at this desk** (W1c's
+    `needs_symlinks`: this account has neither Developer Mode nor
+    `SeCreateSymbolicLinkPrivilege`). They run on CI, which is where the finding came from
+    and where the guard has to live.
+    """
+
+    def alias_root(self):
+        r"""The root spelled the way it was handed to us, when that is not its realpath.
+
+        `tempfile.mkdtemp` gives `/var/folders/...` on macOS (`/var` → `/private/var`) and
+        `C:\Users\RUNNER~1\...` on a GitHub Windows runner, and on both the premise holds. On
+        a Windows box whose `%TEMP%` is already its own realpath there is no alias to store
+        and nothing here has a subject — the same skip `test_an_unresolved_root_still_
+        resolves_its_children` takes, for the same reason.
+        """
+        if self.root == os.path.realpath(self.root):
+            self.skipTest("this box's temp dir is its own realpath; there is no alias to store")
+        return self.root
+
+    @needs_symlinks
+    def test_a_dangling_link_is_refused_whichever_spelling_of_the_root_it_stores(self):
+        """The invariant the decision rests on: refused on every path through.
+
+        This is the safety half, and it is portable because the property is. Whether
+        `realpath` canonicalised the stored target or handed it back verbatim, the name does
+        not start a session and the refusal carries no path. Nothing below this line is a
+        security question; it is only ever about which sentence the phone gets.
+        """
+        os.symlink(os.path.join(self.alias_root(), "gone"),
+                   os.path.join(self.root, "dangling-alias"))
+        # `""` on purpose: the two platforms name two different rules here and this test is
+        # deliberately indifferent to which. What it still gets from `refuses` is the whole of
+        # what matters — a `ProjectError`, and a message with no path and no echoed name in it.
+        self.refuses("dangling-alias", "")
+
+    @needs_symlinks
+    @unittest.skipIf(POSIX, "ntpath's realpath is the mechanism; posix resolves the dirname")
+    def test_an_unresolved_reparse_target_is_not_canonicalised(self):
+        """The guard on W7's decision, and the one test a "fix" to `_child` would fail.
+
+        Check 3, for containment — not check 4, for existence. If someone teaches `_child`
+        to re-resolve the dirname of a path that failed check 3, this goes red and they have
+        to come back and read the class docstring above, which is the entire point of it.
+        """
+        os.symlink(os.path.join(self.alias_root(), "gone"),
+                   os.path.join(self.root, "dangling-alias"))
+        self.refuses("dangling-alias", "root")
+
+    @needs_symlinks
+    @unittest.skipUnless(POSIX, "the Mac's half: realpath resolves every component it can")
+    def test_the_mac_reaches_check_4_with_the_same_fixture(self):
+        """Why this is a Windows question and not a `config.py` question.
+
+        Same link, same spelling, and on the Mac `posixpath.realpath` walks the components
+        that do exist and appends the one that does not — so the dirname *is* the resolved
+        root and the refusal is check 4's. The platforms disagree about the sentence and
+        agree about the answer, which is why the fix belongs in neither.
+        """
+        os.symlink(os.path.join(self.alias_root(), "gone"),
+                   os.path.join(self.root, "dangling-alias"))
+        self.refuses("dangling-alias", "exist")
+
+
 class TestCreatingOne(Base):
     """§5's `new`, and §12 slice 11: checks 1-3 unchanged, check 4 inverted.
 

@@ -16,6 +16,13 @@
 # entirely because the Mac is 3.9 and Windows is 3.12, so that second pair is the one that
 # tells a 3.10+ construct apart from a posix mechanism that has rotted.
 #
+# Every `unittest` step runs `-v`, not the ritual's `-q`, and W7 is why. §11's "Pending on
+# the Mac" is written in test names — twenty rows of "green, and N newly skipped" — and `-q`
+# prints a number, so not one of those rows could be checked against a run. `-v` prints the
+# same summary line plus which tests skipped and why, which is a superset of what `-q`
+# answers and the only output this table can be reconciled against. The rule is uniform
+# across the three jobs on purpose: an exception would be a thing to remember.
+#
 # No secrets, and there must never be one here. A hand-run needs `.telegram.json`, which is
 # gitignored and absent from a fresh checkout; CI runs the suite, it does not run the bot.
 # Any test that would need a token must already be skipping, and a runner is the cleanest
@@ -59,7 +66,7 @@ jobs:
         run: python -m compileall -q .
 
       - name: unittest
-        run: python -m unittest -q
+        run: python -m unittest -v
 
   macos:
     name: macos-latest, /usr/bin/python3
@@ -87,7 +94,7 @@ jobs:
         run: /usr/bin/python3 -m compileall -q .
 
       - name: unittest
-        run: /usr/bin/python3 -m unittest -q
+        run: /usr/bin/python3 -m unittest -v
 
   macos-modern:
     name: macos-latest, 3.12
@@ -110,4 +117,4 @@ jobs:
         run: python -m compileall -q .
 
       - name: unittest
-        run: python -m unittest -q
+        run: python -m unittest -v

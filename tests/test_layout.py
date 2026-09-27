@@ -148,11 +148,27 @@ class TestTheCiMatrix(unittest.TestCase):
         self.assertIn("requirements-win.txt", self.text)
 
     def test_the_mac_job_runs_the_interpreter_the_ritual_names(self):
-        """§9's step 5 says `/usr/bin/python3 -m unittest -q` and every row of "Pending on
-        the Mac" repeats it. A macOS job that quietly ran a toolcache 3.12 instead would
-        answer a question nobody asked — the guard this port is written against is 3.9."""
-        self.assertIn("/usr/bin/python3 -m unittest -q", self.text)
+        """§9's step 5 says `/usr/bin/python3` and every row of "Pending on the Mac" repeats
+        it. A macOS job that quietly ran a toolcache 3.12 instead would answer a question
+        nobody asked — the guard this port is written against is 3.9. The verbosity flag is
+        the next test's subject, not this one's; the interpreter is this one's."""
+        self.assertIn("/usr/bin/python3 -m unittest", self.text)
         self.assertIn("/usr/bin/python3 -m compileall -q .", self.text)
+
+    def test_every_job_runs_the_suite_verbosely(self):
+        """W7. `-q` prints a count; "Pending on the Mac" is written in test names.
+
+        Twenty rows of §11 predict "green, and N newly skipped" and none of them could be
+        checked against a run, because the only thing CI printed was a number — and when the
+        numbers were finally measured they were out by ten. `-v` prints the same summary plus
+        which tests skipped and why. A quiet revert to `-q` would take the table's evidence
+        away again without taking anything red with it, so it is pinned here."""
+        # assertFalse, not assertNotIn: the haystack is the whole workflow and a failure
+        # that prints it buries the one line that is wrong.
+        self.assertFalse("-m unittest -q" in self.text,
+                         "a job runs the suite quietly — W7: the skip lines are the evidence")
+        self.assertEqual(3, self.text.count("-m unittest -v"),
+                         "all three jobs run `-m unittest -v` — W7")
 
     def test_no_credential_reaches_ci(self):
         """W6 ran the suite; it never runs the bot, so it needs no token and must not grow
