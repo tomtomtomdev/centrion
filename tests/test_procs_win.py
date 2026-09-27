@@ -204,10 +204,20 @@ class TestWhetherARunnerIsStillThereOnWindows(unittest.TestCase):
     def test_a_pid_that_is_not_one_is_answered_rather_than_raised(self):
         """Parity with `session_posix`, which catches `OverflowError` in `alive` and guards
         `started` with an `int()`. The listener's type check means neither is reachable from
-        `Sessions.alive`, but `procs` is a seam and the two sides have to answer alike."""
+        `Sessions.alive`, but `procs` is a seam and the two sides have to answer alike.
+
+        `"4242"` used to be the first of these and it was never a case either side promised
+        (WINDOWS.md W4f). Both guards are `int(pid)`, and `int("4242")` is 4242 — so a numeric
+        string is a *pid*, not a corrupt record, and what `started` answers for it is whatever
+        the platform says about that pid. It passed for a year because pid 4242 happened to be
+        free on this box; the day something took it, the assertion turned red about the
+        machine rather than about the code. `"nope"` is the property that was meant: a pid the
+        seam cannot read at all, which raises `ValueError` inside the guard on both platforms
+        and comes back as `None` rather than as a traceback out of `Sessions.alive`.
+        """
         import session
         self.assertFalse(session.procs.alive(2 ** 62))
-        for bad in ("4242", None, 2 ** 62, -1):
+        for bad in ("nope", None, 2 ** 62, -1):
             self.assertIsNone(session.procs.started(bad), repr(bad))
 
     def test_the_system_process_is_there_and_dates_from_before_every_record(self):

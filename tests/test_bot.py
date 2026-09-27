@@ -3292,10 +3292,24 @@ class TestTheKeyboard(Base):
         self.assertIn(LINK, tg.texts[0])
 
     def test_the_text_is_capped_and_the_keyboard_still_arrives(self):
-        """§7's 4096 applies to the text; the markup is a separate field and must survive it."""
-        for i in range(30):
-            os.makedirs(os.path.join(self.projects, "p" + "x" * 200 + "%02d" % i))
+        """§7's 4096 applies to the text; the markup is a separate field and must survive it.
+
+        Eighty short names and not thirty long ones, and that is the portable spelling rather
+        than a tidy-up (WINDOWS.md W4f). `p` plus 200 x's is a 203-character directory name,
+        which clears macOS and dies inside `makedirs` on Windows — `[WinError 206] The
+        filename or extension is too long` — because the path it makes is over MAX_PATH. The
+        pressure this test wants is the *total* length of the reply, and that is bought with
+        the count as readily as with the width, on both platforms.
+
+        The elision check is the guard that keeps the other two honest: the list has to be
+        long enough that `fit` actually cuts it, or "the text is under the cap" and "the markup
+        survived truncation" are both true of a reply nothing happened to.
+        """
+        for i in range(80):
+            os.makedirs(os.path.join(self.projects, "p" + "x" * 60 + "%02d" % i))
         tg = self.deliver(message("claude"))
+        self.assertIn("characters elided", tg.texts[0], "nothing was truncated, so this "
+                                                        "test is about an ordinary reply")
         self.assertLessEqual(len(tg.texts[0]), telegram.LIMIT)
         self.assertTrue(tg.markups[0], "the keyboard went missing with the truncated text")
 
