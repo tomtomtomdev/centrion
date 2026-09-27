@@ -58,8 +58,20 @@ rem supported, exiting the process immediately", sets errorlevel 1 and returns i
 rem throttle is the only thing standing between a listener that cannot start at all and a
 rem loop that writes two log lines every twenty milliseconds until the disk is full, so it
 rem does not get to depend on how this was launched. `ping` needs no console and no venv;
-rem eleven echoes one second apart is ten seconds of gaps. `2>&1` on the timeout so its
-rem complaint goes to the log with everything else rather than to a console nobody is at.
-timeout /t 10 /nobreak > nul 2>> var\bot.log
+rem eleven echoes one second apart is ten seconds of gaps.
+rem
+rem Neither wait redirects to var\bot.log, and that line is W5c's finding rather than a
+rem tidy-up. `cmd` opens a redirection target denying other writers, so ANY process still
+rem holding the log open for writing makes every `>>` above fail - and after `schtasks /End`
+rem there is always one, because /End kills only the cmd.exe and the listener it started
+rem keeps the handle it inherited (W5b, W0c). Two measured facts then compound: a failed
+rem redirection prints to stderr and leaves errorlevel at 0, so `if errorlevel 1` never
+rem fires; and `2>> var\bot.log`, which this line used to carry, made the timeout itself one
+rem of the commands that did not run. The loop spun at 13% of a core with no wait at all,
+rem nothing in the log, nothing in the task's last result and no symptom but a fan. `> nul`
+rem cannot fail, so a wait redirected only there always runs. The cost is that timeout's own
+rem complaint no longer reaches the log - and it only ever could in the case where the log
+rem opens, which is the case where the throttle was never in danger.
+timeout /t 10 /nobreak > nul
 if errorlevel 1 ping -n 11 127.0.0.1 > nul
 goto loop

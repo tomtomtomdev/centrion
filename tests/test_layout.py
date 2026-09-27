@@ -197,6 +197,38 @@ class TestTheWindowsStartup(unittest.TestCase):
                         "every wait here is guarded: %r. One of them has to run whatever the "
                         "last command did, or the throttle is not a throttle." % (waits,))
 
+    def test_the_throttle_does_not_redirect_to_the_log_it_cannot_always_open(self):
+        r"""W5c, measured: a wait that redirects to `var\bot.log` is a wait that can be skipped.
+
+        `cmd` opens a redirection target with `FILE_SHARE_READ` alone, so **any** process
+        holding the log open for writing makes every `>>` in this file fail — and after
+        `schtasks /End` there is always one, because `/End` kills only the `cmd.exe` and the
+        listener it started keeps the log handle it inherited (W5b, W0c). The next
+        `schtasks /Run` then meets a log it cannot open, and the two things that follow are
+        both worse than they look:
+
+        - **a failed redirection leaves ERRORLEVEL at 0** (measured; the message goes to
+          stderr and the command is simply not run), so `if errorlevel 1 ping` — W5a's whole
+          backstop — never fires;
+        - and the command it guards, `timeout /t 10 /nobreak > nul 2>> var\bot.log`, is one
+          of the ones not run, because *its* redirection is to the same log.
+
+        So the loop spins with no wait and no output at all: measured at 13% of a core, four
+        redirections failing per iteration, nothing in `var\bot.log`, nothing in the task's
+        last result, and the only symptom a fan. `> nul` cannot fail, so a wait redirected
+        only there is a wait that always runs. The cost is that `timeout`'s own complaint no
+        longer reaches the log — and it was only ever reachable in the case where the log
+        opens, which is the case where the throttle was never in danger.
+        """
+        cmd = self.source("bot.cmd")
+        body = cmd[cmd.index("bot.py --serve"):cmd.rindex("goto loop")]
+        waits = [l.strip() for l in body.splitlines()
+                 if not l.strip().lower().startswith(("rem ", "::"))
+                 and re.search(self.WAIT, l, re.I)]
+        for wait in waits:
+            self.assertNotIn("bot.log", wait,
+                             "the throttle must not depend on the log opening: %r" % (wait,))
+
     def test_bot_cmd_runs_this_checkout_through_its_own_venv(self):
         r"""A scheduled task has no working directory worth the name and no useful PATH.
 
