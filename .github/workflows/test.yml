@@ -1,0 +1,113 @@
+# centrion's suite on both platforms. WINDOWS.md W6, and §8's last bullet.
+#
+# Why this exists: every slice since W1a has been written from a Windows desk, and the Mac
+# half of each one is a row in §11's "Pending on the Mac" that nobody has run. This workflow
+# does not clear that debt -- see the warning on the macOS jobs below -- but it does turn
+# "nobody has compiled this with 3.9" into a question a push can answer.
+#
+# Three jobs, chosen so that a red one says *which* of two things is wrong:
+#
+#   windows        windows-latest, CPython 3.12     the desk's platform and the desk's version
+#   macos          macos-latest, /usr/bin/python3   the ritual's own Mac command
+#   macos-modern   macos-latest, CPython 3.12       the same platform at the desk's version
+#
+# windows vs macos-modern isolates the *platform* at one interpreter version; macos vs
+# macos-modern isolates the *interpreter version* on one platform. The ritual's step 3 exists
+# entirely because the Mac is 3.9 and Windows is 3.12, so that second pair is the one that
+# tells a 3.10+ construct apart from a posix mechanism that has rotted.
+#
+# No secrets, and there must never be one here. A hand-run needs `.telegram.json`, which is
+# gitignored and absent from a fresh checkout; CI runs the suite, it does not run the bot.
+# Any test that would need a token must already be skipping, and a runner is the cleanest
+# place to see that it does.
+
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: windows-latest, 3.12
+    runs-on: windows-latest
+    # Real processes, a real ConPTY and a real named mutex are in here. A hung child should
+    # cost minutes, not the default six hours.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: which interpreter
+        run: python -VV
+
+      # W2b: `config.py`'s DACL secrecy check imports win32security, and without it 41 config
+      # tests fail rather than skip. The desk runs the suite from a venv built out of this
+      # file for that reason; the runner installs it into the job's interpreter instead,
+      # because there is nothing else on the box to protect from it.
+      - name: install the Windows lockfile
+        run: python -m pip install --disable-pip-version-check -r requirements-win.txt
+
+      - name: compileall
+        run: python -m compileall -q .
+
+      - name: unittest
+        run: python -m unittest -q
+
+  macos:
+    name: macos-latest, /usr/bin/python3
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # No setup-python on purpose. `/usr/bin/python3` is the literal command in the ritual's
+      # steps 3 and 5 and in every row of "Pending on the Mac", so it is the one this job
+      # runs -- and on a macos-latest runner it is **Python 3.9.6** (measured, W6), the same
+      # 3.9 the whole Mac guard is written against, because it is the Command Line Tools
+      # python rather than anything in the toolcache. The version step below is kept so that
+      # the day Apple moves it is a line in a log and not a mystery.
+      #
+      # This is still not the user's Mac. It is a third environment with the same interpreter
+      # version and the same zero-dependency stdlib stack, and it can answer everything in
+      # "Pending on the Mac" that is a property of the source and the interpreter. It cannot
+      # answer anything that is a property of *that* machine: the hand-runs, the phone, a
+      # real `~/Projects`, launchctl, or an installed Claude Code.
+      - name: which interpreter
+        run: /usr/bin/python3 -VV
+
+      - name: compileall
+        run: /usr/bin/python3 -m compileall -q .
+
+      - name: unittest
+        run: /usr/bin/python3 -m unittest -q
+
+  macos-modern:
+    name: macos-latest, 3.12
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # The control for the job above. Same platform, the same version the Windows job runs,
+      # and no pip install: the Mac side of this program is stdlib only (SPEC.md §3) and a
+      # dependency appearing here would be a bug in the port, not a missing step.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: which interpreter
+        run: python -VV
+
+      - name: compileall
+        run: python -m compileall -q .
+
+      - name: unittest
+        run: python -m unittest -q

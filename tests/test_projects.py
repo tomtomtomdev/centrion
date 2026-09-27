@@ -228,7 +228,26 @@ class TestCheck4ItIsADirectory(Base):
 
     @needs_symlinks
     def test_a_dangling_symlink_is_refused(self):
-        os.symlink(os.path.join(self.root, "gone"), os.path.join(self.root, "dangling"))
+        r"""The target is spelled through the *resolved* root, and W6 is why.
+
+        This test had never run anywhere — this desk's account cannot create symlinks — and
+        the first GitHub Windows runner to execute it failed it, refusing at check 3 instead
+        of check 4. The cause is a property of `realpath` worth writing down: for a link
+        whose target does not exist, `ntpath` cannot ask the OS to canonicalise it and falls
+        back to `_readlink_deep`, which returns **the spelling stored in the reparse point,
+        verbatim**. A runner's `%TEMP%` is `C:\Users\RUNNER~1\...`, an 8.3 alias, so the
+        stored target's dirname is the short spelling and `realpath(root)` is the long one:
+        not equal, so check 3 fires first and the message names containment, not existence.
+
+        Nothing is unsafe about that — a dangling link is refused either way, and a stored
+        target that *did* match the resolved root would name a direct child that is not
+        there, which is check 4's refusal — but it is the wrong refusal for this test's
+        subject, which is check 4. Spelling the target through `realpath(self.root)` makes
+        the fixture a dangling sibling on both platforms instead of an aliased one, without
+        weakening the assertion. WINDOWS.md §5.3 carries the finding.
+        """
+        os.symlink(os.path.join(os.path.realpath(self.root), "gone"),
+                   os.path.join(self.root, "dangling"))
         self.refuses("dangling", "exist")
 
 

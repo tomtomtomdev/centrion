@@ -233,16 +233,27 @@ class TestWhetherARunnerIsStillThereOnWindows(unittest.TestCase):
         start time is boot, which is older than any record), which is why this is recorded as
         a shared shape rather than patched here.
 
-        Asserted as "no later than boot" rather than as `0.0` so that a psutil which starts
-        returning the real boot time for these two pids passes: that would be a better answer
+        Asserted as "no later than every record" rather than as `0.0` so that a psutil which
+        starts returning a real time for these two pids passes: that would be a better answer
         to the same question, and bot.py cannot tell the two apart.
+
+        **The yardstick is this process, not `psutil.boot_time()`, and W6 is why.** A GitHub
+        Windows runner does answer a real `create_time` for pid 4 — the 0.0 above is this
+        box's answer and not the platform's — and it lands **1.78s after** `boot_time()`,
+        which fails an assertion that means to say "at boot". The two numbers come from
+        different clocks: `boot_time` is derived from the tick count and `create_time` from
+        `GetProcessTimes`, so a second or two of disagreement is the normal case and not a
+        finding. `create_time` of *this* process is the same clock as pid 4's and is the
+        thing the sentence actually means — every record was written by a runner this
+        listener started, so nothing in `var/sessions` can predate the interpreter reading
+        it. It is also the stricter of the two, by however long this box has been up.
         """
         import psutil
         import session
         self.assertTrue(session.procs.alive(4))
         began = session.procs.started(4)
         self.assertIsNotNone(began)
-        self.assertLessEqual(began, psutil.boot_time())
+        self.assertLessEqual(began, psutil.Process(os.getpid()).create_time())
 
     def test_nothing_on_this_box_refuses_to_say_when_it_started(self):
         """The measurement behind the sentence above, kept as a test. W4a.

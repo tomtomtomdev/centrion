@@ -100,6 +100,70 @@ class TestFixturesAreNotIgnored(unittest.TestCase):
             self.assertFalse(ignored(name), name)
 
 
+class TestTheCiMatrix(unittest.TestCase):
+    r"""WINDOWS.md W6, §8's last bullet: the workflow that runs this suite on both platforms.
+
+    Static, like the two startup classes, and for the same reason: every way a workflow goes
+    wrong is quiet. A job that never installs `requirements-win.txt` reproduces W2b's 41
+    config failures and looks like a port that broke; a matrix that has lost its macOS leg
+    goes green forever while the thing it exists to watch rots; a `secrets.` reference that
+    creeps in puts a bot token — per SPEC.md §10, full shell access to a machine — into a
+    YAML file where the repository's one guard against that (`TestSecretsAreIgnored`) cannot
+    see it.
+
+    Not decorated, for `TestTheWindowsStartup`'s standing reason: the workflow is in this
+    repository on both boxes, and a merge that drops it should fail on either.
+
+    Text rather than parsed YAML on purpose — the stdlib has no YAML parser and this suite
+    stays stdlib (§8). Each check below is a substring that would have to be deleted for the
+    property to break, which is what these files go wrong by.
+    """
+
+    WORKFLOW = "/".join((".github", "workflows", "test.yml"))
+
+    @classmethod
+    def setUpClass(cls):
+        cls.path = os.path.join(ROOT, *cls.WORKFLOW.split("/"))
+        cls.text = ""
+        if os.path.isfile(cls.path):
+            with open(cls.path, encoding="utf-8") as fh:
+                cls.text = fh.read()
+
+    def test_the_workflow_is_present_and_tracked(self):
+        # The pair, as W5a learned to write it: `check-ignore --no-index` matches patterns
+        # and answers "not ignored" for a path that is not there, so the presence check is
+        # what stops the ignore check being vacuous.
+        self.assertTrue(os.path.isfile(self.path), "%s is missing — WINDOWS.md W6" % self.path)
+        self.assertFalse(ignored(self.WORKFLOW), self.WORKFLOW)
+
+    def test_both_platforms_are_in_the_matrix(self):
+        """§8: "it is the only way the Mac side stays green from a Windows desk"."""
+        for runner in ("windows-latest", "macos-latest"):
+            self.assertIn(runner, self.text, runner)
+
+    def test_the_windows_job_installs_the_lockfile(self):
+        """W2b. Without pywin32 `config.py` cannot read a DACL, and a secrecy check that
+        cannot read the permissions fails closed — 41 config tests, failing rather than
+        skipping, on a runner that has no venv to forget."""
+        self.assertIn("requirements-win.txt", self.text)
+
+    def test_the_mac_job_runs_the_interpreter_the_ritual_names(self):
+        """§9's step 5 says `/usr/bin/python3 -m unittest -q` and every row of "Pending on
+        the Mac" repeats it. A macOS job that quietly ran a toolcache 3.12 instead would
+        answer a question nobody asked — the guard this port is written against is 3.9."""
+        self.assertIn("/usr/bin/python3 -m unittest -q", self.text)
+        self.assertIn("/usr/bin/python3 -m compileall -q .", self.text)
+
+    def test_no_credential_reaches_ci(self):
+        """W6 ran the suite; it never runs the bot, so it needs no token and must not grow
+        one. `.telegram.json` is gitignored and absent from a fresh checkout, which is the
+        state a runner is in — any test that needs it is already skipping there."""
+        for leak in ("secrets.", "TELEGRAM", "bot_token", "chat_id"):
+            self.assertNotIn(leak, self.text,
+                             "the workflow names %r — W6: CI runs the suite, not the bot"
+                             % leak)
+
+
 class TestTheWindowsStartup(unittest.TestCase):
     r"""WINDOWS.md §7, W5a: what the scheduled task runs, and what installs it.
 

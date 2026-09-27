@@ -804,6 +804,11 @@ class TestEndingTheSessionAndItsTree(unittest.TestCase):
         pid, terminal = self.start([CMD, "/c", "ping -n 20 localhost >nul"])
         self.assertFalse(session_win._reaped(pid), "a live process read as a dead one")
         self.assertTrue(self.end(pid, terminal, grace=0.5), self.notes)
+        # Through `gone`, like every other assertion in this file about a dead pid, and W6
+        # is why: `terminate` promises the *job* is empty (see its docstring) and
+        # `TerminateJobObject` does not wait, so "reaped the instant it returned" is an
+        # assertion against a race. This desk won it every time and a GitHub runner did not.
+        self.assertTrue(gone(pid), self.notes)
         self.assertTrue(session_win._reaped(pid))
         self.assertTrue(session_win._reaped(0x7FFFFFF0), "a pid that cannot exist read as live")
 

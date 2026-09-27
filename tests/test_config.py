@@ -344,6 +344,10 @@ class TestClaudeBinary(Base):
         self.assertTrue(cfg.claude_bin.endswith("/.local/bin/claude"))
 
     @unittest.skipIf(POSIX, "the Windows default is whatever is on PATH: WINDOWS.md §5.2")
+    @unittest.skipUnless(
+        config.DEFAULT_CLAUDE_BIN,
+        "Claude Code is not installed here, so there is no default to compare `which` against; "
+        "the no-default case is test_a_default_that_is_not_on_path_is_refused_in_its_own_words")
     def test_the_default_on_windows_is_what_is_on_path(self):
         r"""W0d: this box has two claude.exe, and `~/.local/bin` holds the *stale* one.
 
@@ -351,6 +355,13 @@ class TestClaudeBinary(Base):
         is the one on PATH, and `~/.claude.json` says auto-updates are off. The Mac's default
         is a symlink that self-update keeps pointing at the current build; there is no such
         symlink here, so the equivalent of "whatever `claude` means right now" is `which`.
+
+        **Gated on the installation, and W6 is why.** The Mac twin above asserts a constant
+        string and needs nothing installed; this one asserts a *measurement of the box*, and
+        on a box with no Claude Code `DEFAULT_CLAUDE_BIN` is None and `load()` raises rather
+        than returning something to compare. That is the only test in the suite that needed
+        a program installed to pass, and the first CI run is what found it — the gate loses
+        no coverage, because the None case is the portable test below.
         """
         cfg = config.load(self.write(self.valid(claude_bin=_ABSENT)), check_claude=False)
         self.assertEqual(cfg.claude_bin, shutil.which("claude"))
