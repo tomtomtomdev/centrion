@@ -529,7 +529,7 @@ for the pipeline so it never switches branches under the main checkout. It write
 `~/.warp/launch_configurations/ticket-workflow.yaml` and opens `warp://launch/ticket-workflow.yaml`.
 Headed, not `claude -p`, so the day's loop can be watched, scrolled back and typed into. It starts
 nothing when a loop is already running (one session per Mac), waits up to 30 minutes for
-`friday-cleanup.sh` if mac-cleanup's 09:15 run is still going (otherwise it could shut the
+`daily-cleanup.sh` if mac-cleanup's 09:15 run is still going (otherwise it could shut the
 simulator down under the first build), and starts nothing after 16:45, since launchd fires a
 missed calendar job when a sleeping Mac wakes. `com.tommy.ticket-workflow.stop` runs it with
 `--stop` at 16:45: SIGTERM to the loop's claude, SIGKILL after a minute, then the `serve-sim`
@@ -539,7 +539,7 @@ log to `var/ticket-workflow.log`.
 
 `mac-cleanup/` is this Mac's disk hygiene — Xcode build output, simulators, caches and stale
 Claude Code scratchpads — and is installed separately, because it is not the bot's:
-`sh mac-cleanup/install.sh` symlinks the script to `~/.local/bin/friday-cleanup.sh` and the
+`sh mac-cleanup/install.sh` symlinks the script to `~/.local/bin/daily-cleanup.sh` and the
 `/mac-cleanup` command into `~/.claude/commands`. Its unattended daily `--apply` run (09:15, after pmset's 08:45 power-on) deletes
 things with nobody watching, so it is opt-in: `--schedule [HH:MM]` loads
 `com.tommy.mac-cleanup`, `--unschedule` removes it.

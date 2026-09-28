@@ -7,7 +7,7 @@
 # prompt, the one step that asks for anything.
 #
 #   skills    .claude/skills/install.sh   ticket-workflow, ios-next-slice, feature-work, asking settings once
-#   cleanup   mac-cleanup/install.sh      friday-cleanup.sh and /mac-cleanup, no daily run unless asked
+#   cleanup   mac-cleanup/install.sh      daily-cleanup.sh and /mac-cleanup, no daily run unless asked
 #   agent     launchd/install.sh          the bot, the lock, tt-lcmp-pull, the 09:15–16:45 ticket loop,
 #                                         then pmset's power schedule
 #

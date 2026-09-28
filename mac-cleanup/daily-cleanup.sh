@@ -1,5 +1,5 @@
 #!/bin/bash
-# friday-cleanup.sh — Xcode / simulator / repo build-output / Claude scratchpad cleanup.
+# daily-cleanup.sh — Xcode / simulator / repo build-output / Claude scratchpad cleanup.
 # Dry run is the DEFAULT. --apply is required to delete anything.
 set -euo pipefail
 

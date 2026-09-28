@@ -5,7 +5,7 @@
 # either one is an edit to the committed copy. A plain file of the same name in the way is moved
 # aside to *.bak, never deleted.
 #
-#   ~/.local/bin/friday-cleanup.sh     -> mac-cleanup/friday-cleanup.sh
+#   ~/.local/bin/daily-cleanup.sh     -> mac-cleanup/daily-cleanup.sh
 #   ~/.claude/commands/mac-cleanup.md  -> mac-cleanup/mac-cleanup.md
 #
 # The daily run is opt-in, because it deletes things with nobody watching:
@@ -78,8 +78,10 @@ case "${1:-}" in
     *) echo "usage: sh $0 [--schedule [HH:MM] | --unschedule]" >&2; exit 2 ;;
 esac
 
-chmod +x "$HERE/friday-cleanup.sh"
-link "$HERE/friday-cleanup.sh" "$HOME/.local/bin/friday-cleanup.sh"
+chmod +x "$HERE/daily-cleanup.sh"
+link "$HERE/daily-cleanup.sh" "$HOME/.local/bin/daily-cleanup.sh"
+# The script's old name, a link that now points at nothing.
+[ -L "$HOME/.local/bin/friday-cleanup.sh" ] && rm "$HOME/.local/bin/friday-cleanup.sh"
 link "$HERE/mac-cleanup.md" "$HOME/.claude/commands/mac-cleanup.md"
 
 if [ "${1:-}" = "--schedule" ]; then

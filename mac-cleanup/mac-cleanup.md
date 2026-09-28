@@ -1,13 +1,13 @@
 ---
 description: Run the Xcode/DerivedData/simulator/build-output/Claude-scratchpad cleanup right now
 argument-hint: [apply|dry-run|status|schedule HH:MM]
-allowed-tools: Bash(crontab:*), Bash(launchctl:*), Bash(git:*), Bash(xcrun:*), Bash(du:*), Bash(df:*), Bash(find:*), Bash(ls:*), Bash(stat:*), Bash(rm:*), Bash(plutil:*), Bash(brew:*), Bash(chmod:*), Bash(mkdir:*), Bash(id:*), Bash(readlink:*), Bash(sh:*), Bash(~/.local/bin/friday-cleanup.sh:*), Read, Write, Edit
+allowed-tools: Bash(crontab:*), Bash(launchctl:*), Bash(git:*), Bash(xcrun:*), Bash(du:*), Bash(df:*), Bash(find:*), Bash(ls:*), Bash(stat:*), Bash(rm:*), Bash(plutil:*), Bash(brew:*), Bash(chmod:*), Bash(mkdir:*), Bash(id:*), Bash(readlink:*), Bash(sh:*), Bash(~/.local/bin/daily-cleanup.sh:*), Read, Write, Edit
 disable-model-invocation: true
 ---
 
 ## Live state
 
-- Script: !`readlink ~/.local/bin/friday-cleanup.sh 2>/dev/null || echo "(not installed)"`
+- Script: !`readlink ~/.local/bin/daily-cleanup.sh 2>/dev/null || echo "(not installed)"`
 - Schedule: !`launchctl print gui/$(id -u)/com.tommy.mac-cleanup 2>/dev/null | grep -m1 "state =" || echo "(not scheduled)"`
 - Disk before: !`df -h /System/Volumes/Data | tail -1`
 - Repos: !`/usr/bin/find ~/Projects ~/Documents -maxdepth 4 -name .git 2>/dev/null | head -40 || true`
@@ -28,7 +28,7 @@ Mode is `$1`. If empty, default to `dry-run`.
 | `schedule` | *(optional)* Install the launchd agent that runs this unattended every day at `$2` (default `09:15`), via `install.sh --schedule` (below). Only do this if I explicitly pass `schedule`. |
 
 The script and this command live in the centrion repo, in `mac-cleanup/`, and are installed as
-symlinks into it by `sh mac-cleanup/install.sh`. If `~/.local/bin/friday-cleanup.sh` is missing,
+symlinks into it by `sh mac-cleanup/install.sh`. If `~/.local/bin/daily-cleanup.sh` is missing,
 run that installer from the centrion checkout (default `~/Projects/centrion`) — do not write a new
 script. To change the script's behaviour, edit the repo copy (the symlink target) and keep the spec
 below in step with it. Do not install any schedule unless I asked for one.
@@ -39,7 +39,7 @@ Finish with total bytes reclaimed per category, the **protected-but-large** repo
 
 ---
 
-## Script: `mac-cleanup/friday-cleanup.sh` (installed as `~/.local/bin/friday-cleanup.sh`)
+## Script: `mac-cleanup/daily-cleanup.sh` (installed as `~/.local/bin/daily-cleanup.sh`)
 
 - **Dry run is the default.** `--apply` is required to delete anything. Every deletion path
   prints its target and reclaimable bytes in both modes.
@@ -158,7 +158,7 @@ them — one ttsecuritas project dir alone grew to 10 GB. The unit is the **sess
 Run the installer the script's symlink points back to:
 
 ```sh
-sh "$(dirname "$(readlink ~/.local/bin/friday-cleanup.sh)")/install.sh" --schedule "${2:-09:15}"
+sh "$(dirname "$(readlink ~/.local/bin/daily-cleanup.sh)")/install.sh" --schedule "${2:-09:15}"
 ```
 
 It renders `mac-cleanup/com.tommy.mac-cleanup.plist` (label `com.tommy.mac-cleanup`, daily, no `Weekday`,

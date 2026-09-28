@@ -75,8 +75,8 @@ if pgrep -qf "claude.*$PROMPT"; then
 fi
 
 i=0
-while pgrep -qf friday-cleanup.sh && [ $i -lt 180 ]; do
-    [ $i -eq 0 ] && echo "$(stamp) waiting for friday-cleanup.sh to finish"
+while pgrep -qf daily-cleanup.sh && [ $i -lt 180 ]; do
+    [ $i -eq 0 ] && echo "$(stamp) waiting for daily-cleanup.sh to finish"
     sleep 10
     i=$((i + 1))
 done
