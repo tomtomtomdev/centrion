@@ -783,6 +783,12 @@ above fails, and name the one you used on `ASSUMPTION:`.
    window minimized or on another Space; exit 4 = the tab is not signed in or has no access to
    the file. Both need a person, so return `blocked` naming which, rather than working around it.
 
+**A ticket that says the UI does not match the design always gets source 3 as well**, even when
+source 1 or 2 answered. The spec gives the numbers. The headed-Chrome render at the node is the
+pixel reference: put your simulator screenshot beside it at the same point scale and fix every
+visible difference (gradient edges, borders, dividers, font size and weight, spacing) before
+shipping. Keep it at `.tuntun/design/<KEY>.png` so Phase B grades against the same image.
+
 Sources 2 and 3 make the spec `degraded`: read sizing (HUG/FILL/FIXED) and whether a stroke is
 really drawn off the render. Source 3 also resolves colours by sampling the render and taking the
 nearest token via `tuntun-ios designsystem token '<hex>'`. The numbers it yields are §6's
@@ -1492,6 +1498,10 @@ xcrun simctl io "$UDID" screenshot .tuntun/proof/<KEY>-proof.png
 
 That needs no helper and works whenever the sim is booted — prefer it to the MJPEG frame endpoint.
 
+For a design-fidelity `EXPECT:`, grade against Figma in headed Chrome too: capture the node with
+`tt-figma-shot` (§4 source 3), or use Phase A's `.tuntun/design/<KEY>.png`, and compare it with your
+proof screenshot at the same point scale. Any visible difference the ticket covers is a failure.
+
 For a colour `EXPECT:`, sample the pixels rather than eyeballing them. `python3` here is 3.9.6 and
 **does** carry PIL:
 
@@ -1618,9 +1628,27 @@ resolve: that is review feedback nobody has answered, and silently closing it me
 Check the authors before running the loop above — anything not written by this pipeline means stop
 with `VERDICT: blocked`, say why on the MR, and leave the ticket in `fixing`.
 
+**Once the merge has succeeded, take every Mac's claim label off each ticket**, `mac-A` and `mac-B`
+alike, not only `$TW_MINE`. `unclaim` builds one PUT removing each label in `$TW_ALL_MACS`. Removing
+a label the ticket doesn't have is a no-op, so the stale-claim case needs no special handling.
+Define it before the merge, run it only after the merge succeeded, and never on a `blocked` or
+`needs-rework` verdict, where the label is still the live claim:
+
 ```bash
-glab mr merge <IID> --squash --yes
+unclaim() {
+  curl -sS -k -X PUT -H "Authorization: Bearer $JIRA_TOK" -H "Content-Type: application/json" \
+    -d "{\"update\":{\"labels\":[$(printf '%s' "$TW_ALL_MACS" | sed 's/"mac-[^"]*"/{"remove":&}/g')]}}" \
+    "$JIRA_URL/issue/$1"
+  curl -sS -k -H "Authorization: Bearer $JIRA_TOK" "$JIRA_URL/issue/$1?fields=labels"   # check: no mac-* left
+}
+```
+
+A failed unclaim doesn't undo the merge. Say so on `JIRA:` in the verdict block and carry on.
+
+```bash
+glab mr merge <IID> --squash --yes &&
 tuntun-ios jira issue issue transition <KEY> --status fixed --insecure
+unclaim <KEY>
 ```
 
 **A batch MR merges without squash**, so each ticket keeps its own commit on the RC, and every
@@ -1629,7 +1657,7 @@ subsection to each ticket):
 
 ```bash
 glab api --hostname "$TW_GITLAB_HOST" --method PUT "projects/$TW_GITLAB_PROJECT/merge_requests/<IID>/merge?squash=false"
-for k in <every KEY of the batch>; do tuntun-ios jira issue issue transition "$k" --status fixed --insecure; done
+for k in <every KEY of the batch>; do tuntun-ios jira issue issue transition "$k" --status fixed --insecure; unclaim "$k"; done
 ```
 
 `$TW_RC_PREFIX/*` branches (`release_candidate/*`) are unprotected, so I can merge them as Developer — `main` and `dev`
@@ -1639,8 +1667,9 @@ testing, rebase again (§9), re-push and re-merge. There is **no CI on project 4
 pipeline to wait for and no green check to read: your smoke run is the gate.
 
 `fixed` is a real status, lowercase. It drops the ticket out of both filters, so it will not come
-back around. **Leave the `mac-<HOST>` label on** — it is harmless on a closed ticket and it is the
-record of which Mac did the work.
+back around. **Its claim labels are gone** (the `unclaim` above), so if QA reopens the ticket, either
+Mac can pick it up. A leftover `mac-A` would keep Mac B off it forever, because §1 excludes the other
+Mac's label. Which Mac did the work is recorded in §11's proof comment and the MR, not in the label.
 
 Cannot merge for any other reason → say why on the MR, leave the ticket in `fixing`, and stop with
 `VERDICT: blocked`.
