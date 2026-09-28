@@ -191,7 +191,7 @@ cat_simulators() {
 # ---------------------------------------------------------------- 5. Repo build output
 cat_repo_output() {
   banner "5. Per-repo build output"
-  local repos trees repo wt dirty cand r
+  local repos trees repo wt dirty cand r ddpaths dp
   local roots=""
   for r in "$HOME/Projects" "$HOME/Documents"; do [ -d "$r" ] && roots="$roots $r"; done
   [ -n "$roots" ] || { echo "  (no repo roots found)"; finish; return 0; }
@@ -222,8 +222,25 @@ cat_repo_output() {
         echo "  skipped        $cand  (NOT git-ignored — refusing)"
       fi
     done
+    # A custom -derivedDataPath dir (e.g. .dd-<ticket>) has any name; Xcode's info.plist
+    # with a WorkspacePath key is its signature. Top level only; must still be git-ignored.
+    ddpaths=""
+    for cand in "$wt"/* "$wt"/.[!.]*; do
+      [ -d "$cand" ] && [ -f "$cand/info.plist" ] || continue
+      case "$(basename "$cand")" in build|.build|DerivedData|target|out|.scratch|scratch|.git) continue ;; esac
+      $PLUTIL -extract WorkspacePath raw "$cand/info.plist" >/dev/null 2>&1 || continue
+      if $GIT -C "$wt" check-ignore -q "$cand" 2>/dev/null; then
+        guarded_remove "$cand" "custom DerivedData $(basename "$cand")/ in $(basename "$wt")"
+        ddpaths="${ddpaths}${cand}/
+"
+      else
+        echo "  skipped        $cand  (custom DerivedData, NOT git-ignored — refusing)"
+      fi
+    done
     while IFS= read -r cand; do
       [ -n "$cand" ] && [ -e "$cand" ] || continue
+      # already counted as part of a custom DerivedData dir above
+      [ -n "$ddpaths" ] && while IFS= read -r dp; do [ -n "$dp" ] && case "$cand" in "$dp"*) continue 2 ;; esac; done <<< "$ddpaths"
       $GIT -C "$wt" check-ignore -q "$cand" 2>/dev/null && guarded_remove "$cand" "xcresult"
     done < <($FIND "$wt" -maxdepth 4 -name '*.xcresult' -not -path '*/.git/*' 2>/dev/null || true)
   done <<< "$trees"

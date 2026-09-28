@@ -128,6 +128,9 @@ For each repo/worktree found above:
   xcodegen regen. Deletion is driven **solely by the allowlist below**, never by git's output.
 - Remove only ignored build output, by exact directory name: `build/`, `.build/`, `DerivedData/`,
   `target/`, `out/`, `*.xcresult`, and a local `.scratch/` or `scratch/` dir if the repo has one.
+- Also remove a top-level custom `-derivedDataPath` dir of any name (e.g. `.dd-<ticket>/`): one
+  whose `info.plist` has a `WorkspacePath` key. Same ignored-check and recency guard; `*.xcresult`
+  bundles inside it are not counted twice.
 - Verify each candidate is actually git-ignored (`git check-ignore -q`) before removing it.
 - **Hard exclusions, never delete:** `.env*`, `*.local`, `local.properties`, `secrets*`,
   anything untracked-but-not-ignored, anything inside `.git/`.
