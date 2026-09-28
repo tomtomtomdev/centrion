@@ -1,7 +1,7 @@
 ---
 name: ios-next-slice
 description: Reconcile a plan's slices against git, then implement the next open slice test-first — inline at Tier 0/1, through @ios-implementer at Tier 2 — commit it, and tick it off in the plan
-argument-hint: "[plan path or name fragment] [--all] [--dry-run] [--slice <id>]"
+argument-hint: "[plan path or name fragment] [--all] [--dry-run] [--slice <id>] [--agent] [--row-open] [--plan-local]"
 allowed-tools: Bash, Read, Grep, Glob, Edit, Write, Agent, SendMessage, Skill, TodoWrite, AskUserQuestion
 ---
 
@@ -17,6 +17,11 @@ into the plan.
 | `--slice <id>` | do that slice instead of the first open one (`T5`, `Slice 3`, `Task 2`) |
 | `--all` | keep going slice by slice until one is blocked, fails review, or the plan is finished |
 | `--dry-run` | reconcile and report only — no task row, no agent, no edits, no commit |
+| `--agent` | every slice goes to one `@ios-implementer`, Tier 0/1 included (§6) — the caller's standing choice |
+| `--row-open` | the caller already opened this slice's task row: skip §5 entirely; still close it in §8 |
+| `--plan-local` | the plan is gitignored: write progress back to the file, never `git add` it (§8) |
+
+`/feature-work` passes all three with `--slice`.
 
 ---
 
@@ -93,6 +98,10 @@ a blocker to resolve with the user now — not a box to hand to an agent (`/ios-
 
 ## 5 · Open the task row — main session only
 
+`--row-open` → skip this section: the row is open, and a second `tuntun task start` or
+`tuntun task next` would open another slice's row. Check `tuntun task list --ticket <KEY>` shows
+this slice's row in progress; anything else → stop and report.
+
 Before the first edit (CLAUDE.md, non-negotiable):
 
 ```bash
@@ -116,6 +125,11 @@ Size it by CLAUDE.md's tiers **before** choosing who writes it:
 | **0 / 1** | ≤5 files, one scene, no Tier 2 trigger | **the main session, inline**, following the procedure skill below. Never an agent: CLAUDE.md forbids handing code to an agent below Tier 2 |
 | **2** | a new scene · migration · >5 files · money, auth or keychain · a Worker or `TT*Api` contract · concurrency · a screen built to a design | **`/ios-assign`**, then spawn **`@ios-implementer`** (the only implementing agent in this repo) with that assignment |
 
+`--agent` → every tier takes the Tier 2 column: `/ios-assign`, then one `@ios-implementer` with the
+TDD contract below verbatim. The caller asked for this explicitly, and that request is the
+exception to CLAUDE.md's below-Tier-2 rule; the review gate in §7 still follows the slice's real
+tier.
+
 The procedure skill is chosen the same way at either tier; at Tier 2, name it in the assignment:
 
 | Slice is | Procedure skill |
@@ -126,8 +140,8 @@ The procedure skill is chosen the same way at either tier; at Tier 2, name it in
 | a screen built to a Figma design | `/ios-design` (it produces the Design Spec) |
 | anything else inside an existing scene | none; the component rules load themselves. At Tier 2 add `tuntun for <what you are building>` to the assignment |
 
-Whoever writes it follows this **TDD contract**. At Tier 2, put it in the prompt verbatim, together
-with the slice text, its acceptance criteria, its files, and everything §3 found, labelled as
+Whoever writes it follows this **TDD contract**. Whenever an agent writes it (Tier 2, or any tier
+under `--agent`), put it in the prompt verbatim, together with the slice text, its acceptance criteria, its files, and everything §3 found, labelled as
 *hypothesis to verify*:
 
 > 1. Write the failing test FIRST, in the framework's existing `*Tests` target.
@@ -152,7 +166,8 @@ render when the criteria are visual. Never fabricate a test to satisfy the contr
 ## 7 · Verify before the commit
 
 1. `tuntun lint <touched files>` in the main session — trust nothing reported second-hand.
-2. **`/ios-review`** on the changed files; fix every BLOCKER and MAJOR.
+2. **`/ios-review`** on the changed files; fix every BLOCKER and MAJOR. When an agent wrote the
+   slice, the fixes go back to that same agent by `SendMessage`, as with FINDINGS below.
 3. **`@code-reviewer`**, given the changed files as its scope, whenever the slice hits a Tier 2
    trigger (money/auth/keychain, a Worker or `TT*Api` contract, a new scene or migration,
    concurrency, a screen built to a design, >5 files). FINDINGS is a rejection: the same
@@ -179,6 +194,9 @@ Then update the plan in the same commit:
 
   | Slice | State | Commit | Test | Date |
   |---|---|---|---|---|
+
+`--plan-local` → make the same edits to the plan file but leave it out of `git add`, and make no
+`docs(plan)` commit below — the plan is gitignored and the caller owns keeping it.
 
 Rows that §3 found **DONE, UNTICKED** get written back too, in a separate
 `docs(plan): reconcile <plan> with git` commit — the plan file only, and only when there is no
