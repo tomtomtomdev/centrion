@@ -42,7 +42,7 @@
 TW_MINE="mac-${TT_HOST_ID:-}"
 TW_ALL_MACS=""                              # "mac-A","mac-B" — every claim label, JQL-quoted
 TW_OTHERS=""                                # the same, without this Mac's
-for _h in $TW_HOSTS; do
+for _h in $(echo "$TW_HOSTS"); do          # $(…) splits in zsh too; a bare $TW_HOSTS does not
     TW_ALL_MACS="$TW_ALL_MACS${TW_ALL_MACS:+,}\"mac-$_h\""
     [ "mac-$_h" = "$TW_MINE" ] || TW_OTHERS="$TW_OTHERS${TW_OTHERS:+,}\"mac-$_h\""
 done
