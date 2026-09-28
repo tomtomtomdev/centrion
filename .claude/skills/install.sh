@@ -28,12 +28,17 @@ for name in "$@"; do
         mv "$target" "$target.bak"
         echo "moved the old $target to $target.bak"
     fi
-    # A command of the same name is a second /$name that drifts from this one.
-    cmd="$HOME/.claude/commands/$name.md"
-    if [ -f "$cmd" ]; then
-        mv "$cmd" "$cmd.bak"
-        echo "moved the old $cmd to $cmd.bak"
-    fi
+    # A command of the same name is a second /$name that drifts from this one, and so is a command
+    # the skill was renamed from (ios-next-slice was the user-level /next-slice).
+    olds=$name
+    case "$name" in ios-next-slice) olds="$olds next-slice" ;; esac
+    for old in $olds; do
+        cmd="$HOME/.claude/commands/$old.md"
+        if [ -f "$cmd" ]; then
+            mv "$cmd" "$cmd.bak"
+            echo "moved the old $cmd to $cmd.bak"
+        fi
+    done
     ln -s "$src" "$target"
     echo "installed $target -> $src"
     if [ -f "$src/configure.sh" ]; then
