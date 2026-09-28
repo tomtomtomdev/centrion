@@ -44,10 +44,23 @@ Stop there. The slice's own entry, the sections it points at, and the code it to
 subagent's reading, not yours — pulling them in here is the context this skill exists to keep
 out. You need the slice's *name* and its place in the order; the subagent needs its meaning.
 
-Also read any project memory about the ritual before deciding how to work: the conventions
-that bite (line endings, which interpreter runs the suite, how commit messages are written,
-what a hand-run needs that a fresh checkout lacks) are recorded there, are not re-derivable
-from the file, and must be passed on to the subagent, which has never seen them.
+Then collect the **conventions that bite** — line endings, which interpreter runs the suite,
+how commit messages are written, what a hand-run needs that a fresh checkout lacks, who fills a
+row's hash — because the subagent has never seen them and phase 3's prompt must carry them.
+Memory is per machine, and this plan has been worked from more than one, so look in three
+places and say which each came from:
+
+1. **Project memory**, if this machine has any about the ritual.
+2. **The ritual itself.** `WINDOWS.md` §9's steps name the interpreters (`.venv\Scripts\python`
+   on Windows, `/usr/bin/python3` on the Mac), the commit format (`W<n>: <what>`), and the CI
+   run that stands in for the Mac suite.
+3. **Git history.** `git log --format=%s -20 -- WINDOWS.md` shows the hash-fill convention as
+   it is actually practised (`WINDOWS.md: W<n>'s commit hash in its section 11 row`).
+
+A convention the prompt needs that none of the three records — typically line endings or a
+hand-run's setup on this box — is a question for the user, not a guess to pass on. Ask it
+before dispatching, and once answered, save it to project memory so the next sitting on this
+machine has it.
 
 ## 2. Audit the record against git
 
@@ -60,9 +73,15 @@ Check, and report each as a line:
 1. **Every `done` row's commit exists.** `git log --oneline` for each hash in the table;
    `git cat-file -t <hash>` if a row's hash is short or ambiguous. A hash that does not
    resolve is the finding that stops everything until it is explained.
-2. **Every commit is on a row.** `git log --oneline` since the baseline row's hash, minus the
-   docs-only follow-ups that fill hashes in. A slice commit with no row is work the record
-   lost.
+2. **Every slice commit is on a row.** The plan shares its history with unrelated work
+   (`skills:`, `launchd:`, `bot:`, `mac-cleanup:` commits run through the same range), so
+   count only the plan's own commits:
+   `git log --oneline <baseline>..HEAD | grep -E '^[0-9a-f]+ W[0-9]+[a-z]?: '`. Every hit must
+   be on a row — a `Commit` cell may hold several (`12100d6, ef04618` for W1c), so match the
+   hash anywhere in the cell. The `WINDOWS.md: …commit hash…` follow-ups are the hash-fill and
+   need no row of their own. Anything else in the range is not the plan's and is not a finding — unless it
+   touches a file the next slice names, in which case say so, because it moved the ground the
+   slice's text was written on. A slice commit with no row is work the record lost.
 3. **Order and dates.** Row order matches commit order; a row's date matches its commit's
    author date (`git show -s --format=%ad --date=short <hash>`).
 4. **The hash-fill convention.** In this repo a row's `Commit` cell is filled by the *next*
