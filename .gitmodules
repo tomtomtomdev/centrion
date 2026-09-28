@@ -1,0 +1,4 @@
+[submodule "figma-to-claude"]
+	path = figma-to-claude
+	url = https://github.com/tomtomtomdev/figma-to-claude.git
+	branch = main

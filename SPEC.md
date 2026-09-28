@@ -544,9 +544,26 @@ Claude Code scratchpads — and is installed separately, because it is not the b
 things with nobody watching, so it is opt-in: `--schedule [HH:MM]` loads
 `com.tommy.mac-cleanup`, `--unschedule` removes it.
 
-`sh install.sh` at the root runs all three installers — the skills, mac-cleanup, then the
-LaunchAgents — so a new Mac is one command; `sh install.sh agent` (or `skills`, `cleanup`) runs
-just those, and `--schedule [HH:MM]` passes through to mac-cleanup's.
+`figma-to-claude/` is a submodule, not this repo's code: a Figma plugin and a `figma-spec` CLI
+that turn a design into text a prompt can use, and a Jira ticket key into that text without
+opening Figma at all. It is here because every Mac that runs `/ticket-workflow` needs it and
+nothing else installs it. `sh figma-to-claude/install.sh` puts `figma-spec` in `~/.local/bin`
+and seeds `~/.config/figma-spec/config.env` with the Jira and Figma tokens it wants; it is
+stdlib-only Python 3.9, so it clears the same floor as the rest of this repo and installs by
+copy. Pinned by commit rather than tracked to a branch, so a checkout is reproducible —
+`git submodule update --init` after a fresh clone, `--remote` to move the pin deliberately.
+
+**The plugin half cannot be installed.** A Figma plugin is registered through the desktop UI
+(Plugins → Development → Import plugin from manifest…), so `install.sh figma` prints the
+manifest path and stops. That is the one step on a new Mac that no installer can take, and it
+is also why the plugin matters: Figma's REST API meters `/files` by cost and answered an
+exhausted quota with a 65-hour `Retry-After` once, while the plugin sandbox is not metered at
+all. The CLI is the fast path; the plugin is the one that still works when the CLI is locked
+out, and it posts its output to `figma-spec --serve` so nothing has to be pasted by hand.
+
+`sh install.sh` at the root runs all four installers — the skills, mac-cleanup, figma-to-claude,
+then the LaunchAgents — so a new Mac is one command; `sh install.sh agent` (or `skills`,
+`cleanup`, `figma`) runs just those, and `--schedule [HH:MM]` passes through to mac-cleanup's.
 
 ```sh
 all:      sh install.sh             # skills, mac-cleanup, then launchd/install.sh

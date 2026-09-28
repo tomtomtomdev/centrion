@@ -8,10 +8,11 @@
 #
 #   skills    .claude/skills/install.sh   ticket-workflow, ios-next-slice, feature-work, asking settings once
 #   cleanup   mac-cleanup/install.sh      daily-cleanup.sh and /mac-cleanup, no daily run unless asked
+#   figma     figma-to-claude/install.sh  figma-spec CLI; the plugin itself is one manual import
 #   agent     launchd/install.sh          the bot, the lock, tt-lcmp-pull, the 09:15–16:45 ticket loop,
 #                                         then pmset's power schedule
 #
-#   sh install.sh                     all three
+#   sh install.sh                     all four
 #   sh install.sh <part> [part…]      only those, in the order above
 #   sh install.sh --schedule [HH:MM]  also schedule the daily cleanup --apply (default 09:15)
 set -eu
@@ -21,16 +22,16 @@ SCHEDULE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        skills|cleanup|agent) PARTS="$PARTS $1" ;;
+        skills|cleanup|figma|agent) PARTS="$PARTS $1" ;;
         --schedule)
             SCHEDULE=09:15
             case "${2:-}" in [0-9]*) SCHEDULE=$2; shift ;; esac ;;
-        -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
-        *) echo "usage: sh $0 [skills] [cleanup] [agent] [--schedule [HH:MM]]" >&2; exit 2 ;;
+        -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+        *) echo "usage: sh $0 [skills] [cleanup] [figma] [agent] [--schedule [HH:MM]]" >&2; exit 2 ;;
     esac
     shift
 done
-[ -n "$PARTS" ] || PARTS=" skills cleanup agent"
+[ -n "$PARTS" ] || PARTS=" skills cleanup figma agent"
 
 wants() { case "$PARTS " in *" $1 "*) return 0 ;; esac; return 1; }
 
@@ -44,6 +45,19 @@ if wants cleanup; then
         sh "$HERE/mac-cleanup/install.sh" --schedule "$SCHEDULE"
     else
         sh "$HERE/mac-cleanup/install.sh"
+    fi
+fi
+if wants figma; then
+    echo "== figma"
+    if [ -f "$HERE/figma-to-claude/install.sh" ]; then
+        sh "$HERE/figma-to-claude/install.sh"
+        # The CLI installs itself; the plugin half cannot. A Figma plugin is
+        # registered through the desktop UI, so this prints the one step no
+        # installer can take.
+        echo "   plugin: Figma → Plugins → Development → Import plugin from manifest…"
+        echo "           $HERE/figma-to-claude/manifest.json"
+    else
+        echo "   figma-to-claude/ is empty — run: git submodule update --init" >&2
     fi
 fi
 if wants agent; then
