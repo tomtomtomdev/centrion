@@ -522,6 +522,21 @@ shutdown at 06:00 and wake-or-power-on at 08:45 every day. That is the one step 
 so it runs only when `pmset -g sched` differs. A LaunchAgent cannot power a Mac on, so this part
 is pmset's, not launchd's.
 
+The working day's `/loop /ticket-workflow` is on the same schedule. `com.tommy.ticket-workflow`
+runs `launchd/ticket-workflow.sh` at 09:15, which opens a headed Claude Code
+(`--dangerously-skip-permissions`) in a Warp tab in `~/Projects/ttsecuritas-2`, the worktree kept
+for the pipeline so it never switches branches under the main checkout. It writes
+`~/.warp/launch_configurations/ticket-workflow.yaml` and opens `warp://launch/ticket-workflow.yaml`.
+Headed, not `claude -p`, so the day's loop can be watched, scrolled back and typed into. It starts
+nothing when a loop is already running (one session per Mac), waits up to 30 minutes for
+`friday-cleanup.sh` if mac-cleanup's 09:15 run is still going (otherwise it could shut the
+simulator down under the first build), and starts nothing after 16:45, since launchd fires a
+missed calendar job when a sleeping Mac wakes. `com.tommy.ticket-workflow.stop` runs it with
+`--stop` at 16:45: SIGTERM to the loop's claude, SIGKILL after a minute, then the `serve-sim`
+helper and `.tuntun/ticket-workflow.pass` that the killed pass cannot clean up itself. Stopping
+mid-pass loses nothing, because every pass starts by finishing this Mac's batch in flight. Both
+log to `var/ticket-workflow.log`.
+
 `mac-cleanup/` is this Mac's disk hygiene — Xcode build output, simulators, caches and stale
 Claude Code scratchpads — and is installed separately, because it is not the bot's:
 `sh mac-cleanup/install.sh` symlinks the script to `~/.local/bin/friday-cleanup.sh` and the
@@ -529,11 +544,18 @@ Claude Code scratchpads — and is installed separately, because it is not the b
 things with nobody watching, so it is opt-in: `--schedule [HH:MM]` loads
 `com.tommy.mac-cleanup`, `--unschedule` removes it.
 
+`sh install.sh` at the root runs all three installers — the skills, mac-cleanup, then the
+LaunchAgents — so a new Mac is one command; `sh install.sh agent` (or `skills`, `cleanup`) runs
+just those, and `--schedule [HH:MM]` passes through to mac-cleanup's.
+
 ```sh
+all:      sh install.sh             # skills, mac-cleanup, then launchd/install.sh
 install:  sh launchd/install.sh     # writes __CHECKOUT__ and __HOME__ in, bootstraps each agent, then power.sh
 power:    sh launchd/power.sh --check   # pmset's schedule matches, and automatic login is on
 lock:     cat var/lockscreen.log        # did the last automatic login get locked
 lcmp:     launchctl print gui/$(id -u)/com.tommy.tt-lcmp-pull | head -30
+tickets:  sh launchd/ticket-workflow.sh          # start the loop in Warp now (--stop ends it)
+tlog:     cat var/ticket-workflow.log
 restart:  launchctl kickstart -k gui/$(id -u)/com.tommy.centrion.bot
 status:   launchctl print gui/$(id -u)/com.tommy.centrion.bot | head -30
 remove:   launchctl bootout gui/$(id -u)/com.tommy.centrion.bot

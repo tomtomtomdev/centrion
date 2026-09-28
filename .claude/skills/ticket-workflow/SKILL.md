@@ -1660,6 +1660,12 @@ To keep it running, wrap it: **`/loop /ticket-workflow`**. Repetition, pacing an
 belong to `/loop` and to the user, which is the whole point — a board read at §1 is already stale by
 the time a handoff lands, and a self-armed schedule races the wrapper that is also firing.
 
+On the pipeline Mac the wrapper is itself scheduled, from the centrion checkout: launchd opens
+`/loop /ticket-workflow` in a Warp tab in `~/Projects/ttsecuritas-2` at 09:15 and ends it at 16:45
+(`launchd/ticket-workflow.sh`, SPEC.md §8). The 16:45 stop can land mid-pass. That is expected, not
+a crash to report: the next morning's first pass finds the batch in flight and finishes it (§1a),
+and the stop has already removed the pass file (§00).
+
 If `/loop` was invoked with no interval it paces itself and will ask for the delay when the turn
 ends:
 
