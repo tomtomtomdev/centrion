@@ -32,8 +32,13 @@ command; the only difference is whether the plan already exists.
   unblocked.
 - **Every slice is written by `@ios-implementer`** — including Tier 1 (the user's standing choice
   for this command, passed to `/ios-next-slice` as `--agent`, which is how that skill knows the
-  exception to CLAUDE.md's below-Tier-2 rule was asked for). The main session owns the rows, lint,
-  review, commits and the plan.
+  exception to CLAUDE.md's below-Tier-2 rule was asked for).
+- **Every slice is closed by its own slice agent, not by this session** (§5). A slice is test
+  output, lint, review rounds and a reconcile table; none of that belongs in the context that
+  holds the plan and decides what is next. This session opens the row, dispatches, verifies the
+  close by reading git, and owns the plan's slice states, the checkpoint, the MR and the wiki.
+  It never edits a source file, runs a test or makes a slice's commit — reaching for one means
+  the slice agent should be doing it.
 - The harness is an uncommitted overlay: switch branches only with
   `~/.tuntun/bin/tt-harness-switch <git args>`; never commit `CLAUDE.md` or `.claude/`.
 - One heavy run per Mac: a `/ticket-workflow` pass file younger than 3 hours means stop (§0).
@@ -203,18 +208,49 @@ readies S4):
 
 1. `tuntun task next` (it must open this slice's row; a mismatch → stop and report). Skip it for a
    slice resumed from §0 — its row is already in progress.
-2. **`/ios-next-slice <plan path> --slice <id> --agent --row-open --plan-local`.** `--agent`: one
-   `@ios-implementer` per slice at every tier, assigned with `/ios-assign`, TDD contract in the
-   prompt. `--row-open`: step 1 opened the row, so it must not run `tuntun task start` or
-   `tuntun task next` again (a second `next` opens the following slice's row). `--plan-local`: the
-   plan is gitignored, so progress goes to the file and never into a commit. It runs the TDD
-   contract, lint, `/ios-review`, `@code-reviewer` where due, the local commit and
-   `tuntun task done`.
-3. The slice fails its gate (red test, FINDINGS twice on one BLOCKER, a question only the user can
-   answer) → mark it BLOCKED with the reason, `tuntun task comment … --kind blocker`, and **go on to
-   the next READY slice that does not depend on it**.
+2. **Dispatch one slice agent** — a fresh `general-purpose` agent (never `fork`: inheriting this
+   session is what the split exists to avoid), one per slice, never two at once. It is the
+   session `/ios-next-slice` describes, so it spawns the `@ios-implementer` and `@code-reviewer`
+   itself (subagents nest up to three deep). The prompt stands alone; it carries pointers, not the
+   plan's content:
 
-Never run two `./run.sh` at once — one implementer at a time.
+   > You are closing one slice of a feature plan. Repo: `<path>`. Branch: `<branch>` (already
+   > checked out). Plan: `<plan path>` (gitignored). Slice: **`<id> <title>`** — only that one.
+   >
+   > Read `~/.claude/skills/ios-next-slice/SKILL.md` in full and carry it out as the session it
+   > describes, with the arguments `<plan path> --slice <id> --agent --row-open --plan-local`:
+   > - `--agent`: `/ios-assign`, then one `@ios-implementer` writes the slice at every tier, with
+   >   the TDD contract in its prompt verbatim.
+   > - `--row-open`: the task row is already open. Never run `tuntun task start` or
+   >   `tuntun task next` (a second `next` opens the following slice's row); close it with
+   >   `tuntun task done` at §8.
+   > - `--plan-local`: write the Progress row to the plan file; never `git add` it.
+   >
+   > Where it says "the user", you cannot reach them: a question only the user can answer, a
+   > second FINDINGS round on one finding, or a red test you cannot turn green → stop, commit
+   > nothing, and report BLOCKED with the question or the evidence. Never push; never touch the
+   > MR or the wiki; never edit the plan outside this slice's Progress row.
+   > `<For a slice resumed from §0: the uncommitted diff is this slice's earlier attempt — hand it
+   > to the implementer as a hypothesis to verify, not as done work.>`
+   >
+   > Report back briefly: DONE or BLOCKED; the sha; files changed; the tests that went red →
+   > green by name; lint; the `/ios-review` and `@code-reviewer` verdicts; the Progress row you
+   > wrote; anything that contradicted the plan; for BLOCKED, the reason and whether it is a
+   > question for PM, BE or design.
+
+3. **Verify the close by reading, never by repairing:** `git log -1 --format='%h %s'` (on
+   `<branch>`, subject `type(scope): [<KEY>] …`), `git status --short` (clean apart from the
+   overlay), the plan's Progress row carries that sha, and `tuntun task list --ticket <KEY>` shows
+   the row done. A gap — no commit, a dirty tree, a missing row — goes back to **the same** agent
+   with `SendMessage`; fixing it here hides from the next resume that the slice did not close on
+   its own.
+4. **DONE** → set the slice's `State` to DONE (`<sha>`) and re-evaluate `after:` blockers.
+   **BLOCKED** (red test, FINDINGS twice on one finding, a question only the user can answer) →
+   mark it BLOCKED with the reason, `tuntun task comment … --kind blocker`, and **go on to the
+   next READY slice that does not depend on it**. A question it surfaced becomes a `Q-n` in the
+   plan; the run's checkpoint has passed, so it is asked on the next run, not now.
+
+Never run two `./run.sh` at once — one slice agent, and so one implementer, at a time.
 
 ## 6 · Ship
 
@@ -236,6 +272,7 @@ falls behind the local plan. `--dry-run` skips all three.
 - **Done this run** — slices, commits, the MR link.
 - **Still blocked** — one line per slice: what it waits on and who can give it (BE: API tech doc
   for X · PM: Q-n · Design: D-n / Figma access).
-- **Verified** — per slice: the tests red → green, lint, review verdict; UI not driven unless it was.
+- **Verified** — per slice, from its slice agent's report and §5.3's check: the tests red → green,
+  lint, review verdict; UI not driven unless it was.
 - **Resume with** — the exact command, e.g.
   `/feature-work 120119194 --api 125100000` or `/feature-work 120119194 --decide "D-1: five labels"`.
