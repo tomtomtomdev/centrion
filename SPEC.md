@@ -561,6 +561,14 @@ exhausted quota with a 65-hour `Retry-After` once, while the plugin sandbox is n
 all. The CLI is the fast path; the plugin is the one that still works when the CLI is locked
 out, and it posts its output to `figma-spec --serve` so nothing has to be pasted by hand.
 
+On this seat the REST API and Figma's own MCP servers are both rate-limited, so the plugin is
+the route, and `figma-spec --mcp` takes the human out of it: the installer registers it as a
+user-scope MCP server, and a Claude session calls `figma_selection`, `figma_design`,
+`figma_render` or `figma_ticket_design` while the plugin panel sits open in Figma Desktop.
+`--serve` is the bridge between them — the panel long-polls it, the first `--mcp` spawns it if
+none is running — and opening that panel in each file is still the one step nothing automates.
+`FIGMA_TOKEN` stays empty; `JIRA_TOK` is the only token the route needs.
+
 `sh install.sh` at the root runs all four installers — the skills, mac-cleanup, figma-to-claude,
 then the LaunchAgents — so a new Mac is one command; `sh install.sh agent` (or `skills`,
 `cleanup`, `figma`) runs just those, and `--schedule [HH:MM]` passes through to mac-cleanup's.
