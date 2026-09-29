@@ -209,7 +209,7 @@ eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
 tt-slot check
 node --version                                         # must print v18+ or §10 cannot drive anything
 curl -sS -k -o /dev/null -w 'jira=%{http_code}\n' -H "Authorization: Bearer $JIRA_TOK" "$JIRA_URL/myself"
-echo "slot=$TT_SLOT host=$TT_HOST_ID rc=$TT_RC"
+echo "slot=$TT_SLOT host=$TT_HOST_ID rc=$TT_RC smoke_account=${TW_SMOKE_ACCOUNT:-MISSING}"
 echo "board=[$TW_BOARD_JQL] fixing=[$TW_FIXING_JQL] component=$TW_COMPONENT$TW_EXCLUDE_JQL mine=$TW_MINE others=[$TW_OTHERS]"
 [ -n "$TW_MINE" ] || echo "STOP: no claim label for TT_HOST_ID=$TT_HOST_ID in TW_HOSTS=[$TW_HOSTS]"
 echo "gitlab=$TW_GITLAB_HOST project=$TW_GITLAB_PROJECT rc=$TW_RC_PREFIX/≥$TW_RC_FLOOR branch=$TW_BRANCH_PREFIX/…"
@@ -845,16 +845,32 @@ actually reach, not the one you intended.
 
 | Backend | Scheme | Bundle id | Account | Password |
 |---|---|---|---|---|
-| **staging — the default** | `TTSecuritas Staging` | `com.tuntunios.stg` | `tomtomtomgame6@outlook.com` (Email tab; OTP `111111`; registered 2026-09-24, no PIN set yet: the first PIN prompt creates it, use `111111`) | `tuntun1234` |
+| **staging — the default** | `TTSecuritas Staging` | `com.tuntunios.stg` | **this Mac's `$TW_SMOKE_ACCOUNT`** — MacBook Pro `tomtomtomgame6@outlook.com`, Mac mini `tomtomtomgame5@outlook.com` (Email tab; OTP `111111`; PIN `111111`, and a first PIN prompt creates it) | tomtomtomgame6: `tuntun1234`; tomtomtomgame5: `~/.tuntun.yaml` → `maestro.accounts.<env>.password` |
 | staging — fallback | `TTSecuritas Staging` | `com.tuntunios.stg` | `tommyyohanesnew@gmail.com` (Email tab; OTP and PIN `111111`) | `tuntun1234` |
 | staging | `TTSecuritas Staging` | `com.tuntunios.stg` | `85215318984` | `01oktober` |
 | staging | `TTSecuritas Staging` | `com.tuntunios.stg` | `87742605816` | `tuntun123` |
-| **dev / debug — the default** | `TTSecuritasDev` | `com.tuntunios.tt` | `tomtomtomgame6@outlook.com` (Email tab; OTP `111111`; registered 2026-09-24, no PIN set yet: the first PIN prompt creates it, use `111111`) | `tuntun1234` |
+| **dev / debug — the default** | `TTSecuritasDev` | `com.tuntunios.tt` | **this Mac's `$TW_SMOKE_ACCOUNT`** — MacBook Pro `tomtomtomgame6@outlook.com`, Mac mini `tomtomtomgame5@outlook.com` (Email tab; OTP `111111`; PIN `111111`, and a first PIN prompt creates it) | tomtomtomgame6: `tuntun1234`; tomtomtomgame5: `~/.tuntun.yaml` → `maestro.accounts.<env>.password` |
 | dev / debug — fallback | `TTSecuritasDev` | `com.tuntunios.tt` | `tuntunrdn13@mailsac.com` | `tuntun123` |
 | dev / debug | `TTSecuritasDev` | `com.tuntunios.tt` | `Makmur15@mailsac.com` — CS-manager, only when the flow needs that role | `Tuntun1234` |
 | canary / release | `TTSecuritas Canary` | `com.tuntunios.cnr` | `82117236762` | `Tuntun1234` |
 | canary / release | `TTSecuritas Canary` | `com.tuntunios.cnr` | `81285965506` | `tuntun123` |
 | *backend unconfirmed* | — | — | `tommy.yohanes@gmail.com` | `tuntun123` |
+
+**Each Mac drives on its own account, and checks it before driving.** `TW_SMOKE_ACCOUNTS` gives
+every Mac its own staging/dev login, and env.sh resolves this Mac's into `$TW_SMOKE_ACCOUNT`. Two Macs
+on one account log each other out mid-drive, and one Mac's wrong PINs count against the other's
+lockout. The simulator keeps whatever session it last had, so before the first step that carries an
+`EXPECT:`:
+
+1. Open **More** and read the signed-in email off the profile header.
+2. It is `$TW_SMOKE_ACCOUNT` → drive. Anything else, including the other Mac's account or a session
+   you cannot identify → log out, then log in as `$TW_SMOKE_ACCOUNT` on the Email tab.
+3. Report it on `ACCOUNT:`. A step that needs data this account lacks (a paywalled row, a role) may
+   switch to another account from the table. Name that step and the account on `ACCOUNT:`, and log
+   back in as `$TW_SMOKE_ACCOUNT` before you finish.
+
+The Env line in the MR's smoke steps names the account Phase A expected. Phase B still drives on
+its own Mac's account; the check above decides, not the Env line.
 
 Debug **Prefill Login is broken** — the phone tab rejects its own prefill. Use the **Email tab**.
 
@@ -978,7 +994,7 @@ Put a `## Smoke steps` block in the MR description:
 
 ```markdown
 ## Smoke steps
-Env: staging · scheme `TTSecuritas Staging` · bundle `com.tuntunios.stg` · account `tomtomtomgame6@outlook.com`
+Env: staging · scheme `TTSecuritas Staging` · bundle `com.tuntunios.stg` · account `$TW_SMOKE_ACCOUNT` (the driving Mac's)
 Appearance: light | dark | both — <state it whenever the fix is appearance-specific>
 
 1. Log in on the Email tab, land on the tab bar.
@@ -1431,6 +1447,10 @@ Then read the live backend off Xpector — `tuntun-ios xpector summary` — beca
 `debugApiEnvironment=true` in the container overrides the Info.plist `BASE_URL` and has pointed a
 Debug build at production. You should see staging; pick the account from §4's table by the host you
 actually reach, and report the mismatch if it is not what §9 built.
+
+Then run §4's **account check** before the first `EXPECT:` step: the signed-in email must be
+`$TW_SMOKE_ACCOUNT`, this Mac's own, or you log out and log in as it. A session left behind by an
+earlier run or by the other Mac is the usual reason it is not.
 
 **No data is not a verdict.** When an `EXPECT:` grades figures the backend supplies (prices,
 volumes, counts, a list's rows) and Xpector shows that response came back empty or all zeros, the

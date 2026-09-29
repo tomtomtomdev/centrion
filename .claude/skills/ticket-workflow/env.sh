@@ -37,6 +37,7 @@
 : "${TW_PRODUCTS:=Staging-iphonesimulator}" # DerivedData Build/Products folder the scheme builds into
 : "${TW_APP_NAME:=Tuntun Sekuritas.app}"
 : "${TW_SIM_DEVICE:=iPhone 17}"
+: "${TW_SMOKE_ACCOUNTS:=macmini=tomtomtomgame5@outlook.com macbookpro=tomtomtomgame6@outlook.com}"  # <label>=<login>; each Mac drives on its own
 
 # Derived, never configured
 # Each Mac claims with its device-type label. It also still reads its legacy mac-<id> label as its
@@ -62,5 +63,10 @@ for _p in $(echo "$TW_HOSTS"); do          # $(…) splits in zsh too; a bare $T
     fi
 done
 unset _p _id _label _q
+TW_SMOKE_ACCOUNT=""                         # this Mac's staging/dev login for every drive
+for _p in $(echo "$TW_SMOKE_ACCOUNTS"); do
+    [ "${_p%%=*}" = "$TW_MINE" ] && TW_SMOKE_ACCOUNT=${_p#*=}
+done
+unset _p
 TW_EXCLUDE_JQL=""                           # " AND component NOT IN (BE)", or nothing
 [ -n "$TW_EXCLUDE_COMPONENTS" ] && TW_EXCLUDE_JQL=" AND component NOT IN ($TW_EXCLUDE_COMPONENTS)"
