@@ -14,10 +14,11 @@
 #   com.tommy.tt-lcmp-pull    tt-lcmp-pull at 09:00, from the tuntun tooling in ~/.tuntun/bin
 #   com.tommy.ticket-workflow       09:15: claude in a Warp tab in ~/Projects/ttsecuritas-2, /loop /ticket-workflow
 #   com.tommy.ticket-workflow.stop  16:45: ends that loop (both are ticket-workflow.sh)
+#   com.tommy.figma-spec.serve      figma-spec --serve, always up: the Figma plugin's Send lands in ~/figma-specs
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 CHECKOUT=$(cd "$HERE/.." && pwd)
-LABELS="com.tommy.centrion.bot com.tommy.centrion.lock com.tommy.tt-lcmp-pull com.tommy.ticket-workflow com.tommy.ticket-workflow.stop"
+LABELS="com.tommy.centrion.bot com.tommy.centrion.lock com.tommy.tt-lcmp-pull com.tommy.ticket-workflow com.tommy.ticket-workflow.stop com.tommy.figma-spec.serve"
 # Installed for the next login and never started here: bootstrapping a RunAtLoad job runs it,
 # and this one locks the screen of whoever is running install.sh (see lockscreen.sh).
 AT_LOGIN_ONLY="com.tommy.centrion.lock"

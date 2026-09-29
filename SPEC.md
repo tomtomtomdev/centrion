@@ -569,6 +569,15 @@ user-scope MCP server, and a Claude session calls `figma_selection`, `figma_desi
 none is running — and opening that panel in each file is still the one step nothing automates.
 `FIGMA_TOKEN` stays empty; `JIRA_TOK` is the only token the route needs.
 
+That receiver is a LaunchAgent, `com.tommy.figma-spec.serve`, installed with the others and always
+up, so a Send lands in `~/figma-specs` with nobody starting anything first. `/ticket-workflow`
+reads that folder before any other design source and never calls the REST API at all; a ticket
+with no spec there falls back to Figsnap or the headed-Chrome render and names, in the pass's
+report, the frame to send. A spec matches by the node id in its header, or — sent from a draft
+copy, which is how a read-only handoff file gets a development plugin at all, and which renumbers
+every node — by a file name starting with the ticket key. The receiver names files after the
+frame, so that rename is the person's, after Send.
+
 `sh install.sh` at the root runs all four installers — the skills, mac-cleanup, figma-to-claude,
 then the LaunchAgents — so a new Mac is one command; `sh install.sh agent` (or `skills`,
 `cleanup`, `figma`) runs just those, and `--schedule [HH:MM]` passes through to mac-cleanup's.
@@ -579,6 +588,7 @@ install:  sh launchd/install.sh     # writes __CHECKOUT__ and __HOME__ in, boots
 power:    sh launchd/power.sh --check   # pmset's schedule matches, and automatic login is on
 lock:     cat var/lockscreen.log        # did the last automatic login get locked
 lcmp:     launchctl print gui/$(id -u)/com.tommy.tt-lcmp-pull | head -30
+figma:    tail -f var/figma-spec.log            # one "received <file>" per Send, into ~/figma-specs
 tickets:  sh launchd/ticket-workflow.sh          # start the loop in Warp now (--stop ends it)
 tlog:     cat var/ticket-workflow.log
 restart:  launchctl kickstart -k gui/$(id -u)/com.tommy.centrion.bot

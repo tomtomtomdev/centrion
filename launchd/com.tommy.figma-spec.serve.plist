@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The figma-to-claude plugin's receiver: `figma-spec --serve`, always up, so pressing Send in
+  Figma lands a spec in ~/figma-specs with nobody starting anything first. /ticket-workflow reads
+  that folder before any other design source (its §4), because the REST API behind every other
+  path is rate-limited for days at a time and the plugin sandbox is not metered at all.
+
+  A daemon, like the bot: KeepAlive true and ThrottleInterval 10, so a crash or a port someone
+  else holds for a moment comes back without a hot loop. The port, 8787, is pinned in
+  figma-to-claude/manifest.json's allowedDomains; it is figma-spec's default and is not repeated
+  here, so the two cannot drift.
+
+  PATH is the system's on purpose. The launcher install.sh wrote execs `python3` by name, and
+  /usr/bin/python3 is the 3.9 floor figma-spec is written for; a brew python upgrade cannot
+  break a job that never looks at /opt/homebrew.
+
+  Every path is outside ~/Documents, ~/Desktop and ~/Downloads — the bot plist says why.
+
+  install:  sh launchd/install.sh   (skipped until `sh install.sh figma` has put figma-spec in place)
+  status:   launchctl print gui/$(id -u)/com.tommy.figma-spec.serve | head -30
+  logs:     tail -f var/figma-spec.log   — one "received <file>" line per Send
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tommy.figma-spec.serve</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/.local/bin/figma-spec</string>
+    <string>--serve</string>
+    <string>--out</string>
+    <string>__HOME__/figma-specs</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__CHECKOUT__/var/figma-spec.log</string>
+  <key>StandardErrorPath</key>
+  <string>__CHECKOUT__/var/figma-spec.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>

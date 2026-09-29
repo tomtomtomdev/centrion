@@ -752,23 +752,45 @@ if qa:
   it too.
 
 **Look at the design before you read it.** Three sources, in order; move down only when the one
-above fails, and name the one you used on `ASSUMPTION:`.
+above fails, and name the one you used on `ASSUMPTION:`. **Never call Figma's REST API** — not
+`tuntun-ios figma`, not `figma-spec <KEY>` without `--links-only`, not `/ios-design`'s REST
+fallback. Its `/files` quota is spent for days at a time (a 54-hour and a 65-hour `Retry-After`
+so far), and an early retry only pushes the reset further out.
 
-1. **Figsnap MCP**, through its daemon, since you have no `figma_*` tools. Anything but a 200
-   (`000` = daemon not running, or no `~/.figsnap-mcp/agent-token`) → step 2.
+1. **A plugin spec in `~/figma-specs`.** The figma-to-claude plugin renders a frame from inside
+   Figma, where nothing is metered, and its **Send** posts it to `com.tommy.figma-spec.serve`,
+   which writes it there. A person presses Send, so the spec is there only if someone sent it —
+   look, never wait. First the ticket's Figma link, off Jira alone:
+   ```bash
+   figma-spec <KEY> --links-only    # the URL, and which ticket it came from when <KEY> has none of its own
+   ```
+   A spec matches when its header names the link's node (`node-id=1-19216` is `1:19216`), or when
+   its file name starts with `<KEY>` or with the key the link came from. The second is how a spec
+   sent from a **draft copy** is filed: a development plugin only runs in a file you can edit, so
+   handoff files are copied into a draft, and a copy has new node ids and no file key.
+   ```bash
+   grep -rlE --include='*.txt' '^# Nodes?: (.* \| )?<NODE> "' ~/figma-specs
+   ls -t ~/figma-specs | grep -E '^(<KEY>|<SOURCE KEY>)'     # newest first
+   ```
+   No globs: the Bash tool's shell is zsh, where a glob matching nothing aborts the command.
+   More than one → the newest. Read its `# Figma:` and `# Node:` lines and quote them, with the
+   file's date, on `ASSUMPTION:`. This is the full spec — sizing (HUG/FILL/FIXED), strokes and
+   their side, radii, effects, every text run's font and colour, and a colour/text-style summary
+   to map onto `tuntun-ios designsystem token '<hex>'` — so it is never `degraded`. It does not
+   carry gradient angles, and text is clipped at 400 characters; take those from the render.
+
+   **No match → carry on to step 2, and ask for it.** Put `design: no plugin spec — Send <URL>,
+   save as ~/figma-specs/<KEY>.txt` on `ASSUMPTION:`, so the report names the frame to send and
+   the next run on this ticket (a rework, or a re-run) reads it at step 1.
+2. **Figsnap MCP**, through its daemon, since you have no `figma_*` tools. Anything but a 200
+   (`000` = daemon not running, or no `~/.figsnap-mcp/agent-token`) → step 3.
    ```bash
    curl -s -m 5 -X POST http://127.0.0.1:3058/tool -H 'content-type: application/json' \
      -H "x-figsnap-token: $(cat ~/.figsnap-mcp/agent-token)" \
      -d '{"name":"figma_resolve_url","arguments":{"url":"<URL>"}}'
    ```
    Then `/ios-design` STEP 0–3 through the same endpoint (`figma_export_png`, `figma_ios_spec`).
-2. **REST API** — `/ios-design`'s fallback:
-   ```bash
-   tuntun-ios figma screenshot '<URL from the ticket>'   # Read the PNG first
-   tuntun-ios figma url '<URL>' --depth <N>              # hex, spacing, lineHeight, fillTokens
-   ```
-   `rate limited — Figma asks for <N>h …` → step 3. **Never retry the API**: an early retry is
-   another 429 and pushes the reset further out.
+   A rate-limit answer from Figsnap → step 3, not a retry.
 3. **Figma web in the Chrome already open on this Mac**, which is signed in and not under the
    API's rate limit:
    ```bash
@@ -789,8 +811,8 @@ pixel reference: put your simulator screenshot beside it at the same point scale
 visible difference (gradient edges, borders, dividers, font size and weight, spacing) before
 shipping. Keep it at `.tuntun/design/<KEY>.png` so Phase B grades against the same image.
 
-Sources 2 and 3 make the spec `degraded`: read sizing (HUG/FILL/FIXED) and whether a stroke is
-really drawn off the render. Source 3 also resolves colours by sampling the render and taking the
+Source 3 alone makes the spec `degraded`: read sizing (HUG/FILL/FIXED) and whether a stroke is
+really drawn off the render. It also resolves colours by sampling the render and taking the
 nearest token via `tuntun-ios designsystem token '<hex>'`. The numbers it yields are §6's
 `EXPECT:` values. Name the artboard width; if it is not 402pt, say so in the
 smoke steps. Ticket images on `wiki.tuntun.co.id/download/attachments/…` need the **wiki** token.
@@ -1733,6 +1755,8 @@ re-reads:
   drive, the backend and account, the measured values behind each `EXPECT:`, and whether the proof
   screenshot exists. Name what stayed unverified.
 - **Heads Up** — only if something is genuinely left broken.
+- **Designs to Send** — every `design: no plugin spec — Send <URL>` a handoff put on
+  `ASSUMPTION:`, one line each with the ticket key, so the frames can be sent before the next run.
 - **Recommended Next Step** — one thing, grounded in what you checked.
 
 Never claim a gate, a build, a merge or a met `EXPECT:` that a handoff block does not report.

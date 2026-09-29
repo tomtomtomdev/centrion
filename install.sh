@@ -10,7 +10,7 @@
 #   cleanup   mac-cleanup/install.sh      daily-cleanup.sh and /mac-cleanup, no daily run unless asked
 #   figma     figma-to-claude/install.sh  figma-spec CLI; the plugin itself is one manual import
 #   agent     launchd/install.sh          the bot, the lock, tt-lcmp-pull, the 09:15–16:45 ticket loop,
-#                                         then pmset's power schedule
+#                                         the figma-spec receiver, then pmset's power schedule
 #
 #   sh install.sh                     all four
 #   sh install.sh <part> [part…]      only those, in the order above
