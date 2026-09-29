@@ -75,7 +75,8 @@ and they travel as one unit:
 ## Two Macs, one session each
 
 Two Macs run this. They stay off each other with **one mechanism: a sticky Jira label** naming the
-claiming Mac, taken from `TT_HOST_ID` (`A` here → `mac-A`; the other Mac → `mac-B`).
+claiming Mac by its device type, looked up from `TT_HOST_ID` in `TW_HOSTS` (`A` here → `macmini`;
+Mac B → `macbookpro`).
 
 - Phase A skips any ticket already carrying *another* Mac's label, then stamps its own on claim.
 - Phase B reads only tickets carrying **its own** label.
@@ -145,13 +146,15 @@ the checkout's own `.tuntun/ticket-workflow.env` for a repo on a different board
 | `TW_COMPONENT` | `ios` | the one component every query requires |
 | `TW_EXCLUDE_COMPONENTS` | `BE` | pickup skips tickets carrying any of these |
 | `TW_JIRA_USER` / `TW_NOT_QA` | `tommy.yohanes` / `admin tommy.yohanes` | the pipeline's own account; authors that are never a brief (§4) |
-| `TW_HOSTS` | `A B` | every Mac's `TT_HOST_ID`; labels `mac-<id>` |
+| `TW_HOSTS` | `A=macmini B=macbookpro` | every Mac as `<TT_HOST_ID>=<device-type label>`, in claim precedence order |
 | `TW_GITLAB_HOST` / `TW_GITLAB_PROJECT` / `TW_MR_ASSIGNEE` | `git.tuntun.co.id` / `49` / the Jira user | every `glab` call |
 | `TW_MAIN_BRANCH` / `TW_RC_PREFIX` / `TW_RC_FLOOR` / `TW_BRANCH_PREFIX` | `main` / `release_candidate` / `2.4.0` / `tommy` | §3's target and branch name |
 | `TW_WORKSPACE` / `TW_SCHEME` / `TW_PRODUCTS` / `TW_APP_NAME` / `TW_SIM_DEVICE` | `TTSecuritas.xcworkspace` / `TTSecuritas Staging` / `Staging-iphonesimulator` / `Tuntun Sekuritas.app` / `iPhone 17` | §9's build and §10's drive |
 
-env.sh also derives `TW_MINE` (`mac-$TT_HOST_ID`), `TW_OTHERS` and `TW_ALL_MACS` (the JQL-quoted
-labels of the other Macs and of all of them) and `TW_EXCLUDE_JQL` (` AND component NOT IN (…)`,
+env.sh also derives `TW_MINE` (this Mac's label, the one it stamps), `TW_MINE_JQL` (it plus this
+Mac's legacy `mac-<id>`, the ones it reads as its own), `TW_OTHERS` and `TW_ALL_MACS` (the JQL-quoted
+labels, legacy ones included, of the other Macs and of all of them), `TW_CLAIM_RE` (a regex matching
+any claim label) and `TW_EXCLUDE_JQL` (` AND component NOT IN (…)`,
 empty when nothing is excluded). Where the prose below names a default (filter 11001, project 49,
 `release_candidate/`, the staging scheme), read it as *the configured one*; the facts it states
 about that default (squash on by default, fast-forward only, no CI) are to be re-checked on any
@@ -208,6 +211,7 @@ node --version                                         # must print v18+ or §10
 curl -sS -k -o /dev/null -w 'jira=%{http_code}\n' -H "Authorization: Bearer $JIRA_TOK" "$JIRA_URL/myself"
 echo "slot=$TT_SLOT host=$TT_HOST_ID rc=$TT_RC"
 echo "board=[$TW_BOARD_JQL] fixing=[$TW_FIXING_JQL] component=$TW_COMPONENT$TW_EXCLUDE_JQL mine=$TW_MINE others=[$TW_OTHERS]"
+[ -n "$TW_MINE" ] || echo "STOP: no claim label for TT_HOST_ID=$TT_HOST_ID in TW_HOSTS=[$TW_HOSTS]"
 echo "gitlab=$TW_GITLAB_HOST project=$TW_GITLAB_PROJECT rc=$TW_RC_PREFIX/≥$TW_RC_FLOOR branch=$TW_BRANCH_PREFIX/…"
 ```
 
@@ -231,7 +235,7 @@ board.
 worktree starts with none.
 
 `TT_HOST_ID` is this **Mac's** identity and the whole basis of the claim label. Empty, or not one
-of `TW_HOSTS` (then `TW_OTHERS` still lists this Mac's peers but `TW_ALL_MACS` misses it) → stop; an
+of `TW_HOSTS` (then `TW_MINE` is empty) → stop; an
 unlabelled claim is indistinguishable from no claim and the two Macs will collide.
 
 Not `200`, or `tt-slot` fails → **stop and report**, and skip Phase B too: a dead token cannot
@@ -244,7 +248,7 @@ ticket nobody moved.
 
 ```bash
 export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
-JQL="($TW_FIXING_JQL) AND component = \"$TW_COMPONENT\" AND labels IN (\"$TW_MINE\") AND labels NOT IN (\"needs-human\") ORDER BY created ASC"
+JQL="($TW_FIXING_JQL) AND component = \"$TW_COMPONENT\" AND labels IN ($TW_MINE_JQL) AND labels NOT IN (\"needs-human\") ORDER BY created ASC"
 curl -sS -k -G -H "Authorization: Bearer $JIRA_TOK" --data-urlencode "jql=$JQL" \
   --data-urlencode "fields=summary,labels" --data-urlencode "maxResults=50" "$JIRA_URL/search" \
 | python3 -c "
@@ -373,7 +377,7 @@ only holding is harmless: this Mac's §1a reads the same marker and holds too.
 ```bash
 export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
 PARKED='"not-reachable","needs-version","needs-human"'
-STALE=${TW_OTHERS:+" OR (labels IN ($TW_OTHERS) AND labels NOT IN (\"$TW_MINE\",$PARKED) AND updated <= -72h)"}
+STALE=${TW_OTHERS:+" OR (labels IN ($TW_OTHERS) AND labels NOT IN ($TW_MINE_JQL,$PARKED) AND updated <= -72h)"}
 JQL="($TW_FIXING_JQL) AND component = \"$TW_COMPONENT\"$TW_EXCLUDE_JQL AND (labels IS EMPTY OR labels NOT IN ($TW_ALL_MACS,$PARKED)$STALE) ORDER BY updated ASC"
 curl -sS -k -G -H "Authorization: Bearer $JIRA_TOK" \
   --data-urlencode "jql=$JQL" --data-urlencode "fields=summary,status,issuetype,labels,updated" \
@@ -386,7 +390,7 @@ print('total=%d bucket2=%d' % (d.get('total', 0), d.get('total', 0)))
 for i in d.get('issues', []):
     f = i['fields']
     labels = f.get('labels') or []
-    stale = next((l for l in labels if re.fullmatch(r'mac-[A-Z]', l)), None)
+    stale = next((l for l in labels if re.fullmatch(r'$TW_CLAIM_RE', l)), None)
     kind = 'stale-claim:%s since %s' % (stale, f['updated'][:16]) if stale else 'orphan'
     print('2|%s|fixing|%s|%s|%s|%s' % (i['key'], f['issuetype']['name'], ','.join(labels) or '-', kind, f['summary']))
 "
@@ -418,7 +422,7 @@ for k in <every key from §1's rows>; do
     "$JIRA_URL/issue/$k?fields=summary,labels,versions,parent,issuelinks,description"; echo
 done | python3 -c "
 import sys, json, re
-SKIP = re.compile(r'^(mac-[A-Z]|v\d+\.\d+\.\d+|needs-.*|not-reachable|batch-.*)$')
+SKIP = re.compile(r'^($TW_CLAIM_RE|v\d+\.\d+\.\d+|needs-.*|not-reachable|batch-.*)$')
 for ln in sys.stdin:
     if not ln.strip(): continue
     i = json.loads(ln); f = i['fields']; d = f.get('description') or ''
@@ -458,8 +462,8 @@ curl -sS -k -H "Authorization: Bearer $JIRA_TOK" "$JIRA_URL/issue/<KEY>?fields=l
 ```
 
 4. **Re-read the labels.** Jira has no compare-and-set, so two Macs reading the board seconds apart
-   can both stamp. If a ticket now carries **two** claim labels (`mac-A` and `mac-B`), the
-   **lower host id wins**. If you lost one: remove your own labels from it (claim and `batch-…`) and drop it from
+   can both stamp. If a ticket now carries **two** claim labels (`macmini` and `macbookpro`), the
+   Mac listed **first in `TW_HOSTS`** wins. If you lost one: remove your own labels from it (claim and `batch-…`) and drop it from
    the batch. If you lost the seed, the next surviving member stands in for it; lost them all → take
    another seed from §1's list. If that was the only row, Phase A ends — go to §8.
 
@@ -480,9 +484,9 @@ curl -sS -k -X PUT -H "Authorization: Bearer $JIRA_TOK" -H "Content-Type: applic
 
 ```bash
 curl -sS -k -X PUT -H "Authorization: Bearer $JIRA_TOK" -H "Content-Type: application/json" \
-  -d "{\"update\":{\"labels\":[{\"remove\":\"<STALE mac-X>\"},{\"add\":\"$TW_MINE\"}]}}" "$JIRA_URL/issue/<KEY>"
+  -d "{\"update\":{\"labels\":[{\"remove\":\"<STALE label>\"},{\"add\":\"$TW_MINE\"}]}}" "$JIRA_URL/issue/<KEY>"
 tuntun-ios jira issue issue comment <KEY> --insecure \
-  --body "Claim by <STALE mac-X> idle since <updated>; taken over by $TW_MINE."
+  --body "Claim by <STALE label> idle since <updated>; taken over by $TW_MINE."
 ```
 
    The comment is for the person who finds the ticket later. It also bumps `updated`, so the other
@@ -533,7 +537,7 @@ agent corrects course from the ticket itself and names the correction in its han
 The prompt stays short, because the runbook is this file and the agent reads it itself:
 
 > You own ticket **<KEY>** end to end, in the worktree at `<this working directory>`. It is already
-> claimed with the label `mac-<HOST>` and transitioned to `fixing` by the session that spawned you,
+> claimed with the label `<TW_MINE, e.g. macmini>` and transitioned to `fixing` by the session that spawned you,
 > and a task row is already open for it.
 > Read `~/.claude/skills/ticket-workflow/SKILL.md` and execute **§3 through §7** exactly as written,
 > then stop. CLAUDE.md's HARD CONSTRAINTS and pipeline apply throughout.
@@ -901,7 +905,7 @@ tuntun-ios jira issue issue transition <KEY> --status Reopened --insecure
 tt-harness-switch checkout <TARGET_RC> && git branch -D <branch> && git push origin --delete <branch>
 ```
 
-Leave your `mac-<HOST>` label on. The ticket sits in Reopened where a human sees it, and §1's
+Leave your `$TW_MINE` claim label on. The ticket sits in Reopened where a human sees it, and §1's
 exclusion keeps **both** Macs off it until somebody removes `not-reachable`. Hand back
 `OUTCOME: not-reachable`.
 
@@ -1168,7 +1172,7 @@ $TW_COMPONENT`, and **this Mac's own claim label**.
 
 ```bash
 export PATH="$HOME/.tuntun/bin:$PATH"; eval "$(tt-slot env --with-jira)"; . ~/.claude/skills/ticket-workflow/env.sh
-JQL="($TW_FIXING_JQL) AND component = \"$TW_COMPONENT\" AND labels IN (\"$TW_MINE\") AND labels NOT IN (\"needs-human\")"
+JQL="($TW_FIXING_JQL) AND component = \"$TW_COMPONENT\" AND labels IN ($TW_MINE_JQL) AND labels NOT IN (\"needs-human\")"
 curl -sS -k -G -H "Authorization: Bearer $JIRA_TOK" \
   --data-urlencode "jql=$JQL" --data-urlencode "fields=summary,labels" \
   --data-urlencode "maxResults=50" "$JIRA_URL/search" \
@@ -1650,8 +1654,8 @@ resolve: that is review feedback nobody has answered, and silently closing it me
 Check the authors before running the loop above — anything not written by this pipeline means stop
 with `VERDICT: blocked`, say why on the MR, and leave the ticket in `fixing`.
 
-**Once the merge has succeeded, take every Mac's claim label off each ticket**, `mac-A` and `mac-B`
-alike, not only `$TW_MINE`. `unclaim` builds one PUT removing each label in `$TW_ALL_MACS`. Removing
+**Once the merge has succeeded, take every Mac's claim label off each ticket**, `macmini`, `macbookpro`
+and the legacy `mac-A` / `mac-B` alike, not only `$TW_MINE`. `unclaim` builds one PUT removing each label in `$TW_ALL_MACS`. Removing
 a label the ticket doesn't have is a no-op, so the stale-claim case needs no special handling.
 Define it before the merge, run it only after the merge succeeded, and never on a `blocked` or
 `needs-rework` verdict, where the label is still the live claim:
@@ -1659,9 +1663,9 @@ Define it before the merge, run it only after the merge succeeded, and never on 
 ```bash
 unclaim() {
   curl -sS -k -X PUT -H "Authorization: Bearer $JIRA_TOK" -H "Content-Type: application/json" \
-    -d "{\"update\":{\"labels\":[$(printf '%s' "$TW_ALL_MACS" | sed 's/"mac-[^"]*"/{"remove":&}/g')]}}" \
+    -d "{\"update\":{\"labels\":[$(printf '%s' "$TW_ALL_MACS" | sed 's/"[^"]*"/{"remove":&}/g')]}}" \
     "$JIRA_URL/issue/$1"
-  curl -sS -k -H "Authorization: Bearer $JIRA_TOK" "$JIRA_URL/issue/$1?fields=labels"   # check: no mac-* left
+  curl -sS -k -H "Authorization: Bearer $JIRA_TOK" "$JIRA_URL/issue/$1?fields=labels"   # check: no claim label left
 }
 ```
 
@@ -1690,7 +1694,7 @@ pipeline to wait for and no green check to read: your smoke run is the gate.
 
 `fixed` is a real status, lowercase. It drops the ticket out of both filters, so it will not come
 back around. **Its claim labels are gone** (the `unclaim` above), so if QA reopens the ticket, either
-Mac can pick it up. A leftover `mac-A` would keep Mac B off it forever, because §1 excludes the other
+Mac can pick it up. A leftover `macmini` would keep Mac B off it forever, because §1 excludes the other
 Mac's label. Which Mac did the work is recorded in §11's proof comment and the MR, not in the label.
 
 Cannot merge for any other reason → say why on the MR, leave the ticket in `fixing`, and stop with

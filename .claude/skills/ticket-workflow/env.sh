@@ -18,7 +18,7 @@
 : "${TW_EXCLUDE_COMPONENTS=BE}"             # comma-separated; a ticket carrying any is skipped. Empty = none
 : "${TW_JIRA_USER:=tommy.yohanes}"          # the account this pipeline comments as
 : "${TW_NOT_QA:=admin $TW_JIRA_USER}"       # authors whose comments are never the QA/design brief
-: "${TW_HOSTS:=A B}"                        # every Mac's TT_HOST_ID; one claim label, mac-<id>, each
+: "${TW_HOSTS:=A=macmini B=macbookpro}"      # every Mac as <TT_HOST_ID>=<device-type label>; first listed wins a double claim
 
 # GitLab
 : "${TW_GITLAB_HOST:=git.tuntun.co.id}"
@@ -39,13 +39,28 @@
 : "${TW_SIM_DEVICE:=iPhone 17}"
 
 # Derived, never configured
-TW_MINE="mac-${TT_HOST_ID:-}"
-TW_ALL_MACS=""                              # "mac-A","mac-B" — every claim label, JQL-quoted
+# Each Mac claims with its device-type label. It also still reads its legacy mac-<id> label as its
+# own, and a peer's as the peer's, so tickets claimed before the rename stay tracked.
+TW_MINE=""                                  # this Mac's label, the one it stamps: macmini
+TW_MINE_JQL=""                              # "macmini","mac-A" — the labels it reads as its own
+TW_ALL_MACS=""                              # "macmini","mac-A","macbookpro","mac-B" — every claim label, JQL-quoted
 TW_OTHERS=""                                # the same, without this Mac's
-for _h in $(echo "$TW_HOSTS"); do          # $(…) splits in zsh too; a bare $TW_HOSTS does not
-    TW_ALL_MACS="$TW_ALL_MACS${TW_ALL_MACS:+,}\"mac-$_h\""
-    [ "mac-$_h" = "$TW_MINE" ] || TW_OTHERS="$TW_OTHERS${TW_OTHERS:+,}\"mac-$_h\""
+TW_CLAIM_RE="mac-[A-Z]"                     # a regex matching any claim label, for the Python filters
+for _p in $(echo "$TW_HOSTS"); do          # $(…) splits in zsh too; a bare $TW_HOSTS does not
+    case $_p in
+        ?*=?*) ;;
+        *) echo "env.sh: TW_HOSTS entry '$_p' needs the <id>=<label> form (A=macmini); re-run configure.sh" >&2; continue ;;
+    esac
+    _id=${_p%%=*}; _label=${_p#*=}
+    _q="\"$_label\",\"mac-$_id\""
+    TW_ALL_MACS="$TW_ALL_MACS${TW_ALL_MACS:+,}$_q"
+    TW_CLAIM_RE="$TW_CLAIM_RE|$_label"
+    if [ "$_id" = "${TT_HOST_ID:-}" ]; then
+        TW_MINE=$_label; TW_MINE_JQL=$_q
+    else
+        TW_OTHERS="$TW_OTHERS${TW_OTHERS:+,}$_q"
+    fi
 done
-unset _h
+unset _p _id _label _q
 TW_EXCLUDE_JQL=""                           # " AND component NOT IN (BE)", or nothing
 [ -n "$TW_EXCLUDE_COMPONENTS" ] && TW_EXCLUDE_JQL=" AND component NOT IN ($TW_EXCLUDE_COMPONENTS)"
