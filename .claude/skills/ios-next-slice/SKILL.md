@@ -15,7 +15,7 @@ into the plan.
 |---|---|
 | *(bare path/fragment)* | reconcile, then do **one** slice — the first open one |
 | `--slice <id>` | do that slice instead of the first open one (`T5`, `Slice 3`, `Task 2`) |
-| `--all` | keep going slice by slice until one is blocked, fails review, or the plan is finished |
+| `--all` | keep going slice by slice; a blocked slice is recorded and skipped (§9a), and the run stops only when no unblocked slice is left |
 | `--dry-run` | reconcile and report only — no task row, no agent, no edits, no commit |
 | `--agent` | every slice goes to one `@ios-implementer`, Tier 0/1 included (§6) — the caller's standing choice |
 | `--row-open` | the caller already opened this slice's task row: skip §5 entirely; still close it in §8 |
@@ -92,9 +92,11 @@ column (sha or "code present at `File.swift:NN`" or "—"). On `--dry-run`, stop
 
 ## 4 · Pick the slice
 
-First `OPEN` row in plan order, or the `--slice` one. If it depends on a row that is still open,
-say which and stop. If the slice's acceptance criteria have **no named way to check them**, that is
-a blocker to resolve with the user now — not a box to hand to an agent (`/ios-assign` rule).
+First `OPEN` row in plan order that is not `BLOCKED`, or the `--slice` one. If it depends on a row
+that is still open, it is blocked: say which. If the slice's acceptance criteria have **no named way
+to check them**, that is a blocker too — never a box to hand to an agent (`/ios-assign` rule).
+Without `--all`, stop and report either one; with `--all`, record it (§9a, *work blocker*) and pick
+the next row.
 
 ## 5 · Open the task row — main session only
 
@@ -173,8 +175,10 @@ render when the criteria are visual. Never fabricate a test to satisfy the contr
    concurrency, a screen built to a design, >5 files). FINDINGS is a rejection: the same
    `@ios-implementer` fixes (use `SendMessage` to the agent you spawned, never a new one), and the
    same reviewer re-checks the findings and what the fix could have broken. Two rounds on one
-   finding → the user decides. Never approve on its behalf, never re-spawn a reviewer for a nicer
-   answer. Design slices add `/ios-design` STEP 8. A Tier 0/1 slice closes on `/ios-review`.
+   finding → the user decides (under `--all`: record the slice as a *work blocker*, §9a, and move
+   on; the question goes in the final report). Never approve on its behalf, never re-spawn a
+   reviewer for a nicer answer. Design slices add `/ios-design` STEP 8. A Tier 0/1 slice closes on
+   `/ios-review`.
 
 ## 8 · Commit and write the progress back
 
@@ -210,8 +214,49 @@ tuntun task done --changes "…" --verification "…" [--heads-up "…"]
 
 ## 9 · Loop or stop
 
-`--all` → back to §4 with the ledger refreshed from the new commit; stop on a blocked slice, a
-FINDINGS round that did not clear, a red test, or the end of the plan. Otherwise stop after one.
+`--all` → back to §4 with the ledger refreshed from the new commit. A blocked slice does **not**
+stop the run: record it (§9a) and continue with the next unblocked slice. Stop only when:
+
+- the plan is finished, or every slice still open is `BLOCKED`;
+- the tree is broken for everyone — the app or test target no longer builds, or a suite outside
+  the slice goes red — because the next slice would be built on top of it;
+- a `/ticket-workflow` pass takes the Mac (§6).
+
+Without `--all`, stop after one slice, and on any blocker.
+
+Under `--all` never stop to ask mid-run. Every question a blocked slice raises goes into the final
+report (§10), all at once.
+
+### 9a · Recording a blocked slice
+
+Decide which kind it is first — they end differently:
+
+| Kind | What it is | End state |
+|---|---|---|
+| **Check owed** | the code is done and every gate passed **except** one check the environment cannot run yet: an undeployed route, a device, a login, a backend fixture. The reviewer's only open finding, if any, is that check | commit it (§8), close the row with the owed check in `--heads-up`, and queue the check as its own row: `tuntun task add "<drive/verify …> once <condition>" --ticket <KEY> --parent <row> --kind chore --description "…"` |
+| **Work blocker** | anything else: a decision only the user, PM, BE or design can make · a finding still open after two rounds · a red test the slice cannot fix · a dependency on an open row · criteria with no check | `tuntun task block <row> --reason "<what is in the way — and what unblocks it>"`; stash its uncommitted files **by path**, never the whole tree: `git stash push -m "<KEY> <slice> blocked: <reason>" -- <paths>`; name the stash in the block reason so a resume can `git stash apply` it |
+
+A *check owed* is only allowed when the reviewer agrees the check is environment-bound or the user
+has said so — never to get round a finding. Its row records the check as **not verified**, and the
+reviewer's finding stays on the row as unresolved, never as approved.
+
+Then write it down where the next run will read it:
+
+- **Plan file** → add a `## Blocked` table once, below the slices, and keep it current (remove a row
+  when its slice closes):
+
+  | Slice | Kind | Blocked by | Unblocks when | Row | Stash | Since |
+  |---|---|---|---|---|---|---|
+
+  Commit it with the slice (*check owed*) or as `docs(plan): record blocked <slice>` (*work
+  blocker*, plan file only). `--plan-local` → edit the file, never `git add` it.
+- **Board-only plan** (recorded with `tuntun task plan`, no file) → the row's block reason or
+  heads-up is the record; add `tuntun task comment "<what unblocks it>" --kind blocker` so the
+  board says it in one place.
+
+A work-blocked slice is not `OPEN` for §4 until its blocker is gone. A resume checks each
+`## Blocked` row (and each blocked board row) first, and `tuntun task resume <id>` +
+`git stash apply` the ones that are clear.
 
 Never push, never open an MR — that is **`/ios-git`**, and only when the user asks.
 
@@ -222,5 +267,7 @@ Never push, never open an MR — that is **`/ios-git`**, and only when the user 
 - **What Changed** — the slice, in behaviour terms, and its sha.
 - **Verified** — the test that went red then green, the lint result, the review verdict; and plainly
   what you did *not* run (nothing builds the app automatically).
+- **Blocked** — every slice recorded in §9a this run: kind, what blocks it, what unblocks it, its
+  row and stash. Then the questions only the user can answer, together, once.
 - **Heads Up** — only if something is actually left broken or risky.
 - **Recommended Next Step** — the next open slice by name, or "nothing needed".
