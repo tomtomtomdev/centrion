@@ -279,6 +279,27 @@ class TestEverythingElseIsHelp(Base):
         self.assertHelp("please claude beacon")
 
 
+class TestPower(Base):
+    """§5's `power`: pmset's schedule, read or changed without a session."""
+
+    def test_bare_power_only_reads(self):
+        self.assertEqual(commands.parse("power"), commands.Intent(commands.POWER))
+
+    def test_cancel_and_set(self):
+        self.assertEqual(commands.parse("power cancel").target, commands.CANCEL)
+        self.assertEqual(commands.parse("/power set").target, commands.SET)
+
+    def test_the_target_folds(self):
+        self.assertEqual(commands.parse("Power Cancel"),
+                         commands.Intent(commands.POWER, target=commands.CANCEL))
+
+    def test_anything_else_is_help(self):
+        # `power off` above all: it reads as "switch the Mac off now", and must never be
+        # quietly taken as either of the two things this verb can do.
+        for text in ("power off", "power on", "power of", "power cancel now", "power 1"):
+            self.assertEqual(commands.parse(text).verb, commands.HELP, text)
+
+
 class TestTheContract(Base):
     """What the listener is allowed to assume about what comes back."""
 
@@ -291,7 +312,8 @@ class TestTheContract(Base):
 
     def test_the_verb_is_always_one_of_the_five(self):
         for text in ("claude", "claude beacon", "new scratchpad", "ls", "stop 1", "stop all",
-                     "help", "", None, "garbage", "/start"):
+                     "power", "power cancel", "power set", "help", "", None, "garbage",
+                     "/start"):
             self.assertIn(commands.parse(text).verb, commands.VERBS)
 
     def test_every_verb_is_one_telegram_will_offer(self):
@@ -299,7 +321,7 @@ class TestTheContract(Base):
         # menu does not is one nobody on a phone will discover.
         self.assertEqual(commands.VERBS,
                          (commands.START, commands.NEW, commands.LIST, commands.STOP,
-                          commands.HELP))
+                          commands.POWER, commands.HELP))
 
     def test_nothing_makes_it_raise(self):
         """§7: the poll loop must survive every message anyone can send it.

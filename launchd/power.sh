@@ -7,6 +7,7 @@
 #
 #   sh launchd/power.sh            set it, if it differs (asks for your password)
 #   sh launchd/power.sh --check    say whether it matches, and change nothing; exit 1 if not
+#   sh launchd/power.sh --cancel   clear every repeating power event
 #
 # A power-on alone brings the Mac up to the login window, and the listener is a LaunchAgent that
 # only runs once somebody is logged in (2026-09-26: booted 08:02, silent until a login at 08:11,
@@ -14,8 +15,17 @@
 # user is logged in automatically, and --check fails when not. That is a setting, not a pmset
 # event, and this script does not change it: System Settings → Users & Groups → "Automatically
 # log in as". com.tommy.centrion.lock then locks the screen that login lands on.
-#   sh launchd/power.sh --cancel   clear every repeating power event
+#
+# The listener runs this too, for `power`, `power cancel` and `power set` from the phone (SPEC.md
+# §5), and it has no terminal to type a password into. So the interactive set also installs
+# /etc/sudoers.d/centrion-power, which lets this user run exactly the two pmset commands below
+# without one and nothing else, and without a terminal sudo is -n: a missing rule is a quick
+# "a password is required", never a hang.
 set -eu
+
+PMSET=/usr/bin/pmset
+SUDOERS=/etc/sudoers.d/centrion-power
+if [ -t 0 ]; then SUDO=sudo; else SUDO="sudo -n"; fi
 
 DAYS=MTWRFSU          # pmset's weekday letters: every day
 OFF=06:00:00          # shutdown
@@ -39,6 +49,36 @@ have() {
 autologin() {   # 0 = this user is logged in automatically at boot
     [ "$(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null)" = "$(id -un)" ]
 }
+# The two commands the sudoers rule allows, word for word: sudo matches the arguments exactly.
+cancel() { $SUDO "$PMSET" repeat cancel; }
+schedule() { $SUDO "$PMSET" repeat shutdown "$DAYS" "$OFF" wakeorpoweron "$DAYS" "$ON"; }
+
+passwordless() {   # 0 = the listener can run both without a password
+    sudo -n -l "$PMSET" repeat cancel >/dev/null 2>&1 &&
+        sudo -n -l "$PMSET" repeat shutdown "$DAYS" "$OFF" wakeorpoweron "$DAYS" "$ON" >/dev/null 2>&1
+}
+install_sudoers() {   # interactive only: asks for the password once, then never again
+    passwordless && return 0
+    [ -t 0 ] || return 0
+    rule=$(mktemp)
+    esc() { printf '%s' "$1" | sed 's/:/\\:/g'; }
+    printf '# centrion: `power` from the phone (SPEC.md §5). Written by launchd/power.sh.\n' >"$rule"
+    printf '%s ALL=(root) NOPASSWD: %s repeat cancel, %s repeat shutdown %s %s wakeorpoweron %s %s\n' \
+        "$(id -un)" "$PMSET" "$PMSET" "$DAYS" "$(esc "$OFF")" "$DAYS" "$(esc "$ON")" >>"$rule"
+    if ! visudo -cqf "$rule"; then
+        echo "the sudoers rule did not parse; not installing it:" >&2
+        cat "$rule" >&2; rm -f "$rule"; return 1
+    fi
+    sudo install -m 0440 -o root -g wheel "$rule" "$SUDOERS"
+    rm -f "$rule"
+    echo "installed $SUDOERS: the listener can now set and cancel the schedule"
+}
+say_sudoers() {
+    if passwordless; then echo "the listener can set and cancel it (power from the phone)"; return 0; fi
+    echo "the listener cannot change it without a password: run sh launchd/power.sh in a terminal"
+    return 1
+}
+
 say_autologin() {
     if autologin; then
         echo "automatic login is on for $(id -un)"
@@ -55,21 +95,24 @@ case "${1:-}" in
         if [ "$(have)" = "$(want)" ]; then echo "power schedule matches"
         else echo "power schedule differs"; echo "want:"; want; echo "have:"; have; ok=1; fi
         say_autologin || ok=1
+        say_sudoers || ok=1
         exit $ok ;;
     --cancel)
-        sudo pmset repeat cancel
-        echo "power schedule cleared"
+        if [ -z "$(have)" ]; then echo "power schedule already cleared: no shutdown, no power-on"; exit 0; fi
+        cancel
+        echo "power schedule cleared: no shutdown at $OFF, no power-on at $ON, until it is set again"
         exit 0 ;;
     "") ;;
     *) echo "usage: sh $0 [--check|--cancel]" >&2; exit 2 ;;
 esac
 
+install_sudoers
 if [ "$(have)" = "$(want)" ]; then
     echo "power schedule already set: shutdown $OFF, on $ON, $DAYS"
     say_autologin || true
     exit 0
 fi
-sudo pmset repeat shutdown "$DAYS" "$OFF" wakeorpoweron "$DAYS" "$ON"
+schedule
 if [ "$(have)" != "$(want)" ]; then
     echo "pmset took the schedule but reports something else:" >&2
     pmset -g sched >&2

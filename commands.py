@@ -31,19 +31,25 @@ help is what was asked for.
 """
 import collections
 
-# The five intents, spelled as the words that produce them so a logged or printed intent reads
+# The six intents, spelled as the words that produce them so a logged or printed intent reads
 # back as the message that made it.
 START = "claude"      # §5 tier 1: start a session (or, with no project, list the projects).
 NEW = "new"           # §5 tier 1: make the directory first, then start a session in it.
 LIST = "ls"           # §5 tier 2: the live sessions.
 STOP = "stop"         # §5 tier 2: signal one runner, or all of them.
+POWER = "power"       # §5 tier 2: pmset's shutdown schedule — show it, cancel it, set it again.
 HELP = "help"         # §5: and everything else.
 
 #: `stop all`'s target. A string, so it can never collide with an `ls` index, which is an int.
 ALL = "all"
 
+#: `power`'s two targets, the words launchd/power.sh already uses for them. Not `off` and `on`:
+#: `power off` reads as "switch the Mac off now", and the phone is the last place to guess.
+CANCEL = "cancel"
+SET = "set"
+
 #: What the phone's `/` menu carries (§5). The listener owns the descriptions and registers them.
-VERBS = (START, NEW, LIST, STOP, HELP)
+VERBS = (START, NEW, LIST, STOP, POWER, HELP)
 
 Intent = collections.namedtuple("Intent", "verb project prompt target")
 Intent.__new__.__defaults__ = (None, None, None)
@@ -105,6 +111,15 @@ def parse(text):
         # ValueError to int(). §5 numbers sessions from 1, so 0 can never name one.
         if target.isascii() and target.isdigit() and int(target) >= 1:
             return Intent(STOP, target=int(target))
+        return _HELP
+
+    if verb == POWER:
+        # Bare `power` only reads the schedule. A word that is not one of the two is help and
+        # not a guess — `power of` is a typo of either.
+        if not args:
+            return Intent(POWER)
+        if len(args) == 1 and args[0].lower() in (CANCEL, SET):
+            return Intent(POWER, target=args[0].lower())
         return _HELP
 
     if verb in (LIST, HELP) and not args:

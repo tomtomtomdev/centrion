@@ -313,11 +313,20 @@ menu will send.
 |---|---|
 | `ls` | live sessions: index, project, name, uptime, link |
 | `stop 2` / `stop all` | SIGTERM the runner, which SIGTERMs claude |
+| `power` / `power cancel` / `power set` | pmset's nightly shutdown schedule: show it, clear it, put it back (§8) |
 | `help` | the two tables above, and the directories currently in `~/Projects` |
 
 Anything else: reply with `help`. The tier-1 and tier-2 verbs are registered as the phone's `/`
 command menu by the bot itself (`setMyCommands`, at every startup) so they autocomplete there and
 cannot drift from what the parser understands — no BotFather `/setcommands` step.
+
+**`power` runs `launchd/power.sh` itself, not a session.** Keeping the Mac up overnight for a
+long job is one pmset command, and spawning a bypass-permissions Claude Code session to type it
+is the slowest and least predictable way to run it. The listener has no terminal for a password,
+so the interactive `sh launchd/power.sh` installs `/etc/sudoers.d/centrion-power`, which lets this
+user run exactly `pmset repeat cancel` and the one `pmset repeat shutdown …` line §8 sets, and
+nothing else. Until it is installed, `power cancel` answers `✗ sudo: a password is required`
+rather than hanging. `power off` is deliberately `help`: it reads as "switch the Mac off now".
 
 **Bare `claude` starts nothing.** It answers with the project list and waits for a second
 message. The cost is one extra tap; what it buys is that no bypass-permissions session can ever
@@ -520,7 +529,8 @@ its plist says `__HOME__` where it needs the home directory, and install.sh skip
 when that program is not installed yet. `launchd/power.sh` then sets pmset's repeating events,
 shutdown at 06:00 and wake-or-power-on at 08:45 every day. That is the one step that needs `sudo`,
 so it runs only when `pmset -g sched` differs. A LaunchAgent cannot power a Mac on, so this part
-is pmset's, not launchd's.
+is pmset's, not launchd's. The same run installs the sudoers rule `power` from the phone needs (§5), so
+that password is asked for at most once.
 
 The working day's `/loop /ticket-workflow` is on the same schedule. `com.tommy.ticket-workflow`
 runs `launchd/ticket-workflow.sh` at 09:15, which opens a headed Claude Code
@@ -585,7 +595,7 @@ then the LaunchAgents — so a new Mac is one command; `sh install.sh agent` (or
 ```sh
 all:      sh install.sh             # skills, mac-cleanup, then launchd/install.sh
 install:  sh launchd/install.sh     # writes __CHECKOUT__ and __HOME__ in, bootstraps each agent, then power.sh
-power:    sh launchd/power.sh --check   # pmset's schedule matches, and automatic login is on
+power:    sh launchd/power.sh --check   # pmset's schedule matches, automatic login is on, the phone can change it
 lock:     cat var/lockscreen.log        # did the last automatic login get locked
 lcmp:     launchctl print gui/$(id -u)/com.tommy.tt-lcmp-pull | head -30
 figma:    tail -f var/figma-spec.log            # one "received <file>" per Send, into ~/figma-specs

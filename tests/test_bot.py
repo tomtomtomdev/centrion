@@ -737,6 +737,77 @@ class TestWhatItSaysBack(Base):
             self.assertNotIn(os.path.expanduser("~"), self.reply_to(text))
 
 
+class TestPower(Base):
+    """§5's `power`: launchd/power.sh, run by the listener itself and never by a session."""
+
+    def setUp(self):
+        super().setUp()
+        self.ran = []
+        self.exit = 0
+        self.says = "power schedule matches"
+        patcher = mock.patch.object(bot.sys, "platform", "darwin")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def listener(self, tg=None, **kw):
+        def fake(argv):
+            self.ran.append(argv)
+            return subprocess.CompletedProcess(argv, self.exit, self.says)
+        kw.setdefault("power_sh", fake)
+        return super().listener(tg, **kw)
+
+    def reply_to(self, text):
+        tg = self.deliver(message(text))
+        self.assertEqual(len(tg.sent), 1, "no reply to %r" % (text,))
+        return tg.texts[0]
+
+    def test_each_form_runs_the_script_with_its_flag(self):
+        for text, flag in (("power", ["--check"]), ("power cancel", ["--cancel"]),
+                           ("power set", [])):
+            del self.ran[:]
+            self.reply_to(text)
+            self.assertEqual(self.ran, [["/bin/sh", bot.POWER_SH] + flag], text)
+
+    def test_no_session_is_started(self):
+        self.reply_to("power cancel")
+        self.assertEqual(self.sessions.records(), [])
+
+    def test_the_reply_is_what_the_script_said(self):
+        self.says = "power schedule cleared: no shutdown at 06:00:00\n"
+        self.assertEqual(self.reply_to("power cancel"),
+                         "power schedule cleared: no shutdown at 06:00:00")
+
+    def test_a_change_that_failed_is_marked(self):
+        self.exit, self.says = 1, "sudo: a password is required"
+        self.assertTrue(self.reply_to("power set").startswith("✗ "))
+
+    def test_a_check_that_differs_is_not_a_failure(self):
+        # --check exits 1 for "differs", which is an answer, not an error.
+        self.exit, self.says = 1, "power schedule differs"
+        self.assertEqual(self.reply_to("power"), "power schedule differs")
+
+    def test_a_hung_script_is_answered(self):
+        def hang(argv):
+            raise subprocess.TimeoutExpired(argv, bot.POWER_TIMEOUT)
+        tg = FakeTelegram([message("power cancel")])
+        listener = self.listener(tg, power_sh=hang)
+        listener.tick()
+        self.assertIn("did not finish", tg.texts[0])
+
+    def test_the_home_path_never_leaves(self):
+        self.says = "could not read %s/x" % os.path.expanduser("~")
+        self.assertNotIn(os.path.expanduser("~"), self.reply_to("power"))
+
+    def test_not_a_mac(self):
+        with mock.patch.object(bot.sys, "platform", "win32"):
+            got = self.reply_to("power cancel")
+        self.assertEqual(self.ran, [])
+        self.assertIn("not a Mac", got)
+
+    def test_the_script_is_the_one_install_runs(self):
+        self.assertTrue(os.path.isfile(bot.POWER_SH))
+
+
 class TestTheProjectList(Base):
     """`config.projects()` — the inverse of `resolve()`, and it must agree with it.
 

@@ -98,6 +98,18 @@ ERROR_PAUSE = 5
 SESSION_TIMEOUT = 45
 SESSION_POLL = 0.25
 
+#: §5's `power`: pmset's daily shutdown and power-on, read or changed without a session. The
+#: script is the one install.sh runs, so the phone and the terminal set the same schedule.
+POWER_SH = os.path.join(HERE, "launchd", "power.sh")
+
+#: `power` blocks the listener, like `stop`, and for the same reason: somebody is holding a
+#: phone waiting to hear whether the Mac will switch itself off tonight. power.sh runs sudo -n
+#: without a terminal, so a missing sudoers rule fails at once; this is for a pmset that hangs.
+POWER_TIMEOUT = 20
+
+#: The script's flag for each `power` target. Bare `power` only reads.
+POWER_ARGS = {None: "--check", commands.CANCEL: "--cancel", commands.SET: None}
+
 #: §4.6: how much of pty.log goes back when there is no link to send instead. It is almost
 #: always the actual error — §9.7's expired login most of all, which produces no other
 #: evidence anywhere.
@@ -124,6 +136,7 @@ MENU_TEXT = {
     commands.NEW: "new <name> — make a project directory and start a session in it",
     commands.LIST: "the live sessions",
     commands.STOP: "stop <n> · stop all — end one session, or all of them",
+    commands.POWER: "power · power cancel · power set — the nightly shutdown schedule",
     commands.HELP: "what this bot understands, and the projects",
 }
 COMMAND_MENU = [(verb, MENU_TEXT[verb]) for verb in commands.VERBS]
@@ -709,7 +722,7 @@ class Listener:
 
     def __init__(self, cfg, tg, started=None, offset_path=OFFSET, log=log, sleep=time.sleep,
                  sessions=None, newsid=None, clock=time.monotonic,
-                 timeout=SESSION_TIMEOUT, poll_every=SESSION_POLL):
+                 timeout=SESSION_TIMEOUT, poll_every=SESSION_POLL, power_sh=None):
         self.cfg = cfg
         self.tg = tg
         self.offset_path = offset_path
@@ -723,6 +736,10 @@ class Listener:
         self.clock = clock
         self.timeout = timeout
         self.poll_every = poll_every
+        # How `power` runs launchd/power.sh. A seam for the tests, which must never touch pmset.
+        self.power_sh = power_sh or (lambda argv: subprocess.run(
+            argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            universal_newlines=True, timeout=POWER_TIMEOUT, cwd=HERE))
         # One thread per session still coming up. Pruned as they finish, in watch().
         self.waiters = []
         # Sids forked and not yet on disk. §4.2 has this process returning to the poll the
@@ -850,6 +867,8 @@ class Listener:
             "new <name>               a new project directory, and a session in it\n"
             "ls                       the live sessions\n"
             "stop <n> · stop all      end one, or all of them\n"
+            "power                    the nightly shutdown and morning power-on\n"
+            "power cancel · power set clear that schedule, or put it back\n"
             "help                     this\n"
             "\n" + self.project_list())
 
@@ -871,7 +890,39 @@ class Listener:
         if intent.verb == commands.STOP:
             return self.halt(intent.target)
 
+        if intent.verb == commands.POWER:
+            return self.power(intent.target)
+
         return self.help()
+
+    def power(self, target):
+        """§5's `power`: launchd/power.sh, run here rather than by a session.
+
+        Changing the schedule is one pmset command, and spawning a Claude Code session with
+        permissions bypassed to type it would be the most expensive way to run it and the least
+        predictable. The script's own words are the reply — they already say what it did, and
+        what to do when it could not (no sudoers rule yet: run it once in a terminal).
+        """
+        if sys.platform != "darwin":
+            return "No power schedule here: it is pmset's, and this is not a Mac."
+        argv = ["/bin/sh", POWER_SH]
+        flag = POWER_ARGS[target]
+        if flag:
+            argv.append(flag)
+        try:
+            done = self.power_sh(argv)
+        except subprocess.TimeoutExpired:
+            self.log("power %s: power.sh did not finish in %ds" % (target or "", POWER_TIMEOUT))
+            return "✗ power.sh did not finish in %ds. Nothing is known to have changed." \
+                % POWER_TIMEOUT
+        except OSError as e:
+            self.log("power %s: could not run power.sh (%s)" % (target or "", e))
+            return "✗ Could not run power.sh."
+        text = HOME_RE.sub("~", (done.stdout or "").strip()) or "(power.sh said nothing)"
+        self.log("power %s: power.sh exited %d" % (target or "", done.returncode))
+        if target and done.returncode != 0:
+            return "✗ " + text
+        return text
 
     # -- the fleet -------------------------------------------------------------------------
 
