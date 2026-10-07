@@ -99,17 +99,26 @@ grep -l "^prd_page_id: \"<PRD_PAGE_ID>\"" .tuntun/plans/*.md 2>/dev/null
       `release_candidate/2.5.0` and `release_candidate/2.50.0`; `V2.5.1` → `2.5.1`.
    4. None or several → a checkpoint question listing the live RCs. It blocks every slice (no
       branch, no work), so an unanswered run stops after publishing the plan.
+Steps 3 and 4 read only and consume nothing from each other: dispatch both in one message, and
+draft (step 5) once both have returned.
+
 3. **Code map** — one `Explore` agent, "very thorough": where each PRD area lives today, what shape
    it is (VIP or legacy SwiftUI/MVVM/Combine), which Worker and endpoints feed it, which tests
    exist. It returns a table; the raw search stays out of this session. Spot-check key paths with
    `git ls-tree`.
-4. **Design** — Figma link from the PRD or `--figma`. Access denied → the PRD's embedded images are
-   the design source, and every UI slice is marked *unverified against Figma*. Record PRD-vs-design
-   conflicts as `D-n`.
+4. **Design** — one `general-purpose` agent: Figma link from the PRD or `--figma`. Access denied →
+   the PRD's embedded images are the design source, and every UI slice is marked *unverified
+   against Figma*. It returns the screens and the PRD-vs-design conflicts, recorded as `D-n`.
 5. **Draft the plan** at `.tuntun/plans/<KEY>-<slug>.md` using the shape below. Slice rules: one
-   verification per slice, dependency order, Tier per CLAUDE.md, every FR/AC claimed by a slice
-   (an AC no slice claims is a gap → an `OQ`/`Q-n`). A slice that is only partly unblocked is split
-   now (`S7a` ready part, `S7b` the part that waits on the API).
+   verification per slice, Tier per CLAUDE.md, every FR/AC claimed by a slice (an AC no slice
+   claims is a gap → an `OQ`/`Q-n`). A slice that is only partly unblocked is split now (`S7a`
+   ready part, `S7b` the part that waits on the API).
+   - **Deps are data, not habit.** Sy depends on Sx only if Sy consumes what Sx produces; "I would
+     do it first" is not an edge. Challenge every one.
+   - **Depend on the shape, not the build.** A slice that needs only another's model, protocol or
+     `TT*Api` contract depends on a small contract slice, not on the full implementation.
+   - Mark each edge **hard** (cannot start without it) or **soft** (can land flagged partial
+     without it), and write the **critical path** — the longest dep chain — under the table.
 6. **Run §3 now, up to and including step 6**, so the checkpoint below also carries every blocker
    §3 finds (an API doc that is already out, a newer PRD, Figma access). §3.7 does not ask again on
    this run.
@@ -139,26 +148,39 @@ figma: <url> (<accessible | not shared>)
 ---
 # [iOS] Implementation Plan — <KEY> / <title>
 1. What the PRD asks for · 2. How the code is shaped · 3. PRD vs design (D-n)
-4. Slices  — | # | Slice | Serves | Files | Verify | Tier | State | Blocked by |
+4. Slices  — | # | Slice | Serves | Files | Verify | Tier | Deps | State | Blocked by |
+   Critical path: S1 → S2 → S5
 5. Open questions (Q-n, each naming the slices it blocks)
 6. Decisions — dated answers, each naming the Q-n / D-n it closes
 ## Progress — | Slice | State | Commit | Test | Date |
 ```
 
-`Blocked by` is **typed**, so a resume can check it mechanically:
+`Deps` lists the slices whose output this one consumes, each marked hard or soft: `S2`, `S3?`
+(`?` = soft). A hard dep clears when that slice is DONE (has a commit on the branch); a soft one
+never holds a slice back.
+
+`Blocked by` holds what is **outside** the plan, and is **typed** so a resume can check it
+mechanically:
 
 | Type | Example | Clears when |
 |---|---|---|
 | `api:<what>` | `api:detail-by-period` | the API tech doc defines it (§3.2) |
 | `q:<Q-n>` | `q:Q-1` | §Decisions answers Q-n |
 | `design:<D-n\|figma>` | `design:D-1`, `design:figma` | a decision answers D-n / Figma opens for this account |
-| `after:<Sx>` | `after:S3` | Sx is DONE (has a commit on the branch) |
 | `prd:<OQ-n>` | `prd:OQ-1` | the PRD's new version answers it |
+
+A plan written before `Deps` existed carries `after:<Sx>` in `Blocked by`: on resume, move each
+into `Deps` as a hard dep and derive the critical path.
 
 ## 3 · Refresh every blocker (every run)
 
 1. **Flags first.** Each `--decide` → a dated row in §Decisions. `--api` → `api_doc`. `--figma` →
    `figma`.
+
+Steps 2–4 are independent reads: dispatch each one that has work as its own `general-purpose`
+agent, all in one message, each returning its findings only; this session applies them to the
+plan, in step order, once all have returned. Step 5 is where they join.
+
 2. **API tech doc.** If `api_doc` is empty, look for it: child pages of the PRD and of its parent
    (`tuntun jira wiki page search` for "API", "Tech Doc", "Contract", the ticket key, the feature
    name). Found → read it in full, add a `## API contract` section to the plan (endpoint, request,
@@ -171,8 +193,8 @@ figma: <url> (<accessible | not shared>)
    click in the user's own Figma view). Still denied → leave it.
 5. **Reconcile with git** (`/ios-next-slice` §3 logic): every slice → DONE / OPEN / IN FLIGHT from
    commits on the branch and the code itself, not from the plan's word.
-6. Recompute each slice's `State`: **READY** (no blocker left), **BLOCKED** (list what remains),
-   **DONE** (`<sha>`).
+6. Recompute each slice's `State`: **READY** (no `Blocked by` left and every hard dep DONE),
+   **BLOCKED** (list what remains), **DONE** (`<sha>`). Mirror the states into the todo list.
 7. **Resume only:** new blocking questions surfaced here → the run's one checkpoint (on a first run
    they went to §2.7). Unanswered → they stay blockers.
 
@@ -197,16 +219,18 @@ tuntun task list --ticket <KEY>
 `merge --ff-only` failing means this Mac and the remote both have commits the other lacks: stop
 and report both sides, never rebase or force past it.
 
-Record on the board, with `tuntun task plan --ticket <KEY> --branch <branch>`, **only the READY
-slices that have no row yet**, in plan order. Blocked slices get their row on the run that unblocks
+Record on the board, with `tuntun task plan --ticket <KEY>`, **only the READY slices that have no
+row yet**, in §5's pick order; keep each slice's piece id from its output for §5.1. Blocked slices get their row on the run that unblocks
 them — so `tuntun task next` never opens something that cannot be worked.
 
 ## 5 · Work the READY slices
 
-For each READY slice in plan order (re-evaluate `after:` blockers after every commit — S3 landing
-readies S4):
+One READY slice at a time, picked by: on the critical path first, then the one whose DONE readies
+the most slices, then the riskiest (unfamiliar API, legacy code, soft deps). Re-evaluate `Deps`
+after every commit — S3 landing readies S4:
 
-1. `tuntun task next` (it must open this slice's row; a mismatch → stop and report). Skip it for a
+1. `tuntun task next --id <piece id>` (it must open this slice's row; a mismatch → stop and
+   report). Skip it for a
    slice resumed from §0 — its row is already in progress.
 2. **Dispatch one slice agent** — a fresh `general-purpose` agent (never `fork`: inheriting this
    session is what the split exists to avoid), one per slice, never two at once. It is the
@@ -233,10 +257,19 @@ readies S4):
    > `<For a slice resumed from §0: the uncommitted diff is this slice's earlier attempt — hand it
    > to the implementer as a hypothesis to verify, not as done work.>`
    >
-   > Report back briefly: DONE or BLOCKED; the sha; files changed; the tests that went red →
-   > green by name; lint; the `/ios-review` and `@code-reviewer` verdicts; the Progress row you
-   > wrote; anything that contradicted the plan; for BLOCKED, the reason and whether it is a
-   > question for PM, BE or design.
+   > A transient failure (tool error, network, a flaky test) gets at most 3 attempts, changing
+   > the approach between them; the third → BLOCKED with the evidence.
+   >
+   > Report back in exactly this block, nothing else:
+   > ```
+   > slice: <id>
+   > status: DONE | BLOCKED(<reason>; question for PM | BE | design | none)
+   > sha: <short sha or none>
+   > files: <changed files>
+   > verified: <tests red → green by name; lint; /ios-review and @code-reviewer verdicts>
+   > progress_row: <the row you wrote>
+   > notes: <anything that contradicted the plan, or none>
+   > ```
 
 3. **Verify the close by reading, never by repairing:** `git log -1 --format='%h %s'` (on
    `<branch>`, subject `type(scope): [<KEY>] …`), `git status --short` (clean apart from the
@@ -244,11 +277,14 @@ readies S4):
    the row done. A gap — no commit, a dirty tree, a missing row — goes back to **the same** agent
    with `SendMessage`; fixing it here hides from the next resume that the slice did not close on
    its own.
-4. **DONE** → set the slice's `State` to DONE (`<sha>`) and re-evaluate `after:` blockers.
-   **BLOCKED** (red test, FINDINGS twice on one finding, a question only the user can answer) →
-   mark it BLOCKED with the reason, `tuntun task comment … --kind blocker`, and **go on to the
-   next READY slice that does not depend on it**. A question it surfaced becomes a `Q-n` in the
-   plan; the run's checkpoint has passed, so it is asked on the next run, not now.
+4. **DONE** → set the slice's `State` to DONE (`<sha>`) and re-evaluate `Deps`.
+   **BLOCKED** (red test, FINDINGS twice on one finding, a question only the user can answer,
+   three failed attempts) → mark it BLOCKED with the reason, `tuntun task comment … --kind
+   blocker`, and at once mark every slice that holds it as a **hard** dep, directly or further
+   down, BLOCKED (`dep <Sx> blocked`), so none of them waits on it this run. A slice holding it
+   only as a **soft** dep stays READY and lands flagged *partial*, naming what is missing. Then go
+   on to the next pick. A question it surfaced becomes a `Q-n` in the plan; the run's checkpoint
+   has passed, so it is asked on the next run, not now.
 
 Never run two `./run.sh` at once — one slice agent, and so one implementer, at a time.
 
@@ -261,7 +297,8 @@ falls behind the local plan. `--dry-run` skips all three.
 1. `git push -u origin <branch>` — via `/ios-git`.
 2. **No MR yet** → create it: source `<branch>`, target `<base>`, assignee `<assignee>`, title
    `feat(<scope>): [<KEY>] <feature title>`, description = the done slices with their ACs, the
-   blocked slices with their blockers, what was verified and what was not. Save the iid as `mr`.
+   partial and blocked slices with what they miss, what was verified and what was not — every
+   list in slice-id order, never the order slices finished. Save the iid as `mr`.
    **MR exists** → the push updates it; edit its description with the new done/blocked lists.
 3. **Update the wiki plan page** (REST GET `body.storage` → edit → PUT version+1 → re-GET to
    confirm; the CLI update 405s): `Plan metadata` (the `mr` iid, `api_doc`, `figma`), slice states,
@@ -269,7 +306,9 @@ falls behind the local plan. `--dry-run` skips all three.
 
 ## 7 · Report (CLAUDE.md "Communicating results")
 
-- **Done this run** — slices, commits, the MR link.
+Every per-slice list in slice-id order.
+
+- **Done this run** — slices, commits, the MR link; a *partial* slice says what it lacks.
 - **Still blocked** — one line per slice: what it waits on and who can give it (BE: API tech doc
   for X · PM: Q-n · Design: D-n / Figma access).
 - **Verified** — per slice, from its slice agent's report and §5.3's check: the tests red → green,
