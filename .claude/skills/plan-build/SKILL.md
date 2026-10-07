@@ -1,7 +1,7 @@
 ---
 name: plan-build
-description: From a goal to a finished, pushed project in one command — write a 5W1H plan (why, what, who, where, when, how), have it reviewed and fold the fixes in, split it into small slices, then run every slice in its own subagent test-first (red → green → build, run, full suite), tick its progress row, commit and push, and keep going until no slice is left. Use for "plan and build", "plan this then do it all", "5W1H plan", "slice it and implement everything", or a re-run on an existing plan to carry on where it stopped.
-argument-hint: "<goal, ticket or spec path> | <plan path to resume> [--plan-only] [--no-push] [--slice <id>]"
+description: From a goal to a finished, pushed project in one command — write a 5W1H plan (why, what, who, where, when, how — with the tech stack read from the repo and its locked versions), have it reviewed and fold the fixes in, split it into small slices, then run every slice in its own subagent test-first (red → green → build, run, full suite), tick its progress row, commit and push, and keep going until no slice is left. Use for "plan and build", "plan this then do it all", "5W1H plan", "slice it and implement everything", or a re-run on an existing plan to carry on where it stopped.
+argument-hint: "<goal, ticket or spec path> | <plan path to resume> [--repo <git url | remote name>] [--branch <name>] [--plan-only] [--no-push] [--slice <id>]"
 allowed-tools: Bash, Read, Grep, Glob, Edit, Write, Agent, SendMessage, TodoWrite, AskUserQuestion
 ---
 
@@ -31,8 +31,38 @@ Read before you write: the goal (the argument — a sentence, a ticket, a spec f
 `README`/`CLAUDE.md`, its layout, its test and build commands, and `git log --oneline -20`.
 A plan that names commands the repo does not have is a plan the first slice will contradict.
 
+**Find the tech stack from the repo, not from memory.** Read its manifests and lockfiles
+(`Package.swift`, `Podfile.lock`, `*.xcodeproj`, `package.json` + lockfile, `requirements*.txt`
+/ `pyproject.toml`, `go.mod`, `Cargo.toml`, `build.gradle*`, `Gemfile.lock`…), toolchain pins
+(`.swift-version`, `.nvmrc`, `.python-version`, `.tool-versions`, `xcode-select -p`), and the
+CI config. Take the **versions actually locked**, and the patterns the code already uses
+(architecture, UI framework, networking, persistence, DI, test framework, lint/format). A new
+slice that brings a second networking layer or test framework is a slice the review should have
+stopped. In an empty repo there is nothing to detect: propose a stack, with a reason per choice,
+and put it to the user before writing.
+
+**Fix the push target before planning, not at the first push.** Every slice pushes, so where
+it goes is settled once, here, and written into the plan — never re-guessed by a subagent.
+Resolve it in this order and stop at the first that answers:
+
+1. `--repo` — a remote name (`origin`, `gitlab`) or a URL. A URL that matches no existing remote
+   is added as a remote named after its host (`git remote add <name> <url>`), never by
+   rewriting `origin`.
+2. The plan's own *Where*, when resuming.
+3. The current branch's upstream (`git rev-parse --abbrev-ref @{u}`), else the only remote.
+4. More than one remote and nothing above picks one, or no remote at all → ask the user. For a
+   repo with no remote, offer to create one (`gh repo create` / `glab repo create`, private)
+   only on their yes.
+
+The branch: `--branch`, else the current branch unless it is the default branch, else
+`feat/<slug>` — slices never land straight on `main`. Check that branch out now (create it if
+new), so even the plan's first commit is on it. Then prove the remote answers:
+`git ls-remote --heads <remote>` must succeed (auth, network, URL). A remote that cannot be
+reached is a question for the user now, not a failure at slice 1.
+
 Ask the user only what the repo cannot answer and the plan cannot proceed without — usually
-scope boundaries or a deadline. Ask them together, in one `AskUserQuestion`, then write.
+scope boundaries, a deadline, or the stack of a new project — and any new dependency the plan
+wants to add. Ask them together, in one `AskUserQuestion`, then write.
 
 Write `docs/plans/<slug>.md` (follow the repo's own plan location if it has one), with:
 
@@ -54,17 +84,38 @@ section the review leans on hardest.
 Users of the result; owners/reviewers of the work; the agents doing the slices.
 
 ## Where
-Repo, branch, the modules/files touched, and the environments it runs in
+Push target: remote `<name>` → `<url>`, branch `<branch>` (from `<how it was resolved>`).
+Repo, the modules/files touched, and the environments it runs in
 (simulator, server, CI). New files named with their paths.
 
 ## When
 Order and dependencies, milestones, any deadline. Not dates per slice — the order is what matters.
 
 ## How
-Approach and key design decisions with their reason, data/interface shapes, risks and how
-each is retired, and the **commands**: the test command, the build command, how to run it.
-These three commands are what every slice's close is checked against.
+
+### Tech stack
+| Layer | Choice | Version | Source |
+|-------|--------|---------|--------|
+| Language / toolchain | e.g. Swift, Xcode | 5.10 / 16.0 | .swift-version |
+| UI / framework | … | … | … |
+| Architecture / patterns | e.g. MVVM + Coordinator, existing DI container | — | existing code |
+| Networking / persistence | … | … | … |
+| Tests | e.g. XCTest, snapshot lib | … | … |
+| Build / CI / lint | … | … | … |
+
+**New dependencies:** each one with its version, why the existing stack can't do it, and
+whether the user approved it — or "none".
+
+### Approach
+Key design decisions with their reason, data/interface shapes, risks and how each is retired.
+
+### Commands
+The test command, the build command, how to run it. These three are what every slice's
+close is checked against.
 ```
+
+*Source* says where each row came from (a manifest, a lockfile, the code, or "proposed" for a
+new project) — a stack row with no source is a guess.
 
 Commit the plan alone (`plan(<slug>): 5W1H`), so the review's changes show as their own diff.
 
@@ -77,6 +128,8 @@ the fix — against:
 
 - every success criterion in *Why* is testable, and nothing in *What* lacks one;
 - *How*'s commands actually exist and work in this repo (it may run them);
+- *Tech stack* matches the manifests and lockfiles row by row, versions included; the approach
+  uses the patterns the code already has; every new dependency is justified and approved;
 - *Where* names real files, and the touched code is what the plan says it is;
 - hidden dependencies, ordering mistakes, risks with no retirement, scope creep past *What*;
 - anything ambiguous enough that two implementers would build different things.
@@ -118,9 +171,9 @@ And `## Progress`:
 Set `Status: slicing done — next: S1`, commit (`plan(<slug>): slices`), and push. With
 `--plan-only`, stop here and report the plan's path and its slice list.
 
-**Branch.** Before the first push, if the current branch is the default branch, create
-`feat/<slug>` and work there; never push slices straight to `main`. Remember the branch in the
-plan's *Where*.
+**Push target.** The first push is `git push -u <remote> <branch>`, so the upstream is set
+once and every later push goes where the plan says. If the remote or branch in *Where* no longer matches
+`git remote get-url <remote>`, stop and ask — the plan is wrong or the repo moved.
 
 ## 4. Build one slice — in a subagent
 
@@ -132,10 +185,15 @@ decides what is next. So each slice runs in a **fresh subagent**, one per slice,
 The subagent has no history, so the prompt stands alone, and it carries pointers, not content:
 
 > You are implementing one slice of a plan. The plan is the record, not this prompt.
-> Repo: `<path>`. Branch: `<branch>`. Plan: `<plan path>`. Slice: **S<n> — <title>**, only that.
+> Repo: `<path>`. Push to: remote `<remote>` (`<url>`), branch `<branch>`. Plan: `<plan path>`. Slice: **S<n> — <title>**, only that.
 >
-> Read first: the plan's *Why*, *How* (especially its commands) and the slice's entry, plus
-> every section the entry points at; then the progress rows of the slices it depends on.
+> Read first: the plan's *Why*, *How* (especially its tech stack and commands) and the slice's
+> entry, plus every section the entry points at; then the progress rows of the slices it
+> depends on.
+>
+> Stay inside the plan's tech stack: its language and toolchain versions, its frameworks, the
+> patterns the code already uses. Adding a dependency, or upgrading one, that the stack table
+> does not list is a block to report, not a choice to make.
 >
 > Then, in this order, without skipping:
 > 1. **Red.** Write the slice's failing test(s). Run them and see them fail for the right
@@ -153,8 +211,9 @@ The subagent has no history, so the prompt stands alone, and it carries pointers
 >    say so in the row — the correction is a finding, never a silent fix.
 > 7. **Commit** code, tests and plan together as one commit: `<repo's commit style>`
 >    (e.g. `feat(<slug>): S<n> <what>`), message saying what the slice found, not what the
->    diff shows. Then **push** `<branch>`. Fill the commit column with the hash in a follow-up
->    commit `plan(<slug>): S<n> hash`, and push again.
+>    diff shows. Then **push** with `git push <remote> <branch>` — that remote and branch
+>    only, never a force-push, never another branch. Fill the commit column with the hash in a
+>    follow-up commit `plan(<slug>): S<n> hash`, and push again.
 >
 > If you are blocked — a decision that is the user's, a tool or credential you lack — stop
 > before committing and report the block; do not guess past it.
@@ -173,7 +232,8 @@ repairing:
 
 - `git log -2` shows the slice commit and the hash commit, on the right branch;
 - the plan's row for the slice is `done` and filled, and `Status:` names the next slice;
-- `git status` is clean, and `git status -sb` shows the branch is not ahead of its remote.
+- `git status` is clean, and `git ls-remote <remote> <branch>` returns the local `HEAD` hash —
+  the push landed on the plan's remote and branch, not merely somewhere.
 
 If something is off — a row half-filled, a push that did not land, a red suite — continue
 **the same subagent** with `SendMessage` to finish it; its context is the half-done slice.
@@ -193,6 +253,6 @@ and say so in every relay.
 
 When no slice is left: run the full suite and the build once more on the branch tip, check
 every *Why* success criterion against the slices that covered it, set
-`Status: done — <date>`, commit and push. Then report to the user: the plan's path, the branch,
+`Status: done — <date>`, commit and push. Then report to the user: the plan's path, the remote URL and branch,
 the slices with their commits, the run results, any criterion not met, any `blocked` row, and
 anything the slices found that the plan got wrong. Offer to open an MR/PR; don't open one unasked.
