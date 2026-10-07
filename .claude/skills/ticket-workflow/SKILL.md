@@ -26,7 +26,7 @@ reproducible, not reachable, needs a version, a blocked fix), Phase B has nothin
 the end of the pass. It never falls through to smoking some other ticket's MR.
 
 **This command never schedules itself.** No wakeup armed from inside, no cron job, no second lap,
-no sweep. One ticket, carried as far as it can go this pass, then the turn ends. Repetition is the caller's:
+no sweep. The one thing it leaves behind is `tt-board-wait`, a board watcher that ends the loop's quiet waits early. One ticket, carried as far as it can go this pass, then the turn ends. Repetition is the caller's:
 `/loop /ticket-workflow`. See *Looping is the caller's job*.
 
 **Unattended, every choice resolves to the recommended option.** Where a step offers a choice and
@@ -168,7 +168,7 @@ smoke agent holding the simulator. Starting a second pass then claims a second t
 first over `git checkout`, `install.sh`, the compiler and the simulator, and leaves two half-finished rows.
 So an invocation that finds a pass in progress **does nothing**: no board read, no claim, no smoke.
 
-A pass is in progress when **either** of these is true:
+A pass is in progress when **either** of these is true (a third case holds without one; see below):
 
 1. **This session still has an agent from an earlier pass running** — a fix agent, a reviewer or a
    smoke agent you spawned and whose completion notification has not yet arrived, or one you sent
@@ -191,9 +191,19 @@ agent's own completion notification is what actually wakes the loop. Its notific
 the continuation of **that** pass (close the row, move to the next step it was on), never as a cue to
 start a new one.
 
-Neither → start the pass: write the pass file, then run §0.
+**A board watcher is running** (`.tuntun/board-wait.pid` names a live process, see *Looping is the
+caller's job*) → no pass is in progress, but none is due either: the board has not changed since
+the last pass. This is `/loop`'s fallback wakeup firing before the watcher did. Hold quietly
+(`noop: true`, ~3600s) without a board read, and leave the watcher running.
 
 ```bash
+[ -f .tuntun/board-wait.pid ] && kill -0 "$(cat .tuntun/board-wait.pid)" 2>/dev/null && echo "HOLD: board watcher pid $(cat .tuntun/board-wait.pid)"
+```
+
+None of the three → start the pass: stop any leftover watcher, write the pass file, then run §0.
+
+```bash
+~/.tuntun/bin/tt-board-wait --stop
 mkdir -p .tuntun && echo "started $(date '+%F %T') slot=${TT_SLOT:-?}" > .tuntun/ticket-workflow.pass
 ```
 
@@ -1736,8 +1746,8 @@ belong to `/loop` and to the user, which is the whole point — a board read at 
 the time a handoff lands, and a self-armed schedule races the wrapper that is also firing.
 
 On the pipeline Mac the wrapper is itself scheduled, from the centrion checkout: launchd opens
-`/loop /ticket-workflow` in a Warp tab in `~/Projects/ttsecuritas-2` at 09:15 and ends it at 16:45
-(`launchd/ticket-workflow.sh`, SPEC.md §8). The 16:45 stop can land mid-pass. That is expected, not
+`/loop /ticket-workflow` in a Warp tab in `~/Projects/ttsecuritas-2` at 09:15 and ends it at 17:45
+(`launchd/ticket-workflow.sh`, SPEC.md §8). The 17:45 stop can land mid-pass. That is expected, not
 a crash to report: the next morning's first pass finds the batch in flight and finishes it (§1a),
 and the stop has already removed the pass file (§00).
 
@@ -1748,8 +1758,8 @@ ends:
   quickly. A pass that merged its ticket freed the slot, so the next one claims a new ticket. A `needs-rework` verdict is work queued for the
   very next pass's §1a, so it too means go back quickly, not wait for a person.
 - A pass whose ticket is waiting on market data, or that found nothing in flight *and* an empty
-  board, is a quiet hold (`noop: true`). That is
-  where "wait an hour" lives: **~3600s**, and the command itself waits for nothing.
+  board, is a quiet hold (`noop: true`, **~3600s**). Before the turn ends, start the board watcher
+  (below). The watcher, not the hour, is what wakes the loop.
 - A credential failure at §0/§1 should **stop** the loop, not sit in it — a dead token is
   indistinguishable from an empty board downstream and would idle for hours in silence.
 
@@ -1760,8 +1770,41 @@ still running has **not** ended the pass. Leave the file in place and the row op
 
 - A `sim-busy` smoke verdict is a quiet hold too (`noop: true`, ~1800s): another session has the
   simulator, and the next pass re-smokes the same MR once it is free.
-- An invocation that §00 held is a quiet hold (`noop: true`, ~1800s), not work done. It never
-  counts as a pass, and it never reads the board.
+- An invocation that §00 held is a quiet hold (`noop: true`, ~1800s, or ~3600s when the hold was
+  a running board watcher), not work done. It never counts as a pass, and it never reads the board.
+
+### The board watcher — how a quiet hold ends
+
+An hourly wakeup costs a model turn to learn the board is still empty, and leaves a new ticket waiting up
+to an hour. So a quiet hold on an empty board or on market data does not wait for the hour. As the
+last step of the report, after the pass file is removed, start the watcher with the **Bash tool's
+`run_in_background`** (timeout `7200000`), from the checkout:
+
+```bash
+~/.tuntun/bin/tt-board-wait            # empty board
+~/.tuntun/bin/tt-board-wait --market   # waiting on market data: also ends at 09:00 WIB on a weekday
+```
+
+It reads §1a's and §1's queries every 150s with `curl`, with no model turns, and exits when either result changes.
+A change means a ticket was added or removed, or a status, label or QA/design comment count changed.
+Its exit re-invokes the session. Handle it by exit code:
+
+| Exit | Means | Do |
+|---|---|---|
+| `0` | the board changed; the diff is in its output | run a pass now (`noop: false`) |
+| `4` | `--market`: the market opened | run a pass now; the waiting ticket can be smoked |
+| `3` | `--max` (6900s) or 17:45 with no change | run a pass; if it is still quiet, it re-arms the watcher |
+| `2` | Jira refused the token | **stop the loop**, as for a §0 credential failure |
+| `1` | no claim label, or the first read failed | report it; the fallback wakeup's pass hits the same fault at §0 and stops loudly |
+
+`/loop`'s ~3600s wakeup stays armed as the fallback in case the watcher hangs. When it fires with the
+watcher alive, §00 holds it. One watcher per checkout: starting one replaces the old one, and §00
+stops it before a pass begins. That way a pass's own label and comment edits never wake a second pass.
+It is not self-scheduling. It fires nothing on a timer and starts no pass itself. It only makes
+`/loop`'s wait end when there is work.
+
+A `sim-busy` hold and a §00 hold on a running agent do **not** start a watcher. Their wake is the
+other session freeing the simulator, or the agent's own notification.
 
 ## Report
 
@@ -1786,4 +1829,5 @@ re-reads:
 Never claim a gate, a build, a merge or a met `EXPECT:` that a handoff block does not report.
 Remove `.tuntun/ticket-workflow.pass` as the last step of the report — only once both phases are
 actually finished. And say
-that the pass has ended and scheduled nothing, so nobody assumes a pipeline is still armed.
+that the pass has ended and scheduled nothing, so nobody assumes a pipeline is still armed. Also say
+whether a board watcher was left running (`tt-board-wait`), because that is what will wake the loop.

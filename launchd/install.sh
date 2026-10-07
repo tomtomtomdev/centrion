@@ -13,7 +13,7 @@
 #   com.tommy.centrion.lock   locks the screen after an automatic login; copied, not bootstrapped
 #   com.tommy.tt-lcmp-pull    tt-lcmp-pull at 09:00, from the tuntun tooling in ~/.tuntun/bin
 #   com.tommy.ticket-workflow       09:15: claude in a Warp tab in ~/Projects/ttsecuritas-2, /loop /ticket-workflow
-#   com.tommy.ticket-workflow.stop  16:45: ends that loop (both are ticket-workflow.sh)
+#   com.tommy.ticket-workflow.stop  17:45: ends that loop (both are ticket-workflow.sh)
 #   com.tommy.figma-spec.serve      figma-spec --serve, always up: the Figma plugin's Send lands in ~/figma-specs
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)

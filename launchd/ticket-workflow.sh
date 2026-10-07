@@ -1,6 +1,6 @@
 #!/bin/sh
 # What com.tommy.ticket-workflow runs at 09:15: a headed Claude Code in a Warp tab, in the app
-# checkout, running `/loop /ticket-workflow` until com.tommy.ticket-workflow.stop ends it at 16:45.
+# checkout, running `/loop /ticket-workflow` until com.tommy.ticket-workflow.stop ends it at 17:45.
 #
 # Headed on purpose. The loop runs for hours unattended, and a Warp tab is where a person can look
 # in on it, scroll back through what it did, or type into it, which `claude -p` under launchd
@@ -11,7 +11,7 @@
 #   sh launchd/ticket-workflow.sh --stop [checkout]   end the loop's claude; the Warp tab stays
 #
 # Stopping mid-pass is safe by the pipeline's own design: a pass starts by finishing this Mac's
-# batch in flight, so tomorrow's first pass picks up whatever 16:45 interrupted. What the killed
+# batch in flight, so tomorrow's first pass picks up whatever 17:45 interrupted. What the killed
 # pass would have cleaned up on its way out is cleaned up here instead: its serve-sim helper, and
 # its .tuntun/ticket-workflow.pass, which would otherwise hold a restart for three hours (§00).
 #
@@ -30,7 +30,7 @@ PROMPT="/loop /ticket-workflow"
 CONFIG_DIR=$HOME/.warp/launch_configurations
 CONFIG=ticket-workflow.yaml
 
-END=1645   # HHMM; keep in step with com.tommy.ticket-workflow.stop.plist
+END=1745   # HHMM; keep in step with com.tommy.ticket-workflow.stop.plist
 
 stamp() { date '+%Y-%m-%d %H:%M:%S'; }
 
@@ -48,12 +48,13 @@ if [ -n "$STOP" ]; then
     done
     pkill -KILL -f "claude.*$PROMPT" 2>/dev/null && echo "$(stamp) killed a $PROMPT session that ignored SIGTERM"
     pkill -TERM -f serve-sim 2>/dev/null && echo "$(stamp) stopped the pass's serve-sim helper"
+    pkill -TERM -f tt-board-wait 2>/dev/null && echo "$(stamp) stopped the loop's board watcher"
     rm -f "$CHECKOUT/.tuntun/ticket-workflow.pass"
     echo "$(stamp) stopped $PROMPT"
     exit 0
 fi
 
-# launchd runs a missed calendar job when a sleeping Mac wakes, so a wake after 16:45 would fire
+# launchd runs a missed calendar job when a sleeping Mac wakes, so a wake after 17:45 would fire
 # the morning start in the evening. Past the end of the working day, it waits for tomorrow.
 # test(1) reads 0915 as decimal; only $(( )) would take it for octal.
 if [ "$(date +%H%M)" -ge $END ]; then

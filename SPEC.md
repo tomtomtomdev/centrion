@@ -540,9 +540,9 @@ for the pipeline so it never switches branches under the main checkout. It write
 Headed, not `claude -p`, so the day's loop can be watched, scrolled back and typed into. It starts
 nothing when a loop is already running (one session per Mac), waits up to 30 minutes for
 `daily-cleanup.sh` if mac-cleanup's 09:15 run is still going (otherwise it could shut the
-simulator down under the first build), and starts nothing after 16:45, since launchd fires a
+simulator down under the first build), and starts nothing after 17:45, since launchd fires a
 missed calendar job when a sleeping Mac wakes. `com.tommy.ticket-workflow.stop` runs it with
-`--stop` at 16:45: SIGTERM to the loop's claude, SIGKILL after a minute, then the `serve-sim`
+`--stop` at 17:45: SIGTERM to the loop's claude, SIGKILL after a minute, then the `serve-sim`
 helper and `.tuntun/ticket-workflow.pass` that the killed pass cannot clean up itself. Stopping
 mid-pass loses nothing, because every pass starts by finishing this Mac's batch in flight. Both
 log to `var/ticket-workflow.log`.

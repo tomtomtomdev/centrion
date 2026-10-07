@@ -9,7 +9,7 @@
 #   skills    .claude/skills/install.sh   ticket-workflow, ios-next-slice, feature-work, asking settings once
 #   cleanup   mac-cleanup/install.sh      daily-cleanup.sh and /mac-cleanup, no daily run unless asked
 #   figma     figma-to-claude/install.sh  figma-spec CLI; the plugin itself is one manual import
-#   agent     launchd/install.sh          the bot, the lock, tt-lcmp-pull, the 09:15–16:45 ticket loop,
+#   agent     launchd/install.sh          the bot, the lock, tt-lcmp-pull, the 09:15–17:45 ticket loop,
 #                                         the figma-spec receiver, then pmset's power schedule
 #
 #   sh install.sh                     all four
