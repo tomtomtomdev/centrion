@@ -1,18 +1,18 @@
 #!/bin/sh
 # Install this checkout's user-level skills into ~/.claude/skills, so every project on this Mac can
-# run them (ticket-workflow, ios-next-slice and feature-work work in the app repos, not in this one).
+# run them (ticket-workflow, ios-next-slice, feature-work and plan-build work in the app repos, not here).
 #
 # Each skill is a symlink back into the checkout, so a `git pull` here is the upgrade. A plain
 # directory or a command file of the same name in its way is moved aside to *.bak, never deleted.
 # A skill that ships a configure.sh is asked its settings the first time; after that, re-run the
 # skill's own configure.sh to change them.
 #
-#   sh .claude/skills/install.sh                  install ticket-workflow, ios-next-slice, feature-work
+#   sh .claude/skills/install.sh                  install ticket-workflow, ios-next-slice, feature-work, plan-build
 #   sh .claude/skills/install.sh <name> [name…]   install those skills instead
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 DEST="$HOME/.claude/skills"
-[ $# -gt 0 ] || set -- ticket-workflow ios-next-slice feature-work
+[ $# -gt 0 ] || set -- ticket-workflow ios-next-slice feature-work plan-build
 
 mkdir -p "$DEST"
 for name in "$@"; do
