@@ -153,8 +153,11 @@ them — one ttsecuritas project dir alone grew to 10 GB. The unit is the **sess
   scratchpad breaks that session mid-task. `--include-active` does **not** override this guard —
   nothing is rebuilt from a scratchpad, so there is no "cost it" trade to make.
 - After deleting, remove project-slug dirs left empty (`rmdir`, never `rm -rf`).
-- Leave everything at the top level of `/private/tmp/claude-$(id -u)` alone (`bash-edit-diff/`,
-  stray files) — those are Claude Code internals, not per-session scratch.
+- Only project-slug dirs are scanned — path-encoded names starting with `-`
+  (`-Users-…-Projects-ttsecuritas`). Leave everything else at the top level of
+  `/private/tmp/claude-$(id -u)` alone (`bundled-skills/`, `bash-edit-diff/`, stray dirs and
+  files) — those are Claude Code internals, not per-session scratch. `bundled-skills/` in
+  particular holds the built-in skills; deleting it breaks them.
 
 ## Optional scheduling (`$1` = `schedule` only)
 

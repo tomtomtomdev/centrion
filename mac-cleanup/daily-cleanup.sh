@@ -254,10 +254,11 @@ cat_claude_scratch() {
   banner "6. Claude Code scratchpads"
   local CR="/private/tmp/claude-$($ID -u)" proj s kb
   [ -d "$CR" ] || { echo "  (absent)"; finish; return 0; }
-  for proj in "$CR"/*/; do
+  # Project slugs are path-encoded and start with "-"; everything else at the top level
+  # (bundled-skills/, bash-edit-diff/, stray dirs and files) is Claude Code's, not session scratch.
+  for proj in "$CR"/-*/; do
     proj="${proj%/}"
     [ -d "$proj" ] || continue
-    [ "$(basename "$proj")" = "bash-edit-diff" ] && continue
     for s in "$proj"/*; do
       [ -d "$s" ] || continue
       if [ -n "$($FIND "$s" -mtime -1 -print -quit 2>/dev/null || true)" ]; then
