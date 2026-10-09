@@ -309,6 +309,7 @@ menu will send.
 | `claude beacon` | session in the `beacon` project |
 | `claude beacon fix the failing probe test` | same, then types that prompt and hits Enter |
 | `new scratchpad` | creates `~/Projects/scratchpad`, then starts a session there as above |
+| `claude .terminal beacon` | the same, with its window in Terminal: `.warp`, `.auto` and `.none` too (§12 slice 16) |
 
 **Tier 2 — enough to not need a laptop to clean up**
 
@@ -1544,9 +1545,11 @@ a directory this bot would start a session in — the parser can take it without
 filesystem, and a project can never be taken for it. After the project is too late: everything
 after the project is the prompt, and `claude beacon .terminal` must type `.terminal` into the
 session as it always has. Not `@terminal`, which §5's parse strips off the verb as a bot name.
-An unknown option — `.wrap` — is `help`, not a guess, for the reason bare `stop` is (§5): a
-message that nearly parses must not become an approximation of itself. An option with no project
-after it is `help` too.
+Only the four values are options. Any other word with a leading `.` — `.wrap`, `.ssh`, `../etc`
+— stays a project name, and §3 refuses it in the resolver with the help reply, so a typo starts
+nothing and is not guessed at (§5's rule for bare `stop`) without the parser growing a second
+copy of §3's rules. The option folds like `all` does. An option with no project after it is
+`help`.
 
 **The override travels as `--window <value>` on the runner's argv, and only when it was given.**
 The runner reads `terminal_app` itself (§4), so a spawn without the flag is byte-for-byte the
@@ -1556,8 +1559,8 @@ doubled: its buttons stay `claude <name>` and take the default, and an override 
 <n>` takes the default too; a claim already has one argument and does not need a second yet.
 
 *Red:* a table of parses — the option before the project, with and without a prompt, on `claude`
-and on `new`, an unknown option, an option with nothing after it, an option *after* the project
-staying in the prompt, the verb's case folding leaving the option alone; `Intent.window` is
+and on `new`, any other dotted word staying a project, an option with nothing after it, an option
+*after* the project staying in the prompt, the option folding with the verb; `Intent.window` is
 `None` when no option was given; the spawned argv carries `--window` only when overridden; the
 runner prefers `--window` to config; a non-`none` option off the Mac is refused without a spawn;
 a button still produces the identical `Intent` to the typed text; `help` and the `/` menu
@@ -1591,7 +1594,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 13 | a keyboard instead of a grammar | ☑ | **The slice succeeds by leaving no trace, which is also how it has to be proved.** `claude ttsecuritas-2` off a button at 20:33:47 is the same log line, the same intent and the same 3-second link as the typed message, because the button *is* the typed message — so the evidence that it worked is on the wire and in the shape of the code, not in bot.log. What only the real send could settle: Telegram takes `reply_markup` here as a nested JSON object, where every example in circulation writes it as JSON inside a string field — correct for a form-encoded call and wrong for this client, which posts a JSON body (§7). The design finding was the one the plan named: §3 permits a space in a directory name and the grammar splits on whitespace, so `My Project` would tap as `claude My` carrying the prompt `Project` — a refusal if nothing is called `My`, a session in the **wrong project** if something is. The filter is a round trip through `commands.parse` rather than a character rule of its own, for slice 11's reason: a second copy of §3 here is how two doors drift apart. Two things came from the keyboard being state Telegram holds rather than this bot: it survived the 17:37 listener restart with nothing sent, and a reply that has nothing to say about the menu must send *no* markup rather than an empty one, because an empty `keyboard` is the documented way to take a keyboard away — the obvious default would have removed the menu on every `ls`. §11's first rule bit as well: four assertions in this class (no `stop` button, no keyboard on `ls` or on an empty root, no token in the markup) are green over an absent keyboard, so one more test holds the others honest by asserting the keyboard beneath them is not empty. |
 | 14 | claiming a session the bot did not start | ☑ | **There is no way into a running session from outside it, and there does not need to be: the conversation is the session, not the process.** `--resume <id> --remote-control` carries the same `sessionId` and its context into a runner the bot owns (§9.14), so claiming is the ordinary §4 launch plus one argv pair — and ending the original, because the resume does not, and two processes on one transcript is what a claim must not leave. The registry at `~/.claude/sessions/<pid>.json` marks Remote Control by a `bridgeSessionId`, so *not remote* is the absence of a key, in a file Claude Code may reshape on any upgrade — hence a reader that skips what it does not recognise and a §14 check on the fields it reads. Only direct children of the root are offered, because `--resume` must run in the cwd the conversation was recorded under and the runner's re-check is `samefile` against the project's own directory; a session in `backend/account-service` is invisible rather than refused. Busy is refused up front *and* checked again at hand-over, because the gap between them is a whole session start. Run below the wire only (see the slice); the phone run is owed. |
 | 15 | which app the window opens in | ☑ | The app was already the only thing that differed between the two windows, so the slice is a name in config and one lookup in `attach.choose`; the `.command`, `open -a` and the socket did not change. **A runner given `none` would have opened a window:** `Runner.window` was a bool, and the string `"none"` is truthy — the one red test that was a *failure* rather than an error, and the reason the value is resolved to an app (or None) before `open_window` is reached. The test's own first green run missed a window for a duller reason: `open_window` writes `attach.command` into the session directory, swallows the OSError when there is none, and so a test without the directory saw no `open` and no error. Checked against this Mac's LaunchServices and the real `.telegram.json` (no key, so `auto` → Warp); the phone run — `terminal` with Warp installed — is owed. |
-| 16 | choosing the app for one session from the phone | ☐ | |
+| 16 | choosing the app for one session from the phone | ☑ | **The plan's own rule for a typo was wrong, and the existing tests said so.** It had `.wrap` as `help`, which meant reading every dotted word as a would-be option — and `../etc` and `.ssh` are dotted words, which slice 4's tests pin as project names for §3 to refuse in the resolver. The first cut swallowed `claude ../../etc` into `help`: still refused, but by a second copy of §3 in the parser, which the top of `commands.py` exists to forbid. So only the four values are options and everything else with a leading `.` is a project the resolver refuses; a typo still starts nothing and still gets the help. The flag is only an override: a spawn without one is the argv it always was, and the runner falls back to `terminal_app`. The phone run is owed. |
 
 ---
 

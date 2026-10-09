@@ -40,7 +40,8 @@ class Base(unittest.TestCase):
         self.assertEqual(got.verb, commands.HELP, "parse(%r) gave %r" % (text, got))
         # Help is the catch-all, so it must arrive empty — a leftover project or target here
         # would mean a caller could act on a message the parser did not actually understand.
-        self.assertEqual((got.project, got.prompt, got.target), (None, None, None),
+        self.assertEqual((got.project, got.prompt, got.target, got.window),
+                         (None, None, None, None),
                          "a help intent carried an argument: %r" % (got,))
         return got
 
@@ -308,7 +309,7 @@ class TestTheContract(Base):
         # downstream should need to know the class to read it.
         got = commands.parse("claude beacon fix it")
         self.assertIsInstance(got, tuple)
-        self.assertEqual(tuple(got), (commands.START, "beacon", "fix it", None))
+        self.assertEqual(tuple(got), (commands.START, "beacon", "fix it", None, None))
 
     def test_the_verb_is_always_one_of_the_five(self):
         for text in ("claude", "claude beacon", "new scratchpad", "ls", "stop 1", "stop all",
@@ -376,3 +377,58 @@ class TestClaiming(Base):
 
     def test_it_is_on_the_phone_menu(self):
         self.assertIn(commands.RC, commands.VERBS)
+
+
+class TestChoosingTheWindow(Base):
+    """§12 slice 16: `.terminal`, `.warp`, `.auto` or `.none` before the project picks the
+    window for that one session. A leading `.` because §3 refuses a project name that starts
+    with one, so the option and a project can never be read as each other."""
+
+    def window(self, text):
+        return commands.parse(text).window
+
+    def test_the_option_comes_before_the_project(self):
+        got = commands.parse("claude .terminal beacon")
+        self.assertEqual(got, commands.Intent(commands.START, "beacon", None, None, "terminal"))
+
+    def test_the_prompt_after_it_keeps_its_spacing(self):
+        got = commands.parse("claude .warp beacon fix  the\nprobe")
+        self.assertEqual((got.project, got.prompt, got.window),
+                         ("beacon", "fix  the\nprobe", "warp"))
+
+    def test_new_takes_it_too(self):
+        got = commands.parse("new .none scratchpad")
+        self.assertEqual(got, commands.Intent(commands.NEW, "scratchpad", None, None, "none"))
+
+    def test_every_value_is_an_option(self):
+        for value in ("auto", "warp", "terminal", "none"):
+            self.assertEqual(self.window("claude .%s beacon" % value), value)
+
+    def test_the_option_folds_like_the_verb(self):
+        self.assertEqual(self.window("CLAUDE .Terminal beacon"), "terminal")
+        self.assertEqual(self.window("/claude@centrion_bot .WARP beacon"), "warp")
+
+    def test_no_option_is_no_window_choice(self):
+        self.assertIsNone(self.window("claude beacon"))
+        self.assertIsNone(self.window("claude beacon fix it"))
+        self.assertIsNone(self.window("new scratchpad"))
+
+    def test_an_option_after_the_project_is_part_of_the_prompt(self):
+        got = commands.parse("claude beacon .terminal")
+        self.assertEqual((got.project, got.prompt, got.window), ("beacon", ".terminal", None))
+
+    def test_any_other_dotted_word_is_a_project_for_the_resolver_to_refuse(self):
+        # §3 refuses a leading `.` by its own rules; the parser must not get there first, and
+        # must not guess that `.wrap` meant `.warp`.
+        for name in (".wrap", ".iterm", ".terminalx", "../etc", "..", ".", ".ssh"):
+            got = self.assertIntent("claude %s beacon" % name, commands.START, project=name,
+                                    prompt="beacon")
+            self.assertIsNone(got.window)
+
+    def test_an_option_with_no_project_is_help(self):
+        for text in ("claude .terminal", "new .none", "claude .warp   "):
+            self.assertHelp(text)
+
+    def test_nothing_else_takes_it(self):
+        for text in ("ls .terminal", "stop .terminal", "rc .terminal 1", "power .terminal"):
+            self.assertHelp(text)

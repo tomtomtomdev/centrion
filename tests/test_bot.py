@@ -237,10 +237,11 @@ class FakeSessions(bot.Sessions):
         self.unstoppable = set()  # runner pids that outlive a SIGKILL, per §9.11
         self.stopped = []         # (sid, grace) per stop(), so §9.11's nesting is assertable
 
-    def start(self, sid, name, cwd, project, chat_id, prompt=None, trust=False, resume=None):
+    def start(self, sid, name, cwd, project, chat_id, prompt=None, trust=False, resume=None,
+              window=None):
         self.started.append({"sid": sid, "name": name, "cwd": cwd, "project": project,
                              "chat_id": chat_id, "prompt": prompt, "trust": trust,
-                             "resume": resume})
+                             "resume": resume, "window": window})
         if self.fail is not None:
             raise self.fail
         # The record says what this session was actually asked for. It used to say `beacon`
@@ -1424,9 +1425,10 @@ class TestSpawningForReal(unittest.TestCase):
         os.close(spare)
         self.addCleanup(os.close, 9)
 
-    def spawn(self, prompt=None):
+    def spawn(self, prompt=None, window=None):
         sessions = bot.Sessions(root=self.root, script=self.stub, log=lambda m: None)
-        pid = sessions.start("3f2a91", "beacon-3f2a", self.tmp, "beacon", ME, prompt)
+        pid = sessions.start("3f2a91", "beacon-3f2a", self.tmp, "beacon", ME, prompt,
+                             window=window)
         self.addCleanup(self.finish, sessions)
         deadline = time.time() + 30
         while time.time() < deadline and not os.path.exists(self.out):
@@ -1469,6 +1471,17 @@ class TestSpawningForReal(unittest.TestCase):
     def test_no_prompt_means_no_prompt_flag(self):
         _, _, got = self.spawn()
         self.assertNotIn("--prompt", got["argv"])
+
+    def test_a_window_choice_is_handed_to_the_runner(self):
+        # §12 slice 16: the runner reads terminal_app itself, so the flag is the override.
+        _, _, got = self.spawn(window="terminal")
+        argv = got["argv"]
+        self.assertEqual(argv[argv.index("--window") + 1], "terminal")
+
+    def test_no_window_choice_means_no_window_flag(self):
+        # Without one, the argv is today's byte for byte and the config decides.
+        _, _, got = self.spawn()
+        self.assertNotIn("--window", got["argv"])
 
     def test_the_lock_fd_does_not_travel_to_the_runner(self):
         """§8, verified on this box: a detached runner still held fd 9 and therefore still
@@ -3735,3 +3748,47 @@ class TestClaimingALocalSession(Base):
         listener.tick()
         self.settle(listener)
         self.assertEqual(self.sessions.started[0]["resume"], self.SECOND)
+
+
+class TestChoosingTheWindowFromThePhone(Base):
+    """§12 slice 16: `claude .terminal beacon` — the app for this one session."""
+
+    def test_the_choice_reaches_the_runner(self):
+        self.deliver(message("claude .terminal beacon fix it"))
+        started = self.sessions.started[0]
+        self.assertEqual((started["project"], started["prompt"], started["window"]),
+                         ("beacon", "fix it", "terminal"))
+
+    def test_new_carries_it_too(self):
+        self.deliver(message("new .none scratchpad"))
+        self.assertEqual(self.sessions.started[0]["window"], "none")
+
+    def test_no_choice_leaves_it_to_the_config(self):
+        self.deliver(message("claude beacon"))
+        self.assertIsNone(self.sessions.started[0]["window"])
+
+    def test_a_window_off_the_mac_is_refused_before_anything_starts(self):
+        with mock.patch.object(bot.sys, "platform", "win32"):
+            tg = self.deliver(message("claude .terminal beacon"))
+        self.assertEqual(self.sessions.started, [])
+        self.assertIn("Mac", tg.texts[0])
+
+    def test_none_off_the_mac_is_allowed(self):
+        with mock.patch.object(bot.sys, "platform", "win32"):
+            self.deliver(message("claude .none beacon"))
+        self.assertEqual(self.sessions.started[0]["window"], "none")
+
+    def test_an_unknown_choice_is_a_project_section_3_refuses(self):
+        tg = self.deliver(message("claude .wrap beacon"))
+        self.assertEqual(self.sessions.started, [])
+        self.assertIn("claude <project>", tg.texts[0])
+
+    def test_help_and_the_menu_offer_it(self):
+        got = self.deliver(message("help")).texts[0]
+        self.assertIn(".terminal", got)
+        self.assertIn(".terminal", bot.MENU_TEXT[commands.START])
+
+    def test_a_button_is_still_the_typed_message(self):
+        # Slice 13's buttons take the default: the same intent as typing `claude <name>`.
+        self.assertEqual(commands.parse(bot.BUTTON % "beacon"), commands.parse("claude beacon"))
+        self.assertIsNone(commands.parse(bot.BUTTON % "beacon").window)

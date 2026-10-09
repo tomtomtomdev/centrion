@@ -146,7 +146,8 @@ HANDED = {
 #: from what parse() understands the way a hand-typed BotFather /setcommands list would. Keyed by
 #: commands.VERBS, which is the list of what belongs in it; this is only what each one says.
 MENU_TEXT = {
-    commands.START: "claude <project> [text] — start a session (bare: list the projects)",
+    commands.START: "claude [.terminal|.warp|.none] <project> [text] — start a session (bare: "
+                    "list the projects)",
     commands.NEW: "new <name> — make a project directory and start a session in it",
     commands.LIST: "the live sessions",
     commands.STOP: "stop <n> · stop all — end one session, or all of them",
@@ -433,7 +434,8 @@ class Sessions:
         """That session's record, or None. §2: these two processes talk through files."""
         return session.read_meta(self.directory(sid))
 
-    def start(self, sid, name, cwd, project, chat_id, prompt=None, trust=False, resume=None):
+    def start(self, sid, name, cwd, project, chat_id, prompt=None, trust=False, resume=None,
+              window=None):
         """Fork a runner for this session and return its pid. Never waits for it (§4.2).
 
         `cwd` has already been through `config.resolve()` and goes through it again inside the
@@ -454,6 +456,10 @@ class Sessions:
         if resume:
             # §12 slice 14. Checked again by the runner where it becomes claude's argv.
             argv.extend(["--resume", resume])
+        if window:
+            # §12 slice 16. Only an override: the runner reads terminal_app itself, so a spawn
+            # without one is the argv it always was.
+            argv.extend(["--window", window])
 
         os.makedirs(self.root, exist_ok=True)
         # A list and no shell, which is the whole of the defence here: `project` and `prompt`
@@ -889,6 +895,7 @@ class Listener:
             "claude                   the projects below, and nothing else\n"
             "claude <project>         a session there\n"
             "claude <project> <text>  a session there, then type that\n"
+            "claude .terminal <project>  …with its window in Terminal (.warp, .auto, .none)\n"
             "new <name>               a new project directory, and a session in it\n"
             "ls                       the live sessions\n"
             "stop <n> · stop all      end one, or all of them\n"
@@ -1167,6 +1174,13 @@ class Listener:
         # cannot start is not a reason to leave an empty directory on the disk — and one this
         # bot made but never used is exactly the accident §5 gives `new` its own verb to
         # prevent, with the added insult that nothing here can delete it afterwards.
+        # §12 slice 16: a window is a Mac thing (§3's terminal_app), and saying so now beats a
+        # session that comes up without the window that was asked for.
+        if intent.window not in (None, config.NO_WINDOW) and sys.platform != "darwin":
+            self.say(chat_id, "A terminal window opens Warp or Terminal and is Mac only — "
+                              "send it without .%s, or with .none." % intent.window)
+            return "refused, window off the Mac"
+
         if self.full(chat_id):
             return "refused, at the cap"
 
@@ -1195,7 +1209,7 @@ class Listener:
         self.pending.add(sid)
         try:
             pid = self.sessions.start(sid, name, cwd, intent.project, chat_id, intent.prompt,
-                                      trust=making)
+                                      trust=making, window=intent.window)
         except Exception as e:
             self.pending.discard(sid)
             # The one failure with no transcript behind it: nothing was spawned, so nothing
@@ -1208,7 +1222,8 @@ class Listener:
             return "spawn failed"
 
         self.watch(chat_id, sid, intent.project, name, created=created)
-        return "session %s, runner pid %d" % (sid, pid)
+        return "session %s, runner pid %d%s" % (
+            sid, pid, ", window %s" % intent.window if intent.window else "")
 
     def watch(self, chat_id, sid, project, name, created=None, handover=None):
         """Wait for this session somewhere other than the poll loop. §4.2."""

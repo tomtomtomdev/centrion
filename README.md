@@ -48,7 +48,7 @@ supervisor (launchd on macOS, Task Scheduler on Windows)
   A restarted listener re-reads them and picks up where it left off.
 - The runner scrapes the session URL out of the terminal output and writes it to `meta.json`. The
   listener then sends it to your chat.
-- On macOS, `terminal_app` opens a window that mirrors each live session: `auto` (Warp, or Terminal.app without it), `warp`, `terminal` or `none`.
+- On macOS, `terminal_app` opens a window that mirrors each live session: `auto` (Warp, or Terminal.app without it), `warp`, `terminal` or `none`. `claude .terminal <project>` (or `.warp`, `.auto`, `.none`) overrides it for one session.
   You can attach by hand from any terminal with `session.py --attach <sid>`.
 
 | File | Role |

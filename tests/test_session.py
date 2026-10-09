@@ -38,6 +38,7 @@ import shutil
 import unittest
 from unittest import mock
 
+import config
 import session
 
 #: WINDOWS.md W1c. The tests that fork, open a pty or send a signal are the Mac's — they test
@@ -2286,3 +2287,32 @@ class TestThePosixTerminal(unittest.TestCase):
         terminal.close()
         self.assertFalse(terminal.alive())
         self.assertEqual(terminal.read(0.01), b"")
+
+
+class TestTheWindowFlag(unittest.TestCase):
+    """§12 slice 16: `--window` on the runner's argv beats `terminal_app`, and its absence
+    leaves `terminal_app` in charge."""
+
+    def window(self, *flags):
+        cwd = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cwd, True)
+        cfg = config.Config("t", frozenset([1]), cwd, "/bin/echo", 4, terminal_app="warp")
+        argv = ["session.py", "--cwd", cwd, "--name", "n", "--foreground", "--root", cwd]
+        with mock.patch.object(session.sys, "argv", argv + list(flags)), \
+                mock.patch.object(session.config, "load", return_value=cfg), \
+                mock.patch.object(session, "Runner") as runner, \
+                mock.patch.object(session.sys, "stderr"):
+            runner.return_value.run.return_value = session.ENDED
+            session.main()
+        return runner.call_args[1]["window"]
+
+    def test_the_flag_wins(self):
+        self.assertEqual(self.window("--window", "terminal"), "terminal")
+        self.assertEqual(self.window("--window", "none"), "none")
+
+    def test_without_it_the_config_decides(self):
+        self.assertEqual(self.window(), "warp")
+
+    def test_a_value_that_is_not_one_is_refused(self):
+        with self.assertRaises(SystemExit):
+            self.window("--window", "iterm")

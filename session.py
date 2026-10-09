@@ -902,6 +902,8 @@ def main():
     ap.add_argument("--root", default=SESSIONS, help="where session directories live")
     ap.add_argument("--resume", default=None, metavar="UUID",
                     help="carry on that conversation with Remote Control (`rc <n>` only)")
+    ap.add_argument("--window", default=None, choices=config.TERMINAL_APPS,
+                    help="which app opens a window onto it; defaults to terminal_app")
     ap.add_argument("--trust", action="store_true",
                     help="answer §9.3's trust dialog if the directory is empty (`new` only)")
     ap.add_argument("--foreground", action="store_true",
@@ -929,7 +931,7 @@ def main():
     runner = Runner(a.sid or os.urandom(3).hex(), os.path.abspath(os.path.expanduser(a.cwd)),
                     a.name, root=a.root, binary=cfg.claude_bin, project=a.project,
                     chat_id=a.chat_id, prompt=a.prompt, trust=a.trust,
-                    window=cfg.terminal_app, resume=a.resume)
+                    window=a.window or cfg.terminal_app, resume=a.resume)
     if a.foreground:
         print("session %s · %s" % (runner.sid, runner.dir), file=sys.stderr)
     state = runner.run()

@@ -31,6 +31,8 @@ help is what was asked for.
 """
 import collections
 
+import config
+
 # The seven intents, spelled as the words that produce them so a logged or printed intent reads
 # back as the message that made it.
 START = "claude"      # §5 tier 1: start a session (or, with no project, list the projects).
@@ -52,8 +54,13 @@ SET = "set"
 #: What the phone's `/` menu carries (§5). The listener owns the descriptions and registers them.
 VERBS = (START, NEW, LIST, STOP, RC, POWER, HELP)
 
-Intent = collections.namedtuple("Intent", "verb project prompt target")
-Intent.__new__.__defaults__ = (None, None, None)
+#: §12 slice 16: what opens a word before the project to choose the window for that session.
+#: §3 refuses a project name that starts with it, so neither can be read as the other.
+OPTION = "."
+
+#: `window` is a config.TERMINAL_APPS value from that option, or None to leave it to the config.
+Intent = collections.namedtuple("Intent", "verb project prompt target window")
+Intent.__new__.__defaults__ = (None, None, None, None)
 
 #: Shared because it is immutable and returned constantly. Always empty: a help intent that
 #: carried an argument would be a caller acting on a message nobody understood.
@@ -67,6 +74,16 @@ def _index(word):
     ValueError to int(). Listings number from 1, so 0 can never name anything.
     """
     return word.isascii() and word.isdigit() and int(word) >= 1
+
+
+def _option(word):
+    """Is `word` one of the window options — `.terminal`, `.warp`, `.auto`, `.none`?
+
+    Only those four. `.wrap`, `../etc` and `.ssh` start with a `.` too, and they stay project
+    names: §3 refuses every one of them, in the resolver, by its own rules. Reading them as a
+    mistyped option here would be a second copy of those rules (see the top of this module).
+    """
+    return word.startswith(OPTION) and word[len(OPTION):].lower() in config.TERMINAL_APPS
 
 
 def parse(text):
@@ -104,8 +121,16 @@ def parse(text):
             # such answer available: every default it could pick is a directory nobody asked
             # for, so it is help.
             return Intent(START) if verb == START else _HELP
+        window = None
+        if _option(args[0]):
+            # §12 slice 16: `.terminal` before the project. A keyword, so it folds the way
+            # `all` does. With no project after it there is nothing to start, so it is help.
+            window = args[0][len(OPTION):].lower()
+            args = args[1].split(None, 1) if len(args) > 1 else []
+            if not args:
+                return _HELP
         prompt = args[1].rstrip() if len(args) > 1 else ""
-        return Intent(verb, args[0], prompt or None)
+        return Intent(verb, args[0], prompt or None, window=window)
 
     if verb == RC:
         # Bare `rc` only lists. `rc <n>` claims one, and nothing else is a claim: there is no
