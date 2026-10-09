@@ -27,6 +27,7 @@ link pushed to you**. See [SPEC.md §1](SPEC.md#1-why-this-shape).
 | `new scratchpad` | creates `<projects_root>/scratchpad`, answers the trust dialog, starts a session |
 | `ls` | live sessions: index, project, name, uptime, link |
 | `stop 2` / `stop all` | ends one session, or all of them |
+| `rc` / `rc 2` | lists the Claude Code sessions running in a terminal without Remote Control; `rc 2` carries that conversation on with a link and ends it in the terminal (only when idle) |
 | `help` | the commands, and the current project list |
 
 A leading `/` works too. The bot registers these as Telegram's command menu each time it starts.

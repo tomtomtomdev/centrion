@@ -9,7 +9,7 @@ servers, your git checkouts, permissions already bypassed.
 The bot is a **launcher**, not a bridge. It does not relay conversation. Once the link comes
 back, Remote Control carries everything; Telegram's job is done.
 
-Status: **slices 0-11 and 13 built, and every verb has now been driven from a phone —
+Status: **slices 0-11, 13 and 14 built, and every verb has now been driven from a phone —
 the last one from a button.** `claude <project>` starts a session, `new <name>` creates the
 project first and answers §9.3's trust dialog for it, `ls` lists them, `stop <n>` and `stop all`
 end them, `max_sessions` refuses the one past the cap, and §4's reconciliation pass clears the
@@ -314,6 +314,7 @@ menu will send.
 |---|---|
 | `ls` | live sessions: index, project, name, uptime, link |
 | `stop 2` / `stop all` | SIGTERM the runner, which SIGTERMs claude |
+| `rc` / `rc 2` | terminal sessions without Remote Control; claim one — resume it here, end it there (§12 slice 14) |
 | `power` / `power cancel` / `power set` | pmset's nightly shutdown schedule: show it, clear it, put it back (§8) |
 | `help` | the two tables above, and the directories currently in `~/Projects` |
 
@@ -945,6 +946,22 @@ All verified 2026-09-12 unless noted.
     recognising it in one step instead of a morning: no bytes on the pty, in a repository, under
     launchd, with a shell-run `launchd/bot.sh` unaffected.
 
+14. **`--resume <id> --remote-control` claims a conversation, and does not end the one it
+    claims.** *Verified 2026-10-09 against v2.1.282*, in `~/Projects/probe` under two ptys: a
+    plain `claude` was told a word and went idle; `claude --resume <its sessionId>
+    --remote-control spike --dangerously-skip-permissions` reached a link in seconds, recalled the
+    word, and its `~/.claude/sessions/<pid>.json` carried the **same `sessionId`** plus a
+    `bridgeSessionId` — the conversation is the same one, not a copy. The original stayed alive
+    and idle beside it, unaware, with nothing new on its screen: two processes, one transcript,
+    which is why slice 14 ends the original rather than leaving it. And **the registry outlives
+    a process that did not exit cleanly**: after the spike's two were ended, both `<pid>.json`
+    files were still there, so a file in `~/.claude/sessions/` says a session *was* started,
+    never that it is running — §4's pid and start-time check is the only thing that says that.
+    An idle session given SIGTERM exits in **1.1–1.2s and removes its own file** — *if* something
+    is reading its terminal. One whose pty nobody drains blocks on its own shutdown output and
+    never exits; a terminal app always drains, so this bites only a harness, but it cost the
+    run step two false `would not end`s before it was understood.
+
 ---
 
 ## 10. Security
@@ -1405,6 +1422,65 @@ removed it. §11's warning earned a mention too: four of this class's assertions
 button, no keyboard on `ls`, no keyboard for an empty root, no token in the markup — hold
 trivially over no keyboard at all, so one more test asserts the keyboard under them is not empty.
 
+### Slice 14 — claiming a session the bot did not start
+
+A session started at the desk in a terminal has no Remote Control, and walking away from the desk
+leaves it there. Typing `/rc` into it would do, but only from that terminal: the bot does not own
+its pty, typing into Terminal or iTerm needs an Accessibility grant (§9.2's TCC, again) and
+breaks with every focus change, and `/tmp/cc-socks/<pid>.sock` speaks a peer protocol nobody
+documented. So the bot does not reach into the session. It **reads Claude Code's own registry to
+find it, and resumes its conversation under a runner of its own**:
+`claude --resume <sessionId> --remote-control <name> --dangerously-skip-permissions` in the
+session's `cwd`, which from there on is the ordinary §4 launch.
+
+**The registry is `~/.claude/sessions/<pid>.json`, one file per live Claude Code process.** It
+records `pid`, `procStart`, `sessionId`, `cwd`, `kind`, `entrypoint`, `name` and `status`
+(`busy`/`idle`), and gains `bridgeSessionId` (`session_01…`) when Remote Control is on — so
+*a session without Remote Control* is a file with `kind:"interactive"`, no `bridgeSessionId`,
+and a pid that is alive and was started when the file says (§4's pid-reuse rule). Every file is
+untrusted input: malformed, half-written, or of a shape a future version invented is a skip, never
+a crash in the poll loop.
+
+| Message | Effect |
+|---|---|
+| `rc` | the claimable sessions — index, project, name, busy/idle, age — as a list and a keyboard; starts nothing |
+| `rc 2` | claims the second one: resume it under a runner, reply with the link, end the original |
+
+**Claiming ends the original, and only when it is idle.** Two processes on one conversation is a
+transcript with two writers, and a fork (`--fork-session`) is two diverging copies of the same
+work — neither is what *claim* means. So the claim is refused while the session is `busy` (say
+so, and try again when its turn ends), and otherwise the original gets SIGTERM after its pid
+and `procStart` are re-checked, once the resumed session's link has come back. A claim whose link
+never comes leaves the original alone.
+
+The checks are the ones every other verb already meets: §10.1's allowlist, `cwd` resolved under
+`projects_root` by §3's rules (a session in `~/Documents` is not listed, let alone claimed),
+`sessionId` must parse as a UUID before it reaches an argv, §4's `max_sessions` counts the claim,
+and the list never carries a prompt or a line of the transcript — only what the registry says
+about the process.
+
+*Spike, done 2026-10-09 (§9.14):* `--resume <id> --remote-control` reaches a link, keeps the
+`sessionId` and its context, and leaves the original running beside it — so the claim has to end
+it — and a registry file outlives its process.
+*Red:* a session with a `bridgeSessionId` is not listed; a dead pid, or a live pid with another
+`procStart`, is not listed; a `cwd` outside `projects_root` is not listed; a malformed registry
+file is skipped; `rc` alone starts nothing; `rc 2` passes that `sessionId` and that `cwd` to the
+runner; a non-UUID `sessionId` is refused; a busy session is refused; the claim counts against
+`max_sessions`; the original is signalled only after `live`, and only if its pid still matches.
+*Green:* `local.py` (the registry reader), an `RC` verb in `commands.py`, `resume=` on
+`session.claude_argv`, and the claim in `bot.py` on the existing launch path.
+*Run:* `claude` in a terminal in a project, `rc` from the phone, claim it, carry on the
+conversation from the phone, and see the terminal session end.
+
+**Outcome, below the wire (2026-10-09, v2.1.282).** A plain `claude` under a pty in
+`~/Projects/probe`, the real registry, the real `Listener` and a real runner, with only Telegram
+faked: `rc` listed it third, after two of this box's own busy sessions, with `rc 1`–`rc 3` as
+buttons; `rc 3` reached a link in two seconds and the reply read `■ the terminal session (pid
+77793) ended; it carries on here`. The two runs before that said `would not end`, and both were
+the harness — the first held the original's pty without reading it (§9.14), the second never
+reaped its own child, which left a zombie that `kill(pid, 0)` answers for. The phone run is still
+owed.
+
 ---
 
 ## 13. Progress
@@ -1427,6 +1503,7 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 11 | new projects from the phone | ☑ | **§9.3 was true, and the detail that decides the code is the one nobody could have guessed: the trust dialog's default selection is `No, exit`.** The obvious answer — press Enter, it is a confirmation — ends the session. So the runner sends Down, then checks that the marker moved onto `Yes, I trust this folder`, and only then confirms; a reworded or reordered dialog is left hanging, which is the old behaviour and honest, rather than confirmed blind. The matching had its own trap, the same shape as §9.5's: the panel renders words with `CSI <n> G` cursor jumps instead of spaces, so the stripped transcript reads `yes,itrustthisfolder` and any matcher written against what a human sees matches nothing. Answering is one-time — Claude Code writes `hasTrustDialogAccepted` for that path, verified by a second session coming straight up — which is what makes `new x` then `claude x` work tomorrow. The permission to answer it is deliberately split across both processes: the listener passes `--trust` only for `new`, the runner answers only if the directory is empty when it starts, and `new beacon` on an existing repository therefore behaves exactly like `claude beacon`. Two findings from `new` being the first verb that writes rather than reads: a control character in a name is now refused by *both* verbs (there is no delete verb here, so a directory called `red<ESC>[31m` is one nobody can remove from a phone), and the cap is now checked *before* the project is resolved, because a directory created for a session that is then refused is precisely the empty repository §5 gives this verb its own word to prevent. The fake `claude` the pty tests run against cost an hour to the oldest trap in this file: it mixed `select()` with a buffered reader, so it took all three bytes of an arrow key off the kernel to return one, then waited out its idle timeout on a terminal that had already answered it. Run step done twice: below the wire first, then **from the phone at 16:24** — `new scratchpad`, dialog answered one second after the spawn, link on the phone four seconds after the message, `ls`, `stop`, and the directory still there and still empty afterwards. The trust flag is now recorded for it, which is the property that makes tomorrow's `claude scratchpad` ordinary. *Corrected on Windows, 2026-10-03, WINDOWS.md W4e's phone run:* **that last sentence is the one thing in this row that is not true, and the error is the inference rather than the observation.** Tomorrow's `claude scratchpad` is indeed ordinary — measured, 2s and 3s, twice — but `hasTrustDialogAccepted` reads `False` throughout on this box: before the session, during it, and after a clean exit. The flag is not recorded and is not what makes it work. What the dialog tracks is whether `~/.claude.json` holds an *entry* for the path at all; the first session creates one whatever the answer, and a path with an entry is never asked again. Emptiness is not it either: the directory came up in 2s with a file deliberately planted in it. The consequence the Mac never had to face is in WINDOWS.md's Decisions list — a project with **no** entry cannot be started from a phone at all, because the only surface that grants trust is behind a link that untrusted projects never produce. |
 | 12 | the failure that explains itself | ☐ | **Planned.** §8 stands on evidence of working rather than of being understood, and §14's way to change that — `sample` the parked pid while it is still hung — is an instruction no person can follow: the failure is a 45s timeout on a phone, and the process is killed or gone by the time anyone reaches the machine. The slice does not explain §9.13; it makes the bot take the capture an explanation would need, on the one path that has already failed. |
 | 13 | a keyboard instead of a grammar | ☑ | **The slice succeeds by leaving no trace, which is also how it has to be proved.** `claude ttsecuritas-2` off a button at 20:33:47 is the same log line, the same intent and the same 3-second link as the typed message, because the button *is* the typed message — so the evidence that it worked is on the wire and in the shape of the code, not in bot.log. What only the real send could settle: Telegram takes `reply_markup` here as a nested JSON object, where every example in circulation writes it as JSON inside a string field — correct for a form-encoded call and wrong for this client, which posts a JSON body (§7). The design finding was the one the plan named: §3 permits a space in a directory name and the grammar splits on whitespace, so `My Project` would tap as `claude My` carrying the prompt `Project` — a refusal if nothing is called `My`, a session in the **wrong project** if something is. The filter is a round trip through `commands.parse` rather than a character rule of its own, for slice 11's reason: a second copy of §3 here is how two doors drift apart. Two things came from the keyboard being state Telegram holds rather than this bot: it survived the 17:37 listener restart with nothing sent, and a reply that has nothing to say about the menu must send *no* markup rather than an empty one, because an empty `keyboard` is the documented way to take a keyboard away — the obvious default would have removed the menu on every `ls`. §11's first rule bit as well: four assertions in this class (no `stop` button, no keyboard on `ls` or on an empty root, no token in the markup) are green over an absent keyboard, so one more test holds the others honest by asserting the keyboard beneath them is not empty. |
+| 14 | claiming a session the bot did not start | ☑ | **There is no way into a running session from outside it, and there does not need to be: the conversation is the session, not the process.** `--resume <id> --remote-control` carries the same `sessionId` and its context into a runner the bot owns (§9.14), so claiming is the ordinary §4 launch plus one argv pair — and ending the original, because the resume does not, and two processes on one transcript is what a claim must not leave. The registry at `~/.claude/sessions/<pid>.json` marks Remote Control by a `bridgeSessionId`, so *not remote* is the absence of a key, in a file Claude Code may reshape on any upgrade — hence a reader that skips what it does not recognise and a §14 check on the fields it reads. Only direct children of the root are offered, because `--resume` must run in the cwd the conversation was recorded under and the runner's re-check is `samefile` against the project's own directory; a session in `backend/account-service` is invisible rather than refused. Busy is refused up front *and* checked again at hand-over, because the gap between them is a whole session start. Run below the wire only (see the slice); the phone run is owed. |
 
 ---
 
@@ -1448,6 +1525,12 @@ Not slices — things that stay true after the build.
   in 3.0s. The direction is the finding — 2.1.263 is **older** than the 2.1.269/270 everything
   else here was verified against, because the box is on the homebrew build now (§9.8). So
   "after any upgrade" is the wrong half of the rule: it is after any *change*.
+- **After any Claude Code change, check the registry slice 14 reads.** `~/.claude/sessions/
+  <pid>.json` must still carry `pid`, `sessionId`, `cwd`, `kind`, `status`, `startedAt`, and
+  `bridgeSessionId` only on a Remote Control session. If a field moves, `rc` quietly lists
+  nothing — the safe failure, and a silent one. One line:
+  `python3 -c "import config,local;print(local.claimable(config.load().projects_root))"` with a
+  plain `claude` open in a project.
 - `python3 bot.py --whoami` stays the way `allowed_chat_ids` gets filled in, as `notify.py`
   already does it.
 - `tail -f var/bot.log` is the first thing to look at when the phone gets no reply; a silent
@@ -1494,4 +1577,5 @@ what would have to change to reopen it.
 | What the menu's buttons carry | Projects, `ls` and `help` — never `stop all`, and never a bare project name without its verb (§12 slice 13) | The keyboard grows a verb whose worst misreading is recoverable; `stop all` is not one of those. |
 | Creating projects from the phone | A separate `new <name>` verb; `claude <unknown>` stays a typo (§5, §12 slice 11) | A mistyped name creating an empty repository turns out to be harmless, which it is not while every session bypasses permissions. |
 | Answering §9.3's trust dialog | On the PTY, and only for a directory this bot created *and* finds empty — never by writing `hasTrustDialogAccepted` into `~/.claude.json` (§9.3) | Claude Code grows a flag that means "this directory is trusted", or stops rewriting `~/.claude.json` from every live process, which is what makes seeding it a race today. |
+| Claiming a terminal session (§12 slice 14) | Resume it under a runner and end the original once idle — never type into its terminal, never fork it | Claude Code documents a way to turn Remote Control on in a running session from outside it. |
 | Runtime | System `/usr/bin/python3`, stdlib only (§3) | Something here genuinely needs a third-party package, which nothing does yet. |

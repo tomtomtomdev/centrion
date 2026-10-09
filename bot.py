@@ -58,6 +58,7 @@ import time
 
 import commands
 import config
+import local
 import session
 import telegram
 
@@ -128,6 +129,19 @@ MENU_MAX = 12
 #: `beacon`, which §5 answers with `help`, and the phone would look broken.
 BUTTON = commands.START + " %s"
 
+#: §12 slice 14: what a claim button says. An index, unlike BUTTON, because a terminal session
+#: has no name of its own that the grammar could carry.
+CLAIM_BUTTON = commands.RC + " %d"
+
+#: What the phone hears about the terminal session a claim took over. §12 slice 14, §9.14.
+HANDED = {
+    local.ENDED: "■ the terminal session (pid %d) ended; it carries on here",
+    local.GONE: "the terminal session (pid %d) had already gone",
+    local.BUSY: "⚠ the terminal session (pid %d) was busy and is still running — end it there "
+                "when its turn is done, or two copies will write one conversation",
+    local.ALIVE: "⚠ the terminal session (pid %d) would not end — two copies are running",
+}
+
 #: §5: the phone's `/` menu, registered with setMyCommands at every startup so it can never drift
 #: from what parse() understands the way a hand-typed BotFather /setcommands list would. Keyed by
 #: commands.VERBS, which is the list of what belongs in it; this is only what each one says.
@@ -136,6 +150,7 @@ MENU_TEXT = {
     commands.NEW: "new <name> — make a project directory and start a session in it",
     commands.LIST: "the live sessions",
     commands.STOP: "stop <n> · stop all — end one session, or all of them",
+    commands.RC: "rc · rc <n> — claim a terminal session: carry it on from here",
     commands.POWER: "power · power cancel · power set — the nightly shutdown schedule",
     commands.HELP: "what this bot understands, and the projects",
 }
@@ -418,7 +433,7 @@ class Sessions:
         """That session's record, or None. §2: these two processes talk through files."""
         return session.read_meta(self.directory(sid))
 
-    def start(self, sid, name, cwd, project, chat_id, prompt=None, trust=False):
+    def start(self, sid, name, cwd, project, chat_id, prompt=None, trust=False, resume=None):
         """Fork a runner for this session and return its pid. Never waits for it (§4.2).
 
         `cwd` has already been through `config.resolve()` and goes through it again inside the
@@ -436,6 +451,9 @@ class Sessions:
             argv.extend(["--prompt", prompt])
         if trust:
             argv.append("--trust")
+        if resume:
+            # §12 slice 14. Checked again by the runner where it becomes claude's argv.
+            argv.extend(["--resume", resume])
 
         os.makedirs(self.root, exist_ok=True)
         # A list and no shell, which is the whole of the defence here: `project` and `prompt`
@@ -722,7 +740,8 @@ class Listener:
 
     def __init__(self, cfg, tg, started=None, offset_path=OFFSET, log=log, sleep=time.sleep,
                  sessions=None, newsid=None, clock=time.monotonic,
-                 timeout=SESSION_TIMEOUT, poll_every=SESSION_POLL, power_sh=None):
+                 timeout=SESSION_TIMEOUT, poll_every=SESSION_POLL, power_sh=None,
+                 claimable=None, hand_over=None):
         self.cfg = cfg
         self.tg = tg
         self.offset_path = offset_path
@@ -740,6 +759,10 @@ class Listener:
         self.power_sh = power_sh or (lambda argv: subprocess.run(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             universal_newlines=True, timeout=POWER_TIMEOUT, cwd=HERE))
+        # §12 slice 14's two seams onto ~/.claude/sessions: what `rc` lists, and ending the
+        # terminal session a claim took over. Tests must never signal a real process.
+        self.claimable = claimable or (lambda: local.claimable(self.cfg.projects_root))
+        self.hand_over = hand_over or local.end
         # One thread per session still coming up. Pruned as they finish, in watch().
         self.waiters = []
         # Sids forked and not yet on disk. §4.2 has this process returning to the poll the
@@ -854,6 +877,8 @@ class Listener:
             return self.buttons()
         if intent.verb == commands.START and intent.project is None:
             return self.buttons()
+        if intent.verb == commands.RC and intent.target is None:
+            return self.claim_buttons()
         return None
 
     def help(self):
@@ -867,6 +892,7 @@ class Listener:
             "new <name>               a new project directory, and a session in it\n"
             "ls                       the live sessions\n"
             "stop <n> · stop all      end one, or all of them\n"
+            "rc · rc <n>              terminal sessions here: list them, or carry one on\n"
             "power                    the nightly shutdown and morning power-on\n"
             "power cancel · power set clear that schedule, or put it back\n"
             "help                     this\n"
@@ -889,6 +915,10 @@ class Listener:
 
         if intent.verb == commands.STOP:
             return self.halt(intent.target)
+
+        if intent.verb == commands.RC:
+            # Only bare `rc` reaches this line; `rc <n>` is answered when its session is.
+            return self.terminal_listing()
 
         if intent.verb == commands.POWER:
             return self.power(intent.target)
@@ -1036,6 +1066,79 @@ class Listener:
 
     # -- starting one ----------------------------------------------------------------------
 
+    def full(self, chat_id):
+        """§10.6's cap, said to the phone when it is reached. True means refuse.
+
+        The union is the point — see self.pending.
+        """
+        running = set(r.get("sid") for r in self.fleet()) | self.pending
+        if len(running) < self.cfg.max_sessions:
+            return False
+        self.say(chat_id, "%d of %d sessions already running. `ls` to see them, "
+                          "`stop <n>` or `stop all` to make room."
+                 % (len(running), self.cfg.max_sessions))
+        return True
+
+    # -- claiming a terminal session (§12 slice 14) -----------------------------------------
+
+    def terminal_listing(self, found=None):
+        """Bare `rc`: index, project, name, busy/idle, uptime — and nothing from the transcript."""
+        found = self.claimable() if found is None else found
+        if not found:
+            return ("No terminal sessions to claim: every Claude Code session here already has "
+                    "Remote Control, or none is running in a project.")
+        lines = ["%d. %s · %s · %s · %s" % (index, entry.project, entry.name, entry.status,
+                                            uptime(entry.started))
+                 for index, entry in enumerate(found, 1)]
+        lines.append("")
+        lines.append("`rc <n>` carries one on from here and ends it in the terminal.")
+        return "\n".join(lines)
+
+    def claim_buttons(self, found=None):
+        found = self.claimable() if found is None else found
+        if not found:
+            return None
+        rows = [[CLAIM_BUTTON % index] for index in range(1, min(len(found), MENU_MAX) + 1)]
+        rows.append([commands.LIST, commands.HELP])
+        return {"keyboard": rows, "resize_keyboard": True, "is_persistent": True}
+
+    def claim(self, chat_id, index):
+        """`rc <n>`: resume that conversation under a runner, then end the original. §9.14.
+
+        The registry is read again here rather than trusted from the `rc` that printed the
+        number, the way halt() reads the fleet again for `stop <n>`. A busy session is refused
+        before anything starts: its turn would be cut off at the hand-over, or left writing the
+        same conversation as the claim.
+        """
+        if self.full(chat_id):
+            return "refused, at the cap"
+        found = self.claimable()
+        if not 1 <= index <= len(found):
+            self.say(chat_id, "There is no terminal session %d.\n\n%s"
+                     % (index, self.terminal_listing(found)), self.claim_buttons(found))
+            return "refused, no such terminal session"
+        entry = found[index - 1]
+        if entry.status != "idle":
+            self.say(chat_id, "%s · %s is %s. Claim it when its turn is done — taking it now "
+                              "would cut the turn off." % (entry.project, entry.name,
+                                                           entry.status))
+            return "refused, terminal session is %s" % entry.status
+
+        sid = self.mint()
+        name = "%s-%s" % (entry.project, sid[:4])
+        self.pending.add(sid)
+        try:
+            pid = self.sessions.start(sid, name, entry.cwd, entry.project, chat_id,
+                                      resume=entry.session_id)
+        except Exception as e:
+            self.pending.discard(sid)
+            self.log("could not start a runner to claim pid %d: %s"
+                     % (entry.pid, self.tg.redact(e)))
+            self.say(chat_id, "Could not start a session: %s" % scrub(str(e), self.tg.redact))
+            return "spawn failed"
+        self.watch(chat_id, sid, entry.project, name, handover=entry)
+        return "claiming pid %d as session %s, runner pid %d" % (entry.pid, sid, pid)
+
     def mint(self):
         """A session id that does not already name a directory. §4.1.
 
@@ -1064,11 +1167,7 @@ class Listener:
         # cannot start is not a reason to leave an empty directory on the disk — and one this
         # bot made but never used is exactly the accident §5 gives `new` its own verb to
         # prevent, with the added insult that nothing here can delete it afterwards.
-        running = set(r.get("sid") for r in self.fleet()) | self.pending
-        if len(running) >= self.cfg.max_sessions:
-            self.say(chat_id, "%d of %d sessions already running. `ls` to see them, "
-                              "`stop <n>` or `stop all` to make room."
-                     % (len(running), self.cfg.max_sessions))
+        if self.full(chat_id):
             return "refused, at the cap"
 
         making = intent.verb == commands.NEW
@@ -1111,17 +1210,17 @@ class Listener:
         self.watch(chat_id, sid, intent.project, name, created=created)
         return "session %s, runner pid %d" % (sid, pid)
 
-    def watch(self, chat_id, sid, project, name, created=None):
+    def watch(self, chat_id, sid, project, name, created=None, handover=None):
         """Wait for this session somewhere other than the poll loop. §4.2."""
         waiter = threading.Thread(target=self.waited, name="session-" + sid, daemon=True,
-                                  args=(chat_id, sid, project, name, created))
+                                  args=(chat_id, sid, project, name, created, handover))
         # A thread per pending session is the design; a thread per message ever received would
         # be a leak that takes a week to show itself on a process that never exits.
         self.waiters = [w for w in self.waiters if w.is_alive()]
         self.waiters.append(waiter)
         waiter.start()
 
-    def waited(self, chat_id, sid, project, name, created=None):
+    def waited(self, chat_id, sid, project, name, created=None, handover=None):
         """One waiter, start to finish. Runs on its own thread and swallows everything."""
         try:
             record, state = self.wait(sid)
@@ -1146,8 +1245,16 @@ class Listener:
                 self.log("session %s: %s — the tick announced it first, so this waiter says "
                          "nothing (§4.6: one reply per session)" % (sid, state))
                 return
+            # §12 slice 14: the original ends only once the claim has a link — a claim that
+            # never comes up must leave the terminal session as it found it.
+            handed = None
+            if state == session.LIVE and handover is not None:
+                result = self.hand_over(handover)
+                handed = HANDED.get(result, "%s") % handover.pid
+                self.log("session %s: terminal session pid %d %s"
+                         % (sid, handover.pid, result))
             sent = self.say(chat_id,
-                            self.outcome(record, state, sid, project, name, created))
+                            self.outcome(record, state, sid, project, name, created, handed))
             self.log("session %s: %s — %s" % (sid, state or "no link in %ds" % self.timeout,
                                               "replied" if sent else "reply NOT delivered"))
         except Exception as e:
@@ -1180,7 +1287,7 @@ class Listener:
                 return record, None
             self.sleep(self.poll_every)
 
-    def outcome(self, record, state, sid, project, name, created=None):
+    def outcome(self, record, state, sid, project, name, created=None, handed=None):
         """What the phone gets when a session has resolved one way or the other. §4.6, §5.
 
         `created` is None for `claude` and a bool for `new`. It is a line in the reply rather
@@ -1197,6 +1304,8 @@ class Listener:
             lines = ["▶ %s · %s" % (project, name)]
             if created is not None:
                 lines.append(self.made(record, project, created))
+            if handed:
+                lines.append(handed)
             # §5: allowed, and flagged. Refusing would be wrong — two sessions on one repo is
             # a normal way to work — and one line is the whole mitigation; anything more
             # belongs to git rather than to this bot.
@@ -1278,6 +1387,8 @@ class Listener:
         intent = commands.parse(message.get("text"))
         if intent.verb in (commands.START, commands.NEW) and intent.project is not None:
             done = self.begin(chat_id, intent)
+        elif intent.verb == commands.RC and intent.target is not None:
+            done = self.claim(chat_id, intent.target)
         else:
             done = "replied" if self.say(chat_id, self.answer(intent), self.menu(intent)) \
                    else "reply NOT delivered"

@@ -44,6 +44,7 @@ import os
 import re
 import sys
 import time
+import uuid
 
 import config
 
@@ -435,9 +436,26 @@ def child_env(base=None):
     return procs.child_env(env)
 
 
-def claude_argv(binary, name):
-    """§1: the flag form is what "a session with /rc enabled" means. No model, no effort."""
-    return [binary, "--remote-control", name, "--dangerously-skip-permissions"]
+def claude_argv(binary, name, resume=None):
+    """§1: the flag form is what "a session with /rc enabled" means. No model, no effort.
+
+    `resume` is §12 slice 14's: the id of a terminal session's conversation, carried on with
+    Remote Control (§9.14). It came off a file Claude Code wrote and an index a phone chose,
+    so it is checked here, where it becomes an argument, and only a canonical UUID gets in.
+    """
+    argv = [binary]
+    if resume is not None:
+        if not isinstance(resume, str) or str(_uuid(resume)) != resume:
+            raise ValueError("not a session id: %r" % (resume,))
+        argv.extend(["--resume", resume])
+    return argv + ["--remote-control", name, "--dangerously-skip-permissions"]
+
+
+def _uuid(value):
+    try:
+        return uuid.UUID(value)
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 # spawn(), _reaped(), _signal() and terminate() live in session_posix.py / session_win.py
@@ -585,7 +603,7 @@ class Runner:
 
     def __init__(self, sid, cwd, name, root=SESSIONS, binary=None, argv=None, project=None,
                  chat_id=None, prompt=None, projects_root=None, trust=False, window=False,
-                 log=_stderr):
+                 resume=None, log=_stderr):
         self.sid = sid
         self.cwd = cwd
         self.name = name
@@ -594,7 +612,7 @@ class Runner:
         self.chat_id = chat_id
         self.prompt = prompt
         self.projects_root = projects_root
-        self.argv = argv or claude_argv(binary, name)
+        self.argv = argv or claude_argv(binary, name, resume)
         # §9.3: the listener sets this for `new`, because the created-by-this-bot half of the
         # argument is the half only the listener knows. The empty half is checked in run(),
         # where the directory is — see there.
@@ -879,6 +897,8 @@ def main():
     ap.add_argument("--chat-id", type=int, default=None, help="who to tell when it ends")
     ap.add_argument("--prompt", default=None, help="typed into the session once it is live")
     ap.add_argument("--root", default=SESSIONS, help="where session directories live")
+    ap.add_argument("--resume", default=None, metavar="UUID",
+                    help="carry on that conversation with Remote Control (`rc <n>` only)")
     ap.add_argument("--trust", action="store_true",
                     help="answer §9.3's trust dialog if the directory is empty (`new` only)")
     ap.add_argument("--foreground", action="store_true",
@@ -906,7 +926,7 @@ def main():
     runner = Runner(a.sid or os.urandom(3).hex(), os.path.abspath(os.path.expanduser(a.cwd)),
                     a.name, root=a.root, binary=cfg.claude_bin, project=a.project,
                     chat_id=a.chat_id, prompt=a.prompt, trust=a.trust,
-                    window=cfg.terminal_window)
+                    window=cfg.terminal_window, resume=a.resume)
     if a.foreground:
         print("session %s · %s" % (runner.sid, runner.dir), file=sys.stderr)
     state = runner.run()

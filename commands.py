@@ -31,12 +31,13 @@ help is what was asked for.
 """
 import collections
 
-# The six intents, spelled as the words that produce them so a logged or printed intent reads
+# The seven intents, spelled as the words that produce them so a logged or printed intent reads
 # back as the message that made it.
 START = "claude"      # §5 tier 1: start a session (or, with no project, list the projects).
 NEW = "new"           # §5 tier 1: make the directory first, then start a session in it.
 LIST = "ls"           # §5 tier 2: the live sessions.
 STOP = "stop"         # §5 tier 2: signal one runner, or all of them.
+RC = "rc"             # §12 slice 14: claim a terminal session — list them, or resume one.
 POWER = "power"       # §5 tier 2: pmset's shutdown schedule — show it, cancel it, set it again.
 HELP = "help"         # §5: and everything else.
 
@@ -49,7 +50,7 @@ CANCEL = "cancel"
 SET = "set"
 
 #: What the phone's `/` menu carries (§5). The listener owns the descriptions and registers them.
-VERBS = (START, NEW, LIST, STOP, POWER, HELP)
+VERBS = (START, NEW, LIST, STOP, RC, POWER, HELP)
 
 Intent = collections.namedtuple("Intent", "verb project prompt target")
 Intent.__new__.__defaults__ = (None, None, None)
@@ -57,6 +58,15 @@ Intent.__new__.__defaults__ = (None, None, None)
 #: Shared because it is immutable and returned constantly. Always empty: a help intent that
 #: carried an argument would be a caller acting on a message nobody understood.
 _HELP = Intent(HELP)
+
+
+def _index(word):
+    """Is `word` one of the numbers a listing printed?
+
+    isascii() as well as isdigit(), because `²` and `٢` are digits to isdigit() and a
+    ValueError to int(). Listings number from 1, so 0 can never name anything.
+    """
+    return word.isascii() and word.isdigit() and int(word) >= 1
 
 
 def parse(text):
@@ -97,6 +107,16 @@ def parse(text):
         prompt = args[1].rstrip() if len(args) > 1 else ""
         return Intent(verb, args[0], prompt or None)
 
+    if verb == RC:
+        # Bare `rc` only lists. `rc <n>` claims one, and nothing else is a claim: there is no
+        # `rc all`, because a claim ends the terminal session it takes and a bulk one is the
+        # same irreversible misreading `stop all` is kept a word away from.
+        if not args:
+            return Intent(RC)
+        if len(args) == 1 and _index(args[0]):
+            return Intent(RC, target=int(args[0]))
+        return _HELP
+
     if verb == STOP:
         if len(args) != 1:
             # No target is ambiguous and one of its readings is unrecoverable; two targets is
@@ -107,9 +127,7 @@ def parse(text):
             # Safe to fold where a project name is not: `all` is a keyword, not a name on disk,
             # and a phone will send `Stop All` at the start of a message.
             return Intent(STOP, target=ALL)
-        # isascii() as well as isdigit(), because `²` and `٢` are digits to isdigit() and a
-        # ValueError to int(). §5 numbers sessions from 1, so 0 can never name one.
-        if target.isascii() and target.isdigit() and int(target) >= 1:
+        if _index(target):
             return Intent(STOP, target=int(target))
         return _HELP
 

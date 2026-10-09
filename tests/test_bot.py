@@ -69,6 +69,7 @@ from unittest import mock
 import bot
 import commands
 import config
+import local
 import session
 import telegram
 from tests.support import POSIX, needs_symlinks
@@ -236,9 +237,10 @@ class FakeSessions(bot.Sessions):
         self.unstoppable = set()  # runner pids that outlive a SIGKILL, per §9.11
         self.stopped = []         # (sid, grace) per stop(), so §9.11's nesting is assertable
 
-    def start(self, sid, name, cwd, project, chat_id, prompt=None, trust=False):
+    def start(self, sid, name, cwd, project, chat_id, prompt=None, trust=False, resume=None):
         self.started.append({"sid": sid, "name": name, "cwd": cwd, "project": project,
-                             "chat_id": chat_id, "prompt": prompt, "trust": trust})
+                             "chat_id": chat_id, "prompt": prompt, "trust": trust,
+                             "resume": resume})
         if self.fail is not None:
             raise self.fail
         # The record says what this session was actually asked for. It used to say `beacon`
@@ -3631,3 +3633,105 @@ class TestTheKeyboard(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestClaimingALocalSession(Base):
+    """§12 slice 14: `rc` lists the terminal sessions without Remote Control, and `rc <n>`
+    resumes one under a runner and ends the original once the link is back (§9.14)."""
+
+    FIRST = "cf6c1378-f496-40e7-9f1f-9442392ef5a1"
+    SECOND = "a5cfe917-2e21-4cd4-92f0-98408b74f97a"
+
+    def setUp(self):
+        Base.setUp(self)
+        self.terminal = [
+            local.Local(4242, self.FIRST, os.path.join(self.projects, "beacon"), "beacon",
+                        "beacon-7f", "idle", 1791526050),
+            local.Local(4343, self.SECOND, os.path.join(self.projects, "centrion"),
+                        "centrion", "centrion-1e", "idle", 1791526110),
+        ]
+        self.handed = []
+        self.result = local.ENDED
+
+    def listener(self, tg=None, **kw):
+        kw.setdefault("claimable", lambda: list(self.terminal))
+        kw.setdefault("hand_over", self.hand_over)
+        return Base.listener(self, tg, **kw)
+
+    def hand_over(self, entry):
+        self.handed.append(entry)
+        return self.result
+
+    def test_bare_rc_lists_and_starts_nothing(self):
+        tg = self.deliver(message("rc"))
+        self.assertEqual(self.sessions.started, [])
+        self.assertEqual(self.handed, [])
+        text = tg.texts[0]
+        self.assertIn("1. beacon · beacon-7f · idle", text)
+        self.assertIn("2. centrion · centrion-1e · idle", text)
+        buttons = [row[0] for row in tg.markups[0]["keyboard"]]
+        self.assertEqual(buttons[:2], ["rc 1", "rc 2"])
+
+    def test_nothing_to_claim_says_so(self):
+        self.terminal = []
+        tg = self.deliver(message("rc"))
+        self.assertIn("No terminal sessions to claim", tg.texts[0])
+        self.assertIsNone(tg.markups[0])
+
+    def test_rc_2_resumes_that_conversation_in_its_directory(self):
+        tg = self.deliver(message("rc 2"))
+        started = self.sessions.started
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0]["resume"], self.SECOND)
+        self.assertEqual(started[0]["cwd"], os.path.join(self.projects, "centrion"))
+        self.assertEqual(started[0]["project"], "centrion")
+        self.assertFalse(started[0]["trust"])
+        self.assertEqual(self.handed, [self.terminal[1]])
+        self.assertIn(LINK, tg.texts[0])
+        self.assertIn("terminal session (pid 4343) ended", tg.texts[0])
+
+    def test_a_busy_session_is_refused(self):
+        self.terminal[0] = self.terminal[0]._replace(status="busy")
+        tg = self.deliver(message("rc 1"))
+        self.assertEqual(self.sessions.started, [])
+        self.assertEqual(self.handed, [])
+        self.assertIn("busy", tg.texts[0])
+
+    def test_an_index_past_the_listing_starts_nothing(self):
+        tg = self.deliver(message("rc 3"))
+        self.assertEqual(self.sessions.started, [])
+        self.assertIn("no terminal session 3", tg.texts[0])
+        self.assertIn("1. beacon", tg.texts[0])
+
+    def test_a_claim_counts_against_max_sessions(self):
+        self.place("aaaaaa")
+        self.place("bbbbbb")
+        tg = self.deliver(message("rc 1"))
+        self.assertEqual(self.sessions.started, [])
+        self.assertEqual(self.handed, [])
+        self.assertIn("2 of 2 sessions already running", tg.texts[0])
+
+    def test_the_original_is_left_alone_when_no_link_comes(self):
+        self.sessions.outcome = session.FAILED
+        self.deliver(message("rc 1"))
+        self.assertEqual(len(self.sessions.started), 1)
+        self.assertEqual(self.handed, [])
+
+    def test_a_busy_original_at_hand_over_is_reported(self):
+        self.result = local.BUSY
+        tg = self.deliver(message("rc 1"))
+        self.assertIn(LINK, tg.texts[0])
+        self.assertIn("still running", tg.texts[0])
+
+    def test_an_original_that_would_not_end_is_reported(self):
+        self.result = local.ALIVE
+        tg = self.deliver(message("rc 1"))
+        self.assertIn("would not end", tg.texts[0])
+
+    def test_the_listing_is_read_fresh_for_the_claim(self):
+        """The index means what the registry says now, the way `stop <n>` reads the fleet."""
+        listener = self.listener(FakeTelegram([message("rc 1", uid=8)]))
+        self.terminal.pop(0)
+        listener.tick()
+        self.settle(listener)
+        self.assertEqual(self.sessions.started[0]["resume"], self.SECOND)

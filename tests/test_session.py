@@ -989,6 +989,20 @@ class TestTheChildEnvironment(unittest.TestCase):
         self.assertEqual(argv, ["/bin/claude", "--remote-control", "centrion-3f2a",
                                 "--dangerously-skip-permissions"])
 
+    def test_a_claim_resumes_the_conversation_it_names(self):
+        """§12 slice 14: the same conversation, now with Remote Control (§9.14)."""
+        sid = "cf6c1378-f496-40e7-9f1f-9442392ef5a1"
+        argv = session.claude_argv("/bin/claude", "beacon-3f2a", resume=sid)
+        self.assertEqual(argv, ["/bin/claude", "--resume", sid, "--remote-control",
+                                "beacon-3f2a", "--dangerously-skip-permissions"])
+
+    def test_only_a_uuid_is_resumed(self):
+        """It came off a file Claude Code wrote and a phone chose; only a UUID reaches argv."""
+        for bad in ("--dangerously-skip-permissions", "", "x" * 36,
+                    "CF6C1378-F496-40E7-9F1F-9442392EF5A1", 7):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                session.claude_argv("/bin/claude", "beacon-3f2a", resume=bad)
+
 
 class TestMetaIsWrittenAtomically(unittest.TestCase):
     """SPEC.md §3: a listener reading mid-write must never see half a record."""

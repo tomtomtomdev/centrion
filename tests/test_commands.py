@@ -313,7 +313,7 @@ class TestTheContract(Base):
     def test_the_verb_is_always_one_of_the_five(self):
         for text in ("claude", "claude beacon", "new scratchpad", "ls", "stop 1", "stop all",
                      "power", "power cancel", "power set", "help", "", None, "garbage",
-                     "/start"):
+                     "/start", "rc", "rc 2"):
             self.assertIn(commands.parse(text).verb, commands.VERBS)
 
     def test_every_verb_is_one_telegram_will_offer(self):
@@ -321,7 +321,7 @@ class TestTheContract(Base):
         # menu does not is one nobody on a phone will discover.
         self.assertEqual(commands.VERBS,
                          (commands.START, commands.NEW, commands.LIST, commands.STOP,
-                          commands.POWER, commands.HELP))
+                          commands.RC, commands.POWER, commands.HELP))
 
     def test_nothing_makes_it_raise(self):
         """§7: the poll loop must survive every message anyone can send it.
@@ -354,3 +354,25 @@ class TestTheContract(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestClaiming(Base):
+    """§12 slice 14's `rc`: the terminal sessions that could be claimed, and claiming one."""
+
+    def test_bare_rc_only_lists(self):
+        self.assertIntent("rc", commands.RC)
+        self.assertIntent("/rc", commands.RC)
+        self.assertIntent("RC", commands.RC)
+
+    def test_rc_takes_the_index_from_its_own_listing(self):
+        self.assertIntent("rc 2", commands.RC, target=2)
+        self.assertIntent("/rc@centrion_bot 1", commands.RC, target=1)
+
+    def test_anything_but_one_index_is_help(self):
+        # `rc all` above all: claiming ends the terminal sessions it claims, so there is no
+        # reading of it that is safe to guess at.
+        for text in ("rc all", "rc 0", "rc -1", "rc ²", "rc beacon", "rc 1 2", "rc 1 now"):
+            self.assertHelp(text)
+
+    def test_it_is_on_the_phone_menu(self):
+        self.assertIn(commands.RC, commands.VERBS)
