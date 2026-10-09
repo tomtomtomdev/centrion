@@ -111,6 +111,12 @@ full re-resolve. Prefer build caches over artifact caches.
 **4. Simulators**
 - `xcrun simctl shutdown all`
 - `xcrun simctl delete unavailable`
+- Stranded device deletions: `simctl delete` (and XCTest's clone teardown) only *renames* a
+  device to `$(getconf DARWIN_USER_TEMP_DIR)Deleting-<uuid>/` and frees it later in the
+  background — which often never happens (43G sat there once). Remove `Deleting-*` dirs older
+  than 60 minutes (dir mtime = rename time); younger ones may still be mid-delete. The
+  hard stop below does not apply — they are already detached from every device. `du` overstates
+  the reclaim: clones share APFS blocks with their source device.
 - **Report only** (never auto-delete): unused simulator runtimes with sizes, and devices
   created but never booted. I decide on those.
 

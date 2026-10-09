@@ -19,7 +19,8 @@ DU=/usr/bin/du;    DF=/bin/df;      FIND=/usr/bin/find;  GIT=/usr/bin/git
 XCRUN=/usr/bin/xcrun; PLUTIL=/usr/bin/plutil; STAT=/usr/bin/stat; RM=/bin/rm
 PGREP=/usr/bin/pgrep; DATE=/bin/date; AWK=/usr/bin/awk;  SORT=/usr/bin/sort
 MKDIR=/bin/mkdir;  RMDIR=/bin/rmdir; BREW=/opt/homebrew/bin/brew; ID=/usr/bin/id
-for b in "$DU" "$DF" "$FIND" "$GIT" "$XCRUN" "$PLUTIL" "$STAT" "$RM" "$PGREP" "$DATE" "$AWK" "$SORT" "$MKDIR" "$ID"; do
+GETCONF=/usr/bin/getconf
+for b in "$DU" "$DF" "$FIND" "$GIT" "$XCRUN" "$PLUTIL" "$STAT" "$RM" "$PGREP" "$DATE" "$AWK" "$SORT" "$MKDIR" "$ID" "$GETCONF"; do
   [ -x "$b" ] || { echo "FATAL: missing required binary: $b" >&2; exit 3; }
 done
 
@@ -180,6 +181,15 @@ cat_simulators() {
 
   if [ "$APPLY" = "1" ]; then $XCRUN simctl delete unavailable 2>/dev/null || true; echo "  deleted unavailable devices"
   else echo "  would run: simctl delete unavailable"; fi
+
+  # simctl delete only renames a device to <user temp>/Deleting-<uuid> and frees it later, which
+  # often never happens. Older than 60m = stranded; du overstates it (clones share APFS blocks).
+  local utmp d
+  utmp=$($GETCONF DARWIN_USER_TEMP_DIR 2>/dev/null || true)
+  if [ -n "$utmp" ] && [ -d "$utmp" ]; then
+    while IFS= read -r d; do remove_target "$d" "stranded simulator deletion"; done \
+      < <($FIND "$utmp" -maxdepth 1 -mindepth 1 -type d -name 'Deleting-*' -mmin +60 2>/dev/null || true)
+  fi
 
   echo "  -- report only (never auto-deleted) --"
   $XCRUN simctl list runtimes 2>/dev/null | grep -v '^==' | sed 's/^/     runtime: /' || true
