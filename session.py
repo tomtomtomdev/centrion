@@ -602,7 +602,7 @@ class Runner:
     """One session, from `starting` to `ended`, and the pty held open in between."""
 
     def __init__(self, sid, cwd, name, root=SESSIONS, binary=None, argv=None, project=None,
-                 chat_id=None, prompt=None, projects_root=None, trust=False, window=False,
+                 chat_id=None, prompt=None, projects_root=None, trust=False, window=None,
                  resume=None, log=_stderr):
         self.sid = sid
         self.cwd = cwd
@@ -617,9 +617,10 @@ class Runner:
         # argument is the half only the listener knows. The empty half is checked in run(),
         # where the directory is — see there.
         self.trusting = trust
-        # A Terminal window onto the session once it is live (attach.py). The socket a window
-        # attaches through is served on every POSIX session regardless, so `session.py
-        # --attach <sid>` reaches a session this was off for.
+        # Which app opens a window onto the session once it is live — a `terminal_app` value
+        # (§12 slice 15), None for none. The socket a window attaches through is served on
+        # every POSIX session regardless, so `session.py --attach <sid>` reaches a session
+        # this was off for.
         self.window = window
         self.viewers = None
         self.log = log
@@ -882,7 +883,9 @@ class Runner:
         # attaching resizes it to the window's.
         if self.window and self.viewers is not None:
             import attach
-            attach.open_window(self.dir, os.path.abspath(__file__), log=self.log)
+            app = attach.choose(self.window, log=self.log)
+            if app:
+                attach.open_window(self.dir, os.path.abspath(__file__), app=app, log=self.log)
 
 
 def main():
@@ -926,7 +929,7 @@ def main():
     runner = Runner(a.sid or os.urandom(3).hex(), os.path.abspath(os.path.expanduser(a.cwd)),
                     a.name, root=a.root, binary=cfg.claude_bin, project=a.project,
                     chat_id=a.chat_id, prompt=a.prompt, trust=a.trust,
-                    window=cfg.terminal_window, resume=a.resume)
+                    window=cfg.terminal_app, resume=a.resume)
     if a.foreground:
         print("session %s · %s" % (runner.sid, runner.dir), file=sys.stderr)
     state = runner.run()

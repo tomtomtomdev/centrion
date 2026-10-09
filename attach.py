@@ -62,6 +62,10 @@ SEND_TIMEOUT = 1.0
 #: still gets a window rather than nothing.
 APPS = ("Warp", "Terminal")
 
+#: `terminal_app` (config.TERMINAL_APPS) → the app that value names, for the two that name one.
+#: `auto` is `preferred_app()` and `none` is no window. §12 slice 15.
+NAMED = {"warp": "Warp", "terminal": "Terminal"}
+
 #: How long the resize nudge holds the off-by-one size. Long enough for the child to see two
 #: SIGWINCHes rather than coalescing them into none.
 NUDGE = 0.05
@@ -225,6 +229,23 @@ def preferred_app(apps=APPS):
         if installed(app):
             return app
     return apps[-1]
+
+
+def choose(value, apps=APPS, log=_stderr):
+    """The app `value` asks for, or None for no window.
+
+    A named app this Mac cannot find is the fallback at the end of `apps`, and a log line: `open
+    -a` on an app LaunchServices cannot find is a window that silently never appears, which is
+    the reason `preferred_app` ends on Terminal too."""
+    if value == "auto":
+        return preferred_app(apps)
+    app = NAMED.get(value)
+    if app is None:
+        return None
+    if app != apps[-1] and not installed(app):
+        log("%s is not installed; the window opens in %s" % (app, apps[-1]))
+        return apps[-1]
+    return app
 
 
 def open_window(directory, script, app=None, log=_stderr):

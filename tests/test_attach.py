@@ -196,25 +196,114 @@ class TestTheWindow(unittest.TestCase):
             self.assertFalse(attach.open_window(self.dir, "/x/session.py", log=lambda _m: None))
 
 
+@posix_only
+class TestChoosingTheApp(unittest.TestCase):
+    """§12 slice 15: `terminal_app` → the app `open -a` is handed, or no window at all."""
+
+    def setUp(self):
+        self.logged = []
+
+    def choose(self, value, has=("Warp", "Terminal")):
+        with mock.patch.object(attach, "installed", lambda app: app in has):
+            return attach.choose(value, log=self.logged.append)
+
+    def test_terminal_is_terminal_even_with_warp_installed(self):
+        asked = []
+        with mock.patch.object(attach, "installed", lambda app: asked.append(app) or True):
+            self.assertEqual(attach.choose("terminal", log=self.logged.append), "Terminal")
+        self.assertEqual(asked, [])
+
+    def test_warp_is_warp_when_it_is_installed(self):
+        self.assertEqual(self.choose("warp"), "Warp")
+        self.assertEqual(self.logged, [])
+
+    def test_warp_without_warp_is_a_terminal_window_and_a_log_line(self):
+        self.assertEqual(self.choose("warp", has=("Terminal",)), "Terminal")
+        self.assertEqual(len(self.logged), 1)
+        self.assertIn("Warp", self.logged[0])
+
+    def test_auto_is_the_preferred_app(self):
+        self.assertEqual(self.choose("auto"), "Warp")
+        self.assertEqual(self.choose("auto", has=("Terminal",)), "Terminal")
+
+    def test_none_is_no_window(self):
+        self.assertIsNone(self.choose("none"))
+
+
+@posix_only
+class TestTheRunnersWindow(unittest.TestCase):
+    """The value reaches `open -a` once the session is live, and not before."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def live(self, window):
+        runner = session.Runner("abc123", self.root, "n", root=self.root, argv=["true"],
+                                window=window, log=lambda _m: None)
+        os.makedirs(runner.dir, exist_ok=True)
+        runner.viewers = object()
+        runner.update = lambda **_k: None
+        runner.scrape.url = "https://claude.ai/code/session_x"
+        with mock.patch.object(attach, "installed", lambda _app: True):
+            with mock.patch.object(attach.subprocess, "Popen") as popen:
+                runner.went_live()
+        return popen
+
+    def test_a_runner_given_terminal_opens_terminal(self):
+        popen = self.live("terminal")
+        self.assertEqual(popen.call_args[0][0][:3], ["open", "-a", "Terminal"])
+
+    def test_a_runner_given_none_opens_nothing(self):
+        self.assertFalse(self.live("none").called)
+
+    def test_a_runner_given_nothing_opens_nothing(self):
+        self.assertFalse(self.live(None).called)
+
+
 class TestTheConfigKey(unittest.TestCase):
-    def check(self, data):
-        return config._window("cfg", data)
+    """§12 slice 15: `terminal_app`, and `terminal_window` read as the value it always meant."""
 
-    def test_the_default_is_on_for_the_mac_only(self):
-        self.assertEqual(self.check({}), sys.platform == "darwin")
+    def check(self, data, platform="darwin"):
+        with mock.patch.object(config.sys, "platform", platform):
+            return config._app("cfg", data)
 
-    def test_it_must_be_a_bool(self):
+    def test_the_default_is_auto_on_the_mac_and_none_elsewhere(self):
+        self.assertEqual(self.check({}), "auto")
+        self.assertEqual(self.check({}, platform="win32"), "none")
+
+    def test_each_of_the_four_values_is_accepted_on_the_mac(self):
+        for value in ("auto", "warp", "terminal", "none"):
+            self.assertEqual(self.check({"terminal_app": value}), value)
+
+    def test_anything_else_is_refused(self):
+        for bad in ("Warp", "iterm", "", True, None, 1):
+            with self.assertRaises(config.ConfigError):
+                self.check({"terminal_app": bad})
+
+    def test_the_old_key_reads_as_auto_or_none(self):
+        self.assertEqual(self.check({"terminal_window": True}), "auto")
+        self.assertEqual(self.check({"terminal_window": False}), "none")
+
+    def test_the_old_key_must_still_be_a_bool(self):
         for bad in (1, "yes", None):
             with self.assertRaises(config.ConfigError):
                 self.check({"terminal_window": bad})
 
-    def test_off_is_always_allowed(self):
-        self.assertFalse(self.check({"terminal_window": False}))
+    def test_both_keys_together_are_refused(self):
+        with self.assertRaises(config.ConfigError):
+            self.check({"terminal_window": True, "terminal_app": "auto"})
 
-    def test_on_is_refused_off_the_mac(self):
-        with mock.patch.object(config.sys, "platform", "win32"):
+    def test_none_is_the_only_value_off_the_mac(self):
+        self.assertEqual(self.check({"terminal_app": "none"}, platform="win32"), "none")
+        self.assertEqual(self.check({"terminal_window": False}, platform="win32"), "none")
+        for data in ({"terminal_app": "auto"}, {"terminal_app": "terminal"},
+                     {"terminal_window": True}):
             with self.assertRaises(config.ConfigError):
-                self.check({"terminal_window": True})
+                self.check(data, platform="win32")
+
+    def test_the_new_key_is_a_known_key(self):
+        self.assertIn("terminal_app", config.KNOWN_KEYS)
 
 
 if __name__ == "__main__":

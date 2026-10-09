@@ -35,10 +35,11 @@ if sys.platform == "win32":
 else:
     DEFAULT_CLAUDE_BIN = "~/.local/bin/claude"
 DEFAULT_MAX_SESSIONS = 4          # SPEC.md §3: raised from 2 once real work hit the cap.
-#: Open a terminal window onto every session once it is live (attach.py). Mac only: the window
-#: is Warp's — Terminal.app where there is no Warp — and the socket it attaches through is a
-#: Unix one.
-DEFAULT_TERMINAL_WINDOW = sys.platform == "darwin"
+#: Which app opens a terminal window onto every session once it is live (attach.py), or none.
+#: §12 slice 15. `auto` is Warp where there is Warp and Terminal.app where there is not. Mac
+#: only: the socket a window attaches through is a Unix one, and `open -a` is macOS's.
+TERMINAL_APPS = ("auto", "warp", "terminal", "none")
+NO_WINDOW = "none"
 REQUIRED_MODE = 0o600             # The Mac's secrecy check. Windows has no mode; see below.
 
 #: Windows: the principals that may appear in the config file's DACL. Everyone else is a
@@ -71,7 +72,7 @@ ICACLS_FIX = 'icacls "%s" /inheritance:r%s /grant:r "%%USERNAME%%":F'
 
 KNOWN_KEYS = frozenset({
     "bot_token", "allowed_chat_ids", "projects_root", "claude_bin", "max_sessions",
-    "terminal_window",
+    "terminal_window", "terminal_app",
 })
 
 
@@ -83,16 +84,16 @@ class Config:
     """Validated settings. Immutable, and deliberately unprintable in full."""
 
     __slots__ = ("bot_token", "allowed_chat_ids", "projects_root", "claude_bin", "max_sessions",
-                 "terminal_window")
+                 "terminal_app")
 
     def __init__(self, bot_token, allowed_chat_ids, projects_root, claude_bin, max_sessions,
-                 terminal_window=False):
+                 terminal_app=NO_WINDOW):
         object.__setattr__(self, "bot_token", bot_token)
         object.__setattr__(self, "allowed_chat_ids", allowed_chat_ids)
         object.__setattr__(self, "projects_root", projects_root)
         object.__setattr__(self, "claude_bin", claude_bin)
         object.__setattr__(self, "max_sessions", max_sessions)
-        object.__setattr__(self, "terminal_window", terminal_window)
+        object.__setattr__(self, "terminal_app", terminal_app)
 
     def __setattr__(self, *_):
         raise AttributeError("Config is immutable")
@@ -372,14 +373,26 @@ def _cap(path, data):
     return n
 
 
-def _window(path, data):
-    on = data.get("terminal_window", DEFAULT_TERMINAL_WINDOW)
-    if type(on) is not bool:
-        raise ConfigError("%s: `terminal_window` must be true or false, found %r" % (path, on))
-    if on and sys.platform != "darwin":
-        raise ConfigError("%s: `terminal_window` opens Warp or Terminal.app and is Mac only"
+def _app(path, data):
+    """`terminal_app`, or the `terminal_window` bool a file written before §12 slice 15 says
+    instead: `true` meant Warp-else-Terminal, which is `auto`, and `false` meant no window."""
+    if "terminal_app" in data and "terminal_window" in data:
+        raise ConfigError("%s: set `terminal_app` or `terminal_window`, not both" % path)
+    if "terminal_window" in data:
+        on = data["terminal_window"]
+        if type(on) is not bool:
+            raise ConfigError("%s: `terminal_window` must be true or false, found %r"
+                              % (path, on))
+        app = "auto" if on else NO_WINDOW
+    else:
+        app = data.get("terminal_app", "auto" if sys.platform == "darwin" else NO_WINDOW)
+        if not isinstance(app, str) or app not in TERMINAL_APPS:
+            raise ConfigError("%s: `terminal_app` must be one of %s, found %r"
+                              % (path, ", ".join(TERMINAL_APPS), app))
+    if app != NO_WINDOW and sys.platform != "darwin":
+        raise ConfigError("%s: a terminal window opens Warp or Terminal.app and is Mac only"
                           % path)
-    return on
+    return app
 
 
 def load(path=CONFIG, check_claude=True):
@@ -392,7 +405,7 @@ def load(path=CONFIG, check_claude=True):
         projects_root=_directory(path, data),
         claude_bin=_binary(path, data, check_claude),
         max_sessions=_cap(path, data),
-        terminal_window=_window(path, data),
+        terminal_app=_app(path, data),
     )
 
 

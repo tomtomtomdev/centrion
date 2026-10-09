@@ -161,13 +161,15 @@ over.
   "projects_root": "/Users/tomtomtomtom/Projects",
   "claude_bin": "/Users/tomtomtomtom/.local/bin/claude",
   "max_sessions": 4,
-  "terminal_window": true
+  "terminal_app": "auto"
 }
 ```
 
-**`terminal_window` opens a Warp window onto each session once it is live**, default on, Mac
-only. Warp because it is what this Mac reaches for; Terminal.app when Warp is not installed,
-which is the only app a Mac is guaranteed to have. Nothing but the app name changes between the
+**`terminal_app` opens a window onto each session once it is live**, Mac only: `auto` (the
+default) is Warp, because it is what this Mac reaches for, and Terminal.app when Warp is not
+installed, which is the only app a Mac is guaranteed to have; `warp` and `terminal` pick one,
+and `none` opens nothing. The older `terminal_window: true`/`false` still reads as `auto`/`none`
+(§12 slice 15). Nothing but the app name changes between the
 two — Warp declares itself a handler for `com.apple.terminal.shell-script`, so the same
 `.command` runs in either. The runner still owns the pty (§2) and serves it on `tty.sock`; the window is a
 viewer (`session.py --attach <sid>`) that mirrors the screen and types into it, resizes the pty
@@ -1481,6 +1483,90 @@ the harness — the first held the original's pty without reading it (§9.14), t
 reaped its own child, which left a zombie that `kill(pid, 0)` answers for. The phone run is still
 owed.
 
+### Slice 15 — which app the window opens in
+
+`terminal_window` is a yes or no, and the app is decided for you: Warp when it is installed,
+Terminal.app when it is not (`attach.preferred_app`). A Mac that has Warp and wants Terminal for
+these windows — or the other way round, on purpose — has no way to say so. The slice replaces the
+yes-or-no with a name, and changes nothing else: `open -a <app> attach.command`, the `.command`,
+the socket and the viewer are exactly as they were, because the app is already the only thing
+that differs between the two (§3).
+
+```json
+"terminal_app": "auto"
+```
+
+| Value | Window |
+|---|---|
+| `auto` | Warp if LaunchServices can find it, else Terminal — today's behaviour, and the Mac's default |
+| `warp` | Warp; Terminal, with a log line saying so, on a Mac that has no Warp |
+| `terminal` | Terminal, whether or not Warp is installed |
+| `none` | no window; `session.py --attach <sid>` still reaches the session by hand |
+
+**`warp` without Warp is a Terminal window and a log line, not nothing.** `open -a` on an app
+LaunchServices cannot find is a window that silently never appears, which is the reason
+`preferred_app` keeps Terminal at the end of its list; a choice the Mac cannot honour falls back
+the same way, and says so in `var/bot.log`.
+
+**`terminal_window` keeps working, and cannot disagree with its replacement.** `true` reads as
+`auto` and `false` as `none`, so no `.telegram.json` written before this slice changes meaning; a
+file that sets both is refused (§1's fail-closed), because which one wins is a guess. Off the Mac
+the only value is `none`, for the old key's reason: the socket is a Unix one and `open -a` is
+macOS's.
+
+*Red:* each of the four values is accepted on the Mac and anything else — including `Warp`
+capitalised, and a bool — is refused; the default is `auto` on the Mac and `none` elsewhere;
+`terminal_window: true` and `false` read as `auto` and `none`; both keys together are refused; any
+value but `none`, by either key, is refused off the Mac; `terminal` opens `open -a Terminal`
+without asking LaunchServices about Warp; `warp` without Warp opens Terminal and logs it; `none`
+opens nothing; a runner given `terminal` opens its window in Terminal once it is live.
+*Green:* `config._app()` in place of `_window()`, `Config.terminal_app` in place of
+`terminal_window`, `attach.choose()` from the value to an app name, and the runner handing that
+to `open_window` from `went_live`.
+*Run:* `"terminal_app": "terminal"` in `.telegram.json`, kickstart the listener, `claude
+<project>` from the phone, and a Terminal window opens onto the session with Warp installed;
+`"none"`, and none opens.
+
+### Slice 16 — choosing the app for one session from the phone
+
+Slice 15 sets the app for every session. This one lets a single `claude` or `new` say otherwise:
+
+| Message | Window |
+|---|---|
+| `claude .terminal beacon fix the probe` | Terminal, for this session only |
+| `claude .warp beacon` | Warp (Terminal if there is none, as slice 15) |
+| `new .none scratchpad` | no window |
+| `claude beacon` | `terminal_app`, as before |
+
+**The option is a word with a leading `.`, and it goes before the project, because nothing else
+can be read as one.** §3 refuses a project name that starts with `.`, so `.terminal` can never be
+a directory this bot would start a session in — the parser can take it without consulting the
+filesystem, and a project can never be taken for it. After the project is too late: everything
+after the project is the prompt, and `claude beacon .terminal` must type `.terminal` into the
+session as it always has. Not `@terminal`, which §5's parse strips off the verb as a bot name.
+An unknown option — `.wrap` — is `help`, not a guess, for the reason bare `stop` is (§5): a
+message that nearly parses must not become an approximation of itself. An option with no project
+after it is `help` too.
+
+**The override travels as `--window <value>` on the runner's argv, and only when it was given.**
+The runner reads `terminal_app` itself (§4), so a spawn without the flag is byte-for-byte the
+argv of today, and the runner prefers the flag when it is there. Off the Mac, any option but
+`.none` is refused in the reply, before anything is spawned. The keyboard (slice 13) is not
+doubled: its buttons stay `claude <name>` and take the default, and an override is typed. `rc
+<n>` takes the default too; a claim already has one argument and does not need a second yet.
+
+*Red:* a table of parses — the option before the project, with and without a prompt, on `claude`
+and on `new`, an unknown option, an option with nothing after it, an option *after* the project
+staying in the prompt, the verb's case folding leaving the option alone; `Intent.window` is
+`None` when no option was given; the spawned argv carries `--window` only when overridden; the
+runner prefers `--window` to config; a non-`none` option off the Mac is refused without a spawn;
+a button still produces the identical `Intent` to the typed text; `help` and the `/` menu
+mention the option.
+*Green:* a `window` field on `Intent`, the option split off in `commands.parse`, `window=` on
+`Listener.start`, `--window` in `session.main`.
+*Run:* from the phone with `terminal_app` at `auto` and Warp installed — `claude .terminal
+centrion` opens Terminal, `claude centrion` opens Warp, `claude .none centrion` opens nothing.
+
 ---
 
 ## 13. Progress
@@ -1504,6 +1590,8 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 12 | the failure that explains itself | ☐ | **Planned.** §8 stands on evidence of working rather than of being understood, and §14's way to change that — `sample` the parked pid while it is still hung — is an instruction no person can follow: the failure is a 45s timeout on a phone, and the process is killed or gone by the time anyone reaches the machine. The slice does not explain §9.13; it makes the bot take the capture an explanation would need, on the one path that has already failed. |
 | 13 | a keyboard instead of a grammar | ☑ | **The slice succeeds by leaving no trace, which is also how it has to be proved.** `claude ttsecuritas-2` off a button at 20:33:47 is the same log line, the same intent and the same 3-second link as the typed message, because the button *is* the typed message — so the evidence that it worked is on the wire and in the shape of the code, not in bot.log. What only the real send could settle: Telegram takes `reply_markup` here as a nested JSON object, where every example in circulation writes it as JSON inside a string field — correct for a form-encoded call and wrong for this client, which posts a JSON body (§7). The design finding was the one the plan named: §3 permits a space in a directory name and the grammar splits on whitespace, so `My Project` would tap as `claude My` carrying the prompt `Project` — a refusal if nothing is called `My`, a session in the **wrong project** if something is. The filter is a round trip through `commands.parse` rather than a character rule of its own, for slice 11's reason: a second copy of §3 here is how two doors drift apart. Two things came from the keyboard being state Telegram holds rather than this bot: it survived the 17:37 listener restart with nothing sent, and a reply that has nothing to say about the menu must send *no* markup rather than an empty one, because an empty `keyboard` is the documented way to take a keyboard away — the obvious default would have removed the menu on every `ls`. §11's first rule bit as well: four assertions in this class (no `stop` button, no keyboard on `ls` or on an empty root, no token in the markup) are green over an absent keyboard, so one more test holds the others honest by asserting the keyboard beneath them is not empty. |
 | 14 | claiming a session the bot did not start | ☑ | **There is no way into a running session from outside it, and there does not need to be: the conversation is the session, not the process.** `--resume <id> --remote-control` carries the same `sessionId` and its context into a runner the bot owns (§9.14), so claiming is the ordinary §4 launch plus one argv pair — and ending the original, because the resume does not, and two processes on one transcript is what a claim must not leave. The registry at `~/.claude/sessions/<pid>.json` marks Remote Control by a `bridgeSessionId`, so *not remote* is the absence of a key, in a file Claude Code may reshape on any upgrade — hence a reader that skips what it does not recognise and a §14 check on the fields it reads. Only direct children of the root are offered, because `--resume` must run in the cwd the conversation was recorded under and the runner's re-check is `samefile` against the project's own directory; a session in `backend/account-service` is invisible rather than refused. Busy is refused up front *and* checked again at hand-over, because the gap between them is a whole session start. Run below the wire only (see the slice); the phone run is owed. |
+| 15 | which app the window opens in | ☑ | The app was already the only thing that differed between the two windows, so the slice is a name in config and one lookup in `attach.choose`; the `.command`, `open -a` and the socket did not change. **A runner given `none` would have opened a window:** `Runner.window` was a bool, and the string `"none"` is truthy — the one red test that was a *failure* rather than an error, and the reason the value is resolved to an app (or None) before `open_window` is reached. The test's own first green run missed a window for a duller reason: `open_window` writes `attach.command` into the session directory, swallows the OSError when there is none, and so a test without the directory saw no `open` and no error. Checked against this Mac's LaunchServices and the real `.telegram.json` (no key, so `auto` → Warp); the phone run — `terminal` with Warp installed — is owed. |
+| 16 | choosing the app for one session from the phone | ☐ | |
 
 ---
 
