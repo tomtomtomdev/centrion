@@ -160,7 +160,7 @@ over.
   "allowed_chat_ids": [987654321],
   "projects_root": "/Users/tomtomtomtom/Projects",
   "claude_bin": "/Users/tomtomtomtom/.local/bin/claude",
-  "max_sessions": 2,
+  "max_sessions": 4,
   "terminal_window": true
 }
 ```
@@ -190,10 +190,11 @@ The security half matters more: one token would then
 be both a stock notifier and shell access to this Mac, and the notifier is the half that gets
 pasted around. Create a second bot in BotFather and keep the two `.telegram.json` files apart.
 
-**`max_sessions: 2`, because this box has 8 GB.** Each session is a native Claude Code process
-plus whatever it spawns — a simulator, a dev server, a python venv. Three is already swap
-pressure. The cap is here to stop a held-down `claude` on a phone, not to ration deliberate work;
-raise it after watching memory, not before.
+**`max_sessions: 4`.** Each session is a native Claude Code process plus whatever it spawns — a
+simulator, a dev server, a python venv. It started at 2 because this box has 8 GB and three
+looked like swap pressure; on 2026-10-09 it went to 4 after a third session was refused at the
+cap during ordinary work. The cap is here to stop a held-down `claude` on a phone, not to ration
+deliberate work; if four sessions with simulators push the Mac into swap, lower it again.
 
 **There is no `default_project`, deliberately.** See §5.
 
@@ -970,7 +971,7 @@ Non-negotiable:
    `new` cannot leave a directory behind on its way to being refused.
 5. `.telegram.json` at `0600`, gitignored, and **never in the plist** — files in
    `~/Library/LaunchAgents` are world-readable `0644`.
-6. **Cap concurrency.** `max_sessions` — §3 sets the value and §15 records why it is 2 on this
+6. **Cap concurrency.** `max_sessions` — §3 sets the value and §15 records why it is 4 on this
    box. Deliberately not restated here: this line used to carry its own copy of the number,
    which drifted to 4. Without a cap at all, a held-down `claude` fills RAM with Claude Code
    processes.
@@ -1143,7 +1144,7 @@ longer than 4096 characters is truncated rather than 400ing.
 count, which is the cap being real rather than configured. Then `ls`, `stop all`, and confirm
 both are gone from claude.ai/code. Then the one that needs a reboot: leave a session live,
 restart the Mac, and confirm the bot comes back reporting zero sessions rather than phantoms.
-(This step used to say *three* sessions and predates §15 settling `max_sessions` at 2, which
+(This step used to say *three* sessions and predates §15 settling `max_sessions` at 2 (since raised to 4), which
 is the same drift §10.6 records — a number restated in a second place and left behind.)
 
 ### Slice 9 — the link comes back, and the bot starts itself again
@@ -1487,7 +1488,7 @@ what would have to change to reopen it.
 | Scope | `~/Projects` only; no Full Disk Access grant (§9.2) | A repo you need daily cannot move out of `~/Documents`. |
 | Telegram identity | Its own BotFather bot, separate from stock-watch | Never — the `getUpdates` conflict is structural. |
 | Model / effort | Inherit `opus[1m]` at `xhigh`; pass no flags (§6) | The bill from phone-started sessions is noticed before the work they did is. |
-| Concurrency | `max_sessions: 2` on 8 GB | You watch memory during two real sessions and find headroom. |
+| Concurrency | `max_sessions: 4` on 8 GB, raised from 2 on 2026-10-09 (§3) | Four live sessions push the Mac into swap — then back down. |
 | Bare `claude` | Answers with the project list; starts nothing (§5) | The extra tap outweighs starting in the wrong repo, which it will not. |
 | Same-directory sessions | Allowed, flagged in the reply (§5) | Two sessions actually clobber each other's edits — then `--worktree` per session. |
 | What the menu's buttons carry | Projects, `ls` and `help` — never `stop all`, and never a bare project name without its verb (§12 slice 13) | The keyboard grows a verb whose worst misreading is recoverable; `stop all` is not one of those. |

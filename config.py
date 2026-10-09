@@ -34,7 +34,7 @@ if sys.platform == "win32":
     DEFAULT_CLAUDE_BIN = shutil.which("claude")
 else:
     DEFAULT_CLAUDE_BIN = "~/.local/bin/claude"
-DEFAULT_MAX_SESSIONS = 2          # SPEC.md §3: 8 GB on this box.
+DEFAULT_MAX_SESSIONS = 4          # SPEC.md §3: raised from 2 once real work hit the cap.
 #: Open a terminal window onto every session once it is live (attach.py). Mac only: the window
 #: is Warp's — Terminal.app where there is no Warp — and the socket it attaches through is a
 #: Unix one.

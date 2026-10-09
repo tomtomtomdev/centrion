@@ -398,10 +398,10 @@ class TestClaudeBinary(Base):
 
 
 class TestMaxSessions(Base):
-    def test_it_defaults_to_two(self):
+    def test_it_defaults_to_four(self):
         # SPEC.md §3: 8 GB on this box.
         cfg = config.load(self.write(self.valid()))
-        self.assertEqual(cfg.max_sessions, 2)
+        self.assertEqual(cfg.max_sessions, 4)
 
     def test_an_explicit_value_is_kept(self):
         self.assertEqual(config.load(self.write(self.valid(max_sessions=1))).max_sessions, 1)
@@ -433,7 +433,7 @@ class TestHappyPath(Base):
         self.assertEqual(cfg.allowed_chat_ids, frozenset({987654321}))
         self.assertEqual(cfg.projects_root, os.path.realpath(self.projects))
         self.assertEqual(cfg.claude_bin, os.path.abspath(self.claude))
-        self.assertEqual(cfg.max_sessions, 2)
+        self.assertEqual(cfg.max_sessions, 4)
 
     def test_the_repr_does_not_leak_the_token(self):
         # This object will end up in a log line or a traceback sooner or later.

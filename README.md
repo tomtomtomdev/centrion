@@ -76,7 +76,7 @@ This file is gitignored and must stay that way:
   "allowed_chat_ids": [987654321],
   "projects_root": "/Users/you/Projects",
   "claude_bin": "/Users/you/.local/bin/claude",
-  "max_sessions": 2,
+  "max_sessions": 4,
   "terminal_window": true
 }
 ```
