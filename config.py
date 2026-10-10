@@ -20,6 +20,8 @@ import shutil
 import stat
 import sys
 
+import totp
+
 CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".telegram.json")
 
 #: Where `claude` is, when `.telegram.json` does not say. Two different questions per platform.
@@ -72,8 +74,13 @@ ICACLS_FIX = 'icacls "%s" /inheritance:r%s /grant:r "%%USERNAME%%":F'
 
 KNOWN_KEYS = frozenset({
     "bot_token", "allowed_chat_ids", "projects_root", "claude_bin", "max_sessions",
-    "terminal_window", "terminal_app",
+    "terminal_window", "terminal_app", "totp_secret", "unlock_minutes",
 })
+
+#: §12 slice 17: how long a valid code opens the gate for, when `unlock_minutes` does not say,
+#: and the range it may say. Four hours is a working afternoon; past that it is a door left open.
+DEFAULT_UNLOCK_MINUTES = 15
+UNLOCK_MINUTES_RANGE = (1, 240)
 
 
 class ConfigError(Exception):
@@ -84,16 +91,19 @@ class Config:
     """Validated settings. Immutable, and deliberately unprintable in full."""
 
     __slots__ = ("bot_token", "allowed_chat_ids", "projects_root", "claude_bin", "max_sessions",
-                 "terminal_app")
+                 "terminal_app", "totp_secret", "unlock_minutes")
 
     def __init__(self, bot_token, allowed_chat_ids, projects_root, claude_bin, max_sessions,
-                 terminal_app=NO_WINDOW):
+                 terminal_app=NO_WINDOW, totp_secret=None, unlock_minutes=None):
         object.__setattr__(self, "bot_token", bot_token)
         object.__setattr__(self, "allowed_chat_ids", allowed_chat_ids)
         object.__setattr__(self, "projects_root", projects_root)
         object.__setattr__(self, "claude_bin", claude_bin)
         object.__setattr__(self, "max_sessions", max_sessions)
         object.__setattr__(self, "terminal_app", terminal_app)
+        # The decoded bytes, or None when there is no second factor. Never in repr().
+        object.__setattr__(self, "totp_secret", totp_secret)
+        object.__setattr__(self, "unlock_minutes", unlock_minutes)
 
     def __setattr__(self, *_):
         raise AttributeError("Config is immutable")
@@ -395,10 +405,40 @@ def _app(path, data):
     return app
 
 
+def _totp(path, data):
+    """`totp_secret` and `unlock_minutes`: (None, None) when there is no second factor.
+
+    Absent means off, so no file written before §12 slice 17 changes meaning. Present and wrong
+    is refused like everything else here, and no message says the secret — it is a credential
+    exactly as the token is, and these strings reach var/bot.log.
+    """
+    if "totp_secret" not in data:
+        if "unlock_minutes" in data:
+            raise ConfigError("%s: `unlock_minutes` is set but `totp_secret` is not — there is "
+                              "no lock for it to open. Run `bot.py --totp-setup`, or remove it."
+                              % path)
+        return None, None
+    try:
+        secret = totp.decode(data["totp_secret"])
+    except ValueError:
+        raise ConfigError("%s: `totp_secret` must be a base32 key — run `bot.py --totp-setup` "
+                          "for one" % path) from None
+    if len(secret) < totp.MIN_SECRET_BYTES:
+        raise ConfigError("%s: `totp_secret` is shorter than 128 bits — run `bot.py "
+                          "--totp-setup` for a 160-bit one" % path)
+    minutes = data.get("unlock_minutes", DEFAULT_UNLOCK_MINUTES)
+    low, high = UNLOCK_MINUTES_RANGE
+    if type(minutes) is not int or not low <= minutes <= high:
+        raise ConfigError("%s: `unlock_minutes` must be an integer from %d to %d, found %r"
+                          % (path, low, high, minutes))
+    return secret, minutes
+
+
 def load(path=CONFIG, check_claude=True):
     """Read and validate `path`. Raises ConfigError, never returns a partial Config."""
     data = _raw(path)
     _keys(path, data)
+    secret, minutes = _totp(path, data)
     return Config(
         bot_token=_token(path, data),
         allowed_chat_ids=_allowlist(path, data),
@@ -406,6 +446,8 @@ def load(path=CONFIG, check_claude=True):
         claude_bin=_binary(path, data, check_claude),
         max_sessions=_cap(path, data),
         terminal_app=_app(path, data),
+        totp_secret=secret,
+        unlock_minutes=minutes,
     )
 
 

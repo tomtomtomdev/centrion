@@ -9,6 +9,7 @@ messages go to a log file, and in slice 3 some of them go to Telegram.
 
 Stdlib only, no network: `/usr/bin/python3 -m unittest discover -s tests -t . -v`.
 """
+import base64
 import json
 import os
 import shutil
@@ -440,6 +441,57 @@ class TestHappyPath(Base):
         cfg = config.load(self.write(self.valid()))
         self.assertNotIn(TOKEN, repr(cfg))
         self.assertNotIn(TOKEN, str(cfg))
+
+
+#: 20 random-looking bytes as base32, the shape `bot.py --totp-setup` (slice 18) prints.
+SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+
+
+class TestTheSecondFactor(Base):
+    """Slice 17: `totp_secret` turns the gate on; absent, nothing about the file changes."""
+
+    def test_without_a_secret_there_is_no_second_factor(self):
+        cfg = config.load(self.write(self.valid()))
+        self.assertIsNone(cfg.totp_secret)
+        self.assertIsNone(cfg.unlock_minutes)
+
+    def test_a_secret_is_kept_as_its_bytes_and_the_unlock_defaults_to_fifteen_minutes(self):
+        cfg = config.load(self.write(self.valid(totp_secret=SECRET)))
+        self.assertEqual(cfg.totp_secret, base64.b32decode(SECRET))
+        self.assertEqual(cfg.unlock_minutes, 15)
+
+    def test_an_explicit_unlock_is_kept(self):
+        cfg = config.load(self.write(self.valid(totp_secret=SECRET, unlock_minutes=60)))
+        self.assertEqual(cfg.unlock_minutes, 60)
+
+    def test_a_secret_that_is_not_base32_is_refused(self):
+        self.refuses(self.valid(totp_secret="not base32!"), "totp_secret")
+
+    def test_a_secret_that_is_not_a_string_is_refused(self):
+        self.refuses(self.valid(totp_secret=12345), "totp_secret")
+
+    def test_a_secret_shorter_than_128_bits_is_refused(self):
+        # 10 bytes: what some sites hand out, and below the RFC's floor.
+        short = base64.b32encode(bytes(10)).decode()
+        self.refuses(self.valid(totp_secret=short), "128 bits")
+
+    def test_an_unlock_without_a_secret_is_refused(self):
+        self.refuses(self.valid(unlock_minutes=15), "unlock_minutes")
+
+    def test_an_unlock_out_of_range_or_not_an_integer_is_refused(self):
+        for bad in (0, 241, -5, "15", 1.5, True):
+            with self.subTest(bad=bad):
+                self.refuses(self.valid(totp_secret=SECRET, unlock_minutes=bad),
+                             "unlock_minutes")
+
+    def test_a_refusal_never_says_the_secret(self):
+        msg = self.refuses(self.valid(totp_secret=SECRET, unlock_minutes=0), "unlock_minutes")
+        self.assertNotIn(SECRET, msg)
+
+    def test_the_repr_does_not_say_the_secret(self):
+        cfg = config.load(self.write(self.valid(totp_secret=SECRET)))
+        for form in (SECRET, SECRET.lower(), repr(base64.b32decode(SECRET))):
+            self.assertNotIn(form, repr(cfg))
 
 
 if __name__ == "__main__":
