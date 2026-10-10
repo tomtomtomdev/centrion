@@ -1570,6 +1570,142 @@ mention the option.
 *Run:* from the phone with `terminal_app` at `auto` and Warp installed — `claude .terminal
 centrion` opens Terminal, `claude centrion` opens Warp, `claude .none centrion` opens nothing.
 
+### Slice 17 — a second factor the phone's Telegram cannot supply
+
+§10 says the bot token is the real breach, and for *reading* that is right. For *running* it is
+not quite: a token lets someone read the chat and speak as the bot, but it cannot forge
+`from.id`, so it cannot get past §10.1. What can is the Telegram **account** — an SMS code
+intercepted at login, a Telegram Desktop left signed in on another machine, an unlocked phone.
+Any of those is a shell on this Mac with permissions bypassed, and the allowlist cannot tell.
+A TOTP code from Google Authenticator lives on a device Telegram never sees, so it is the one
+thing a stolen Telegram session does not carry.
+
+This slice is the arithmetic and the config key, and nothing the phone can see yet.
+
+**RFC 6238 with Google Authenticator's parameters, and no others: HMAC-SHA1, 6 digits, 30-second
+steps.** The app ignores `algorithm`, `digits` and `period` on some platforms and builds, so a
+"stronger" SHA256 secret is one that silently produces codes this bot never accepts. All of it is
+stdlib — `hmac`, `hashlib`, `struct`, `base64.b32decode`, `secrets` — so §3's no-dependency rule
+holds. A new `totp.py`, pure apart from the clock it is handed:
+
+- `code(secret, step)` — the HOTP value for one step.
+- `verify(secret, text, now, last_step)` — the step that matched, or `None`. Accepts the current
+  step and one either side (±30s of clock skew, the RFC's suggested window), compares with
+  `hmac.compare_digest`, and **refuses any step at or below `last_step`**, so a code read off the
+  chat by a token holder cannot be replayed inside its own window.
+
+**`totp_secret` in `.telegram.json`, and absent means off.** The file is already `0600`,
+gitignored, and never in a plist (§10.5), which is exactly the storage a TOTP seed needs. The
+feature is opt-in, so a file written before this slice changes meaning not at all; but a key
+that is present and wrong is refused like any other (§3's fail-closed): not base32, or shorter
+than 16 bytes decoded (the RFC wants 160 bits; 128 is the floor). `unlock_minutes` (default
+`15`, `1`–`240`) sits beside it and is refused without `totp_secret`, because a duration for a
+lock that does not exist is a file that means something other than it says. Neither appears in
+`Config.__repr__`.
+
+*Red:* RFC 6238 Appendix B's SHA1 vectors (the 6-digit code is the low six digits of the 8-digit
+one) at T = 59, 1111111109, 1111111111, 1234567890, 2000000000; a code one step early and one step
+late verifies, two steps does not; a replayed step is refused, and so is any earlier one; a
+non-digit, a 5- and a 7-digit string, and `" 123456"` are refused rather than coerced; `²²²²²²`
+is refused (slice 4's `isdigit` trap); config refuses a bad base32 secret, a short one,
+`unlock_minutes` without a secret, and out of range; `repr(cfg)` carries no secret.
+*Green:* `totp.py`; `_totp()` in `config.py`; `Config.totp_secret`, `Config.unlock_minutes`.
+*Run:* a secret added by hand to `.telegram.json`; `python3 -c "import config,totp,time;
+c=config.load();print(totp.code(c.totp_secret,int(time.time())//30))"` matches the app.
+
+### Slice 18 — enrolling the phone without the secret touching Telegram
+
+`python3 bot.py --totp-setup`, run at the Mac. It draws 20 bytes from `secrets`, prints the
+`otpauth://totp/centrion:<hostname>?secret=…&issuer=centrion` URI and the base32 key grouped in
+fours for Google Authenticator's *Enter a setup key*, and — only if `qrencode` is on `PATH` —
+pipes the URI to `qrencode -t ansiutf8` so the app can scan it off the terminal. No QR library:
+§3 again, and the typed key is what works everywhere. It then asks for a code from the app and
+refuses to go further until one verifies, because an enrolment that was mistyped is a bot that
+locks its owner out.
+
+**It prints the line to add; it does not rewrite `.telegram.json`.** Rewriting it means
+re-serialising a file the owner wrote by hand, and on Windows a replaced file takes the
+directory's inherited ACL instead of the owner-only one `config._secret_by_dacl` insists on —
+the tool that adds a second factor would be the thing that weakened the first. It refuses to
+run if `.telegram.json` already has a `totp_secret`, so a second run cannot quietly orphan the
+phone's entry; rotating is delete the key, run again.
+
+**The secret is never sent to Telegram and never logged.** It is printed to the terminal that
+ran the command and nowhere else; the listener does not have a code path that could reach it.
+
+*Red:* the URI round-trips through `urllib.parse` to the same secret and carries
+`issuer=centrion`; the printed key decodes to the same 20 bytes; a wrong code is asked again
+and an EOF exits non-zero without printing the config line; an existing `totp_secret` refuses
+before generating anything; `qrencode` missing is not an error; nothing written to
+`var/bot.log`.
+*Green:* `setup()` in `bot.py` (beside `whoami()`, which is the same shape of tool), and the
+`--totp-setup` flag.
+*Run:* enrol a real phone, paste the line, and slice 17's one-liner agrees with the app.
+
+### Slice 19 — the gate
+
+With `totp_secret` set, the listener holds a **grant** per chat: a monotonic deadline,
+`unlock_minutes` from the last valid code. Inside it the bot is exactly today's bot. Outside it,
+anything that starts, ends or changes something is answered with a lock instead of an action.
+
+| Gated (needs a grant) | Open (no grant needed) |
+|---|---|
+| `claude <project>`, `new <name>`, `rc <n>`, `stop …`, `power cancel` / `power set` | `help`, bare `claude` (the project list), `ls`, bare `rc`, bare `power`, `lock` |
+
+**A code is a message of exactly six ASCII digits, and nothing else.** Today that message parses
+to `help`, so it collides with no verb, no index (indices are small, and `stop` needs its verb)
+and no project (a project is only ever read after a verb). It cannot ride inside a command:
+everything after the project is the prompt, and slice 13's buttons send fixed text that has no
+room for one. `lock` ends the grant early and is registered in the `/` menu.
+
+**The blocked command is kept, not lost.** A gated message outside a grant is stored — one slot
+per chat, replaced by a newer one, good for 2 minutes — and the reply is `🔒 send the 6-digit
+code from Google Authenticator`. A valid code inside those 2 minutes opens the grant *and* runs
+that command, so the cost of the lock is one extra message, and a button tap still works. A
+valid code with nothing pending just opens the grant and says until when.
+
+**Fail closed, in every direction.**
+
+- Grants live in memory only. A restarted listener — `kickstart`, a login, a crash — starts
+  locked. The deadline is monotonic, because §7's reason applies: a wall-clock deadline moves
+  with every NTP correction. The TOTP step itself must be wall-clock — that is the protocol —
+  and a Mac with a broken clock fails as *every code refused*, the safe direction.
+- The last accepted step is persisted per chat in `var/totp.json` (`0600`), so a restart does
+  not reopen the 90-second replay window slice 17 closed.
+- Five wrong codes in ten minutes lock the chat for fifteen, and the reply says so. Replying to
+  a wrong code is fine where §10.3 forbids replying to a stranger: this sender already passed
+  §10.1, and silence would read as a dead bot.
+- A wrong code and a valid one are logged as `unlock refused` / `unlock accepted`, never with
+  the digits; `loggable()` must not see the message text on this path at all.
+
+**The code is deleted from the chat once it is used.** `deleteMessage` on the code's
+`message_id`, best-effort: a code that is spent is harmless, but a chat history full of them is
+a list of timestamps a token holder can line up against `var/bot.log`. A failed delete is
+logged and ignored, never retried in the poll loop (§7).
+
+**`rc <n>`'s busy check and `stop`'s target are read *after* the code, not when the command was
+first sent.** The pending slot holds the intent, not a decision about it, because two minutes is
+long enough for `ls` numbering to shift — the same reason slice 14 checks busy twice.
+
+*Red:* with no `totp_secret` every verb behaves exactly as before (the whole existing suite,
+unchanged, is the proof); with one, each gated verb outside a grant spawns nothing, signals
+nothing and runs no `power.sh`, and each open verb answers as before; a valid code runs the
+pending intent once and opens the grant; a second valid code does not run it again; a pending
+intent older than 2 minutes is dropped; the grant expires at `unlock_minutes` on the injected
+monotonic clock; `lock` ends it; a listener rebuilt from scratch is locked (§8's restart, as
+slice 5 tests it); a replayed code is refused across a rebuild via `var/totp.json`; the sixth
+wrong code in ten minutes is refused even when correct, until fifteen have passed; no log line
+contains the code; `deleteMessage` is called with the code's id and its failure does not raise;
+one chat's grant does not unlock another allowlisted chat; `help` and the `/` menu mention
+`lock`.
+*Green:* `UNLOCK` and `LOCK` intents in `commands.py`; a `Gate` in `bot.py` owning grants, the
+pending slot, the strike count and `var/totp.json`, checked in `Listener.handle` between
+`fresh()` and dispatch; `delete_message` in `telegram.py`. §10 gains a point 8 and README's
+Security section a line.
+*Run:* from the phone — `claude centrion` answers with the lock, the code starts it and vanishes
+from the chat, `stop 1` inside the grant needs nothing, `lock`, then `stop 1` asks again;
+`kickstart` the listener and the next `claude` is locked; on Windows, the same three steps.
+
 ---
 
 ## 13. Progress
@@ -1595,6 +1731,9 @@ Updated at step 7 of every slice. Notes is the column that matters.
 | 14 | claiming a session the bot did not start | ☑ | **There is no way into a running session from outside it, and there does not need to be: the conversation is the session, not the process.** `--resume <id> --remote-control` carries the same `sessionId` and its context into a runner the bot owns (§9.14), so claiming is the ordinary §4 launch plus one argv pair — and ending the original, because the resume does not, and two processes on one transcript is what a claim must not leave. The registry at `~/.claude/sessions/<pid>.json` marks Remote Control by a `bridgeSessionId`, so *not remote* is the absence of a key, in a file Claude Code may reshape on any upgrade — hence a reader that skips what it does not recognise and a §14 check on the fields it reads. Only direct children of the root are offered, because `--resume` must run in the cwd the conversation was recorded under and the runner's re-check is `samefile` against the project's own directory; a session in `backend/account-service` is invisible rather than refused. Busy is refused up front *and* checked again at hand-over, because the gap between them is a whole session start. Run below the wire only (see the slice); the phone run is owed. |
 | 15 | which app the window opens in | ☑ | The app was already the only thing that differed between the two windows, so the slice is a name in config and one lookup in `attach.choose`; the `.command`, `open -a` and the socket did not change. **A runner given `none` would have opened a window:** `Runner.window` was a bool, and the string `"none"` is truthy — the one red test that was a *failure* rather than an error, and the reason the value is resolved to an app (or None) before `open_window` is reached. The test's own first green run missed a window for a duller reason: `open_window` writes `attach.command` into the session directory, swallows the OSError when there is none, and so a test without the directory saw no `open` and no error. Checked against this Mac's LaunchServices and the real `.telegram.json` (no key, so `auto` → Warp); the phone run — `terminal` with Warp installed — is owed. |
 | 16 | choosing the app for one session from the phone | ☑ | **The plan's own rule for a typo was wrong, and the existing tests said so.** It had `.wrap` as `help`, which meant reading every dotted word as a would-be option — and `../etc` and `.ssh` are dotted words, which slice 4's tests pin as project names for §3 to refuse in the resolver. The first cut swallowed `claude ../../etc` into `help`: still refused, but by a second copy of §3 in the parser, which the top of `commands.py` exists to forbid. So only the four values are options and everything else with a leading `.` is a project the resolver refuses; a typo still starts nothing and still gets the help. The flag is only an override: a spawn without one is the argv it always was, and the runner falls back to `terminal_app`. The phone run is owed. |
+| 17 | TOTP arithmetic and `totp_secret` | ☐ | **Planned.** |
+| 18 | `--totp-setup`: enrolling Google Authenticator at the Mac | ☐ | **Planned.** |
+| 19 | the gate: lock, code, grant | ☐ | **Planned.** |
 
 ---
 
@@ -1670,3 +1809,4 @@ what would have to change to reopen it.
 | Answering §9.3's trust dialog | On the PTY, and only for a directory this bot created *and* finds empty — never by writing `hasTrustDialogAccepted` into `~/.claude.json` (§9.3) | Claude Code grows a flag that means "this directory is trusted", or stops rewriting `~/.claude.json` from every live process, which is what makes seeding it a race today. |
 | Claiming a terminal session (§12 slice 14) | Resume it under a runner and end the original once idle — never type into its terminal, never fork it | Claude Code documents a way to turn Remote Control on in a running session from outside it. |
 | Runtime | System `/usr/bin/python3`, stdlib only (§3) | Something here genuinely needs a third-party package, which nothing does yet. |
+| Second factor (§12 slices 17–19) | Google Authenticator TOTP (SHA1, 6 digits, 30s), opt-in by `totp_secret`; a time-boxed grant per chat, mutating verbs only; read-only verbs stay open | Read-only verbs are judged sensitive (project names, `ls` links) — then gate everything but `help` and the code itself. |
