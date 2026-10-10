@@ -314,6 +314,22 @@ class TestSending(unittest.TestCase):
             self.assertFalse(Stub(responses).send_message(42, "hi"))
 
 
+class TestDeleting(unittest.TestCase):
+    """§12 slice 19: a spent code is taken back out of the chat."""
+
+    def test_it_names_the_chat_and_the_message(self):
+        tg = Stub([ok(True)])
+        self.assertTrue(tg.delete_message(42, 7))
+        self.assertEqual(tg.method(), "deleteMessage")
+        self.assertEqual(tg.sent(), {"chat_id": 42, "message_id": 7})
+
+    def test_a_refusal_is_false_and_logged_rather_than_raised(self):
+        # Telegram refuses a delete past 48 hours, or of a message already gone.
+        body = json.dumps({"ok": False, "description": "message can't be deleted"}).encode()
+        tg = Stub([http_error(400, body)])
+        self.assertFalse(tg.delete_message(42, 7))
+        self.assertTrue(tg.logged)
+
 class TestStartup(unittest.TestCase):
     def test_delete_webhook_is_callable_and_does_not_drop_the_backlog(self):
         """§7: a webhook set at any point in this bot's past makes getUpdates 409 forever.

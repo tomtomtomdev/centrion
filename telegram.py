@@ -250,6 +250,14 @@ class Telegram:
             payload["reply_markup"] = reply_markup
         return self._best_effort("sendMessage", payload)
 
+    def delete_message(self, chat_id, message_id):
+        """§12 slice 19: take a spent TOTP code back out of the chat. True if it went.
+
+        Best-effort and never retried past the usual attempts: a code that has been used is
+        harmless, and Telegram refuses a delete after 48 hours or of a message already gone.
+        """
+        return self._best_effort("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+
     def delete_webhook(self):
         """§7: a webhook set at any point in this bot's past makes getUpdates 409 forever.
 

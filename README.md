@@ -29,6 +29,7 @@ link pushed to you**. See [SPEC.md §1](SPEC.md#1-why-this-shape).
 | `stop 2` / `stop all` | ends one session, or all of them |
 | `rc` / `rc 2` | lists the Claude Code sessions running in a terminal without Remote Control; `rc 2` carries that conversation on with a link and ends it in the terminal (only when idle) |
 | `help` | the commands, and the current project list |
+| `123456` / `lock` | with a second factor set up: a Google Authenticator code unlocks changes for `unlock_minutes`; `lock` ends that early |
 
 A leading `/` works too. The bot registers these as Telegram's command menu each time it starts.
 Bare `claude` never picks a project for you, and a mistyped name never creates one. Only `new`
@@ -84,6 +85,12 @@ This file is gitignored and must stay that way:
 
 To find your chat id, message the bot and then run `python3 bot.py --whoami`. If
 `allowed_chat_ids` is empty or missing, the bot refuses every message.
+
+**Optional, and recommended: a second factor.** Run `python3 bot.py --totp-setup` at the Mac,
+add the key to Google Authenticator, type a code back, and paste the `"totp_secret"` line it
+prints into `.telegram.json` (`"unlock_minutes"` beside it sets how long a code unlocks, default
+15). From then on, anything that starts, stops or changes something asks for a code first; the
+command you sent runs as soon as the code arrives. See [SPEC.md §12 slices 17–19](SPEC.md#slice-17--a-second-factor-the-phones-telegram-cannot-supply).
 
 ### 2a. macOS
 
@@ -157,6 +164,9 @@ account that started the session.
 - `.telegram.json` is `0600` (or owner-only ACL on Windows), gitignored, and never written into a
   plist.
 - `max_sessions` caps how many sessions can run at once.
+- With `totp_secret` set, a Google Authenticator code is needed before anything starts, stops or
+  changes, so a hijacked Telegram account on its own is no longer a shell. Codes are refused a
+  second use, deleted from the chat, and never logged; five wrong ones lock it for 15 minutes.
 - Telegram is not end-to-end encrypted. The bot never echoes file contents or env vars.
 - If the token leaks, revoke it with BotFather's `/revoke` and restart the bot.
 

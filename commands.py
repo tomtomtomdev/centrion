@@ -32,6 +32,7 @@ help is what was asked for.
 import collections
 
 import config
+import totp
 
 # The seven intents, spelled as the words that produce them so a logged or printed intent reads
 # back as the message that made it.
@@ -42,6 +43,10 @@ STOP = "stop"         # §5 tier 2: signal one runner, or all of them.
 RC = "rc"             # §12 slice 14: claim a terminal session — list them, or resume one.
 POWER = "power"       # §5 tier 2: pmset's shutdown schedule — show it, cancel it, set it again.
 HELP = "help"         # §5: and everything else.
+LOCK = "lock"         # §12 slice 19: end the unlock now.
+#: §12 slice 19: a message that is exactly a TOTP code. Not a word anyone types — the code is
+#: the whole message — so `code` itself is still help, like any other unknown word.
+CODE = "code"
 
 #: `stop all`'s target. A string, so it can never collide with an `ls` index, which is an int.
 ALL = "all"
@@ -53,6 +58,10 @@ SET = "set"
 
 #: What the phone's `/` menu carries (§5). The listener owns the descriptions and registers them.
 VERBS = (START, NEW, LIST, STOP, RC, POWER, HELP)
+
+#: §12 slice 19: on the menu only while the gate is on. A `lock` offered by a bot that has no
+#: lock would be a button that does nothing, so the listener adds it rather than VERBS.
+GATE_VERBS = (LOCK,)
 
 #: §12 slice 16: what opens a word before the project to choose the window for that session.
 #: §3 refuses a project name that starts with it, so neither can be read as the other.
@@ -98,6 +107,11 @@ def parse(text):
     """
     if not isinstance(text, str):
         return _HELP
+
+    # §12 slice 19: six ASCII digits and nothing else is a code. Before the split, so that
+    # `" 123456"` is not one — the check is exact (totp.is_code), and a near miss is help.
+    if totp.is_code(text):
+        return Intent(CODE, target=text)
 
     # Split the verb, its argument, and the rest — at most twice, so the prompt keeps its own
     # spacing and newlines. A whitespace-only message splits to nothing and falls through.
@@ -165,13 +179,26 @@ def parse(text):
             return Intent(POWER, target=args[0].lower())
         return _HELP
 
-    if verb in (LIST, HELP) and not args:
+    if verb in (LIST, HELP, LOCK) and not args:
         return Intent(verb)
 
     # Unknown verb, or a known one carrying an argument it has no use for — `ls beacon` is
     # someone expecting a filter that does not exist, and listing everything would look like
     # the filter worked.
     return _HELP
+
+
+def changes(intent):
+    """Does this intent start, end or change something? §12 slice 19's gate asks nothing else.
+
+    The reading verbs — help, bare `claude`, `ls`, bare `rc`, bare `power` — are not, and stay
+    answerable without a code: they are where the phone finds out what a code would be for.
+    """
+    if intent.verb in (START, NEW):
+        return intent.project is not None
+    if intent.verb in (RC, POWER):
+        return intent.target is not None
+    return intent.verb == STOP
 
 
 if __name__ == "__main__":

@@ -162,6 +162,24 @@ MENU_TEXT = {
     commands.HELP: "what this bot understands, and the projects",
 }
 COMMAND_MENU = [(verb, MENU_TEXT[verb]) for verb in commands.VERBS]
+#: §12 slice 19: added to the menu, and to help, only while `totp_secret` is set.
+MENU_TEXT[commands.LOCK] = "end the unlock now; the next change asks for a code again"
+GATE_MENU = [(verb, MENU_TEXT[verb]) for verb in commands.GATE_VERBS]
+
+#: §12 slice 19's gate. The last TOTP step accepted, under var/ beside the offset, so a restart
+#: does not reopen the window in which a code read off the chat could be used again.
+TOTP_STATE = "totp.json"
+#: How long a command refused for want of a code is kept, to run when the code arrives. Long
+#: enough to open the app and type six digits; short enough that `ls` numbering has not moved.
+PENDING_FOR = 120
+#: Wrong codes in STRIKE_WINDOW seconds that close the gate for LOCKOUT_FOR — to a right one too.
+STRIKES = 5
+STRIKE_WINDOW = 600
+LOCKOUT_FOR = 900
+
+#: What a gated command hears while the gate is shut.
+LOCKED = ("🔒 Locked. Send the 6-digit code from Google Authenticator and this runs "
+          "(for the next 2 minutes).")
 
 #: §10.7: how long a finished session's directory is kept. Nothing ever removed one, and the
 #: directory is not the part that grows — the transcript inside it is capped (§10.7) — but the
@@ -716,6 +734,103 @@ class Sessions:
         return session.terminate(record.get("runner_pid"), grace=grace, log=self.log)
 
 
+class Gate:
+    """§12 slice 19: who may change something right now, and what is waiting on a code.
+
+    Grants, the pending command and the strike count live in memory only, so every restart
+    starts locked. Their clock is the listener's monotonic one, for §7's reason. The TOTP step
+    is wall-clock, because that is the protocol; a Mac whose clock is wrong refuses every code,
+    which is the direction to fail in. The one thing on disk is the last step accepted, and it
+    is one record for every chat: there is one secret, so a code spent in one chat must be
+    spent in all of them.
+    """
+
+    ACCEPTED, WRONG, SHUT = "accepted", "wrong", "shut"
+
+    def __init__(self, secret, minutes, path, clock, wall, log):
+        self.secret = secret
+        self.span = minutes * 60
+        self.path = path
+        self.clock = clock
+        self.wall = wall
+        self.log = log
+        self.grants = {}     # chat → monotonic deadline
+        self.pending = {}    # chat → (intent, monotonic time it was held)
+        self.strikes = {}    # chat → monotonic times of recent wrong codes
+        self.shut = {}       # chat → monotonic time the lockout ends
+        self.last_step = self._read()
+
+    def _read(self):
+        try:
+            with open(self.path) as fh:
+                step = json.load(fh)["last_step"]
+            if type(step) is not int or step < 0:
+                raise ValueError(step)
+            return step
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, KeyError, TypeError):
+            # Not knowing what was spent is not the same as nothing having been spent. Treat
+            # everything up to now as used: the cost is one code's wait, never a replay.
+            self.log("%s is unreadable — refusing codes up to this one" % tilde(self.path))
+            return int(self.wall()) // totp.PERIOD
+
+    def _write(self, step):
+        tmp = self.path + ".tmp"
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                json.dump({"last_step": step}, fh)
+            os.replace(tmp, self.path)
+        except OSError as e:
+            # Kept in memory either way; only a restart before the next good write could
+            # reopen the window, and that is ninety seconds at most.
+            self.log("could not record the TOTP step in %s: %s"
+                     % (tilde(self.path), e.strerror or e))
+
+    def open(self, chat_id):
+        deadline = self.grants.get(chat_id)
+        return deadline is not None and self.clock() < deadline
+
+    def hold(self, chat_id, intent):
+        """Keep `intent` to run when a code arrives. One slot: a newer command replaces it."""
+        self.pending[chat_id] = (intent, self.clock())
+
+    def lock(self, chat_id):
+        self.grants.pop(chat_id, None)
+        self.pending.pop(chat_id, None)
+
+    def shut_for(self, chat_id):
+        """Whole minutes the lockout has left, or 0."""
+        left = self.shut.get(chat_id, 0) - self.clock()
+        return int(-(-left // 60)) if left > 0 else 0
+
+    def attempt(self, chat_id, text):
+        """(ACCEPTED, the held intent or None) · (WRONG, attempts left) · (SHUT, minutes)."""
+        now = self.clock()
+        if self.shut_for(chat_id):
+            # Not even verified: a right code during a lockout must not spend its step.
+            return self.SHUT, self.shut_for(chat_id)
+        step = totp.verify(self.secret, text, self.wall(), self.last_step)
+        if step is None:
+            hits = [t for t in self.strikes.get(chat_id, ()) if now - t < STRIKE_WINDOW]
+            hits.append(now)
+            if len(hits) >= STRIKES:
+                self.strikes.pop(chat_id, None)
+                self.shut[chat_id] = now + LOCKOUT_FOR
+                return self.SHUT, self.shut_for(chat_id)
+            self.strikes[chat_id] = hits
+            return self.WRONG, STRIKES - len(hits)
+        self.last_step = step
+        self._write(step)
+        self.strikes.pop(chat_id, None)
+        self.grants[chat_id] = now + self.span
+        held = self.pending.pop(chat_id, None)
+        if held is not None and now - held[1] <= PENDING_FOR:
+            return self.ACCEPTED, held[0]
+        return self.ACCEPTED, None
+
+
 def read_offset(path=OFFSET):
     """The last acknowledged update_id + 1, or None if there is not a usable one.
 
@@ -753,7 +868,7 @@ class Listener:
     def __init__(self, cfg, tg, started=None, offset_path=OFFSET, log=log, sleep=time.sleep,
                  sessions=None, newsid=None, clock=time.monotonic,
                  timeout=SESSION_TIMEOUT, poll_every=SESSION_POLL, power_sh=None,
-                 claimable=None, hand_over=None):
+                 claimable=None, hand_over=None, wall=time.time):
         self.cfg = cfg
         self.tg = tg
         self.offset_path = offset_path
@@ -783,6 +898,13 @@ class Listener:
         # message arriving inside that window. A count taken off the filesystem alone would
         # wave every one of them through.
         self.pending = set()
+        # §12 slice 19: None when there is no `totp_secret`, and then nothing below changes.
+        self.wall = wall
+        self.gate = None
+        if cfg.totp_secret is not None:
+            self.gate = Gate(cfg.totp_secret, cfg.unlock_minutes,
+                             os.path.join(os.path.dirname(offset_path), TOTP_STATE),
+                             clock, wall, log)
 
         # Pick up where the last listener left off. Doing it here rather than in serve() means
         # a test can restart a listener by building a second one, which is exactly what a
@@ -909,6 +1031,8 @@ class Listener:
             "power                    the nightly shutdown and morning power-on\n"
             "power cancel · power set clear that schedule, or put it back\n"
             "help                     this\n"
+            + ("lock                     end the unlock; changes ask for a code again\n"
+               if self.gate else "") +
             "\n" + self.project_list())
 
     def answer(self, intent):
@@ -1406,13 +1530,26 @@ class Listener:
             return
 
         intent = commands.parse(message.get("text"))
-        if intent.verb in (commands.START, commands.NEW) and intent.project is not None:
-            done = self.begin(chat_id, intent)
-        elif intent.verb == commands.RC and intent.target is not None:
-            done = self.claim(chat_id, intent.target)
-        else:
-            done = "replied" if self.say(chat_id, self.answer(intent), self.menu(intent)) \
-                   else "reply NOT delivered"
+        done = None
+        if self.gate is None:
+            if intent.verb in (commands.CODE, commands.LOCK):
+                # No second factor configured: six digits and `lock` mean what they always
+                # did, which is nothing, which is help.
+                intent = commands.Intent(commands.HELP)
+        elif intent.verb == commands.CODE:
+            done = self.unlock(chat_id, message.get("message_id"), intent.target)
+        elif intent.verb == commands.LOCK:
+            self.gate.lock(chat_id)
+            done = self.said(chat_id, "🔒 Locked. The next change asks for a code.")
+        elif commands.changes(intent) and not self.gate.open(chat_id):
+            self.gate.hold(chat_id, intent)
+            text = LOCKED
+            if self.gate.shut_for(chat_id):
+                text += ("\n✗ Too many wrong codes: none is accepted for the next %d minutes."
+                         % self.gate.shut_for(chat_id))
+            done = "locked, held — " + self.said(chat_id, text)
+        if done is None:
+            done = self.act(chat_id, intent)
         # One line per handled message, and it is what makes the refusal lines above legible:
         # §14 sends you here when the phone gets nothing, and an empty log has to mean "nothing
         # arrived" rather than "answered, and the reply went missing". The verb and the project
@@ -1422,6 +1559,41 @@ class Listener:
         self.log("chat %d: %s%s — %s" % (chat_id, intent.verb,
                                          " " + loggable(intent.project) if intent.project else "",
                                          done))
+
+    def act(self, chat_id, intent):
+        """An intent the gate has let through → what was done, for the log line."""
+        if intent.verb in (commands.START, commands.NEW) and intent.project is not None:
+            return self.begin(chat_id, intent)
+        if intent.verb == commands.RC and intent.target is not None:
+            return self.claim(chat_id, intent.target)
+        return self.said(chat_id, self.answer(intent), self.menu(intent))
+
+    def said(self, chat_id, text, markup=None):
+        return "replied" if self.say(chat_id, text, markup) else "reply NOT delivered"
+
+    def unlock(self, chat_id, message_id, code):
+        """§12 slice 19: a code. Never logged, and taken back out of the chat either way."""
+        outcome, detail = self.gate.attempt(chat_id, code)
+        if type(message_id) is int and not self.tg.delete_message(chat_id, message_id):
+            self.log("chat %d: could not delete the code message — it is spent, but delete it "
+                     "by hand" % chat_id)
+        if outcome == Gate.WRONG:
+            return "unlock refused — " + self.said(
+                chat_id, "✗ That code does not match. %d more %s before a 15-minute lockout."
+                % (detail, "try" if detail == 1 else "tries"))
+        if outcome == Gate.SHUT:
+            return "unlock refused, locked out — " + self.said(
+                chat_id, "✗ Too many wrong codes: none is accepted for the next %d minutes."
+                % detail)
+        until = time.strftime("%H:%M", time.localtime(self.wall() + self.gate.span))
+        done = "unlock accepted — " + self.said(chat_id, "🔓 Unlocked until %s." % until)
+        if detail is not None:
+            # The held command, read now and not when it was sent: `stop 2` means whatever is
+            # second in the list at this moment, as it would if it had been typed again.
+            done += "; then held %s%s — %s" % (
+                detail.verb, " " + loggable(detail.project) if detail.project else "",
+                self.act(chat_id, detail))
+        return done
 
     def say(self, chat_id, text, markup=None):
         """Every reply leaves through here, so §7's 4096 is enforced in exactly one place.
@@ -1605,7 +1777,7 @@ class Listener:
     def run(self):
         """Forever. §7: never exit."""
         self.tg.delete_webhook()
-        self.tg.set_commands(COMMAND_MENU)
+        self.tg.set_commands(COMMAND_MENU + (GATE_MENU if self.gate else []))
         while True:
             try:
                 self.tick()
