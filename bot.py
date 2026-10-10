@@ -48,19 +48,25 @@ is the only thing here that sends without being asked — a session whose runner
 (§9.12) a session whose link turned up an hour after anyone was still waiting for it.
 """
 import argparse
+import base64
+import json
 import os
 import re
+import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 
 import commands
 import config
 import local
 import session
 import telegram
+import totp
 
 #: The platform's process mechanisms — WINDOWS.md §2, §6. Every question this file asks about
 #: a process (is that pid alive, when did it start, how is a runner started so that it
@@ -1689,14 +1695,93 @@ def whoami(cfg=None, client=None):
     return 0
 
 
+#: What the phone's authenticator lists the entry under, and the `issuer` it groups it by.
+TOTP_ISSUER = "centrion"
+#: 160 bits: RFC 4226 §4's recommendation, and what config.py's 128-bit floor sits under.
+TOTP_SECRET_BYTES = 20
+
+
+def totp_setup(path=None, ask=input, out=None, err=None, entropy=secrets.token_bytes,
+               now=time.time, which=shutil.which, run=subprocess.run,
+               hostname=socket.gethostname):
+    """Enrol Google Authenticator for §12 slice 19's gate. Run at the Mac, never from Telegram.
+
+    Draws a 160-bit key, shows it three ways — the base32 key in fours for the app's *Enter a
+    setup key*, the `otpauth://` URI, and a QR code of it when `qrencode` is on PATH — and then
+    will not print the config line until a code from the phone verifies. A mistyped enrolment
+    is a bot that locks its owner out, so the proof comes before the line, not after.
+
+    It prints the line to add and does not rewrite `.telegram.json` itself: rewriting means
+    re-serialising a file written by hand, and on Windows a replaced file takes the directory's
+    inherited ACL instead of the owner-only one config._secret_by_dacl insists on. An existing
+    `totp_secret` is refused before anything is drawn, so a second run cannot orphan the
+    phone's entry; to rotate, delete the key and run this again.
+
+    The key goes to this terminal and nowhere else — not Telegram, not log(), not a file.
+    """
+    out = out or sys.stdout
+    err = err or sys.stderr
+    path = path or config.CONFIG
+    if "totp_secret" in config._raw(path):
+        print("%s already has a `totp_secret`. Running this again would leave the phone "
+              "holding a key the bot no longer accepts. To rotate it, delete the key, run this "
+              "again, and replace the entry in the app." % path, file=err)
+        return 1
+
+    secret = entropy(TOTP_SECRET_BYTES)
+    key = totp_key(secret)
+    host = (hostname() or "").split(".")[0] or "mac"
+    label = urllib.parse.quote("%s:%s" % (TOTP_ISSUER, host), safe=":")
+    uri = "otpauth://totp/%s?%s" % (label, urllib.parse.urlencode(
+        (("secret", key), ("issuer", TOTP_ISSUER))))
+
+    print("Google Authenticator → + → Enter a setup key (time based):\n\n    %s\n\n"
+          "or scan this, or open it on the phone:\n\n    %s\n"
+          % (" ".join(key[i:i + 4] for i in range(0, len(key), 4)), uri), file=out)
+    qrencode = which("qrencode")
+    if qrencode:
+        try:
+            run([qrencode, "-t", "ansiutf8", uri], check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass    # The typed key works everywhere; the picture is a convenience.
+    out.flush()
+
+    while True:
+        try:
+            typed = ask("Code from the app: ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nNothing to add: no code was verified. Delete the entry from the app and "
+                  "run this again.", file=err)
+            return 1
+        # Spaces forgiven here and nowhere else: this is a keyboard at the Mac, and the
+        # listener's own check (§12 slice 19) is deliberately exact.
+        if totp.verify(secret, "".join(typed.split()), now()) is not None:
+            break
+        print("✗ That code does not match. Check that the phone's clock is set automatically, "
+              "and try the next one.", file=err)
+
+    print("\n✓ Verified. Add this line to %s, then restart the listener:\n\n"
+          "    %s\n" % (path, '"totp_secret": %s,' % json.dumps(key)), file=out)
+    return 0
+
+
+def totp_key(secret):
+    """`secret` as the app takes it: base32, unpadded. 20 bytes never needs padding anyway."""
+    return base64.b32encode(secret).decode("ascii").rstrip("=")
+
+
 def main():
     ap = argparse.ArgumentParser(description="centrion — Claude Code sessions from Telegram.")
     ap.add_argument("--serve", action="store_true",
                     help="poll Telegram forever; what launchd/bot.sh runs")
     ap.add_argument("--whoami", action="store_true",
                     help="print the chat ids that have messaged the bot")
+    ap.add_argument("--totp-setup", action="store_true",
+                    help="enrol Google Authenticator as a second factor (SPEC.md §12 slice 18)")
     a = ap.parse_args()
     try:
+        if a.totp_setup:
+            return totp_setup()
         if a.whoami:
             return whoami()
         if a.serve:
